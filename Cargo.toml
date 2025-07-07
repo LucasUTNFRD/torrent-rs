@@ -1,0 +1,9 @@
+[workspace]
+members = ["bencode", "bittorent_core"]
+resolver = "2"                          # Recommended for new workspaces
+
+[workspace.dependencies]
+sha1 = "0.10"
+thiserror = "2.0"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
