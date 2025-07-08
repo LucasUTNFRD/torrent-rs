@@ -109,11 +109,8 @@ pub struct FileInfo {
 
 impl TorrentInfo {
     /// Get the total size of all files in the torrent
-    pub fn total_size(&self) -> i64 {
-        match &self.info.mode {
-            FileMode::SingleFile { length, .. } => *length,
-            FileMode::MultiFile { files, .. } => files.iter().map(|f| f.length).sum(),
-        }
+    pub fn total_size(&self) -> u64 {
+        self.info.mode.length() as u64
     }
 
     /// Get the number of pieces in the torrent
