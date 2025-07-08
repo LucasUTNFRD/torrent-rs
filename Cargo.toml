@@ -1,6 +1,6 @@
 [workspace]
-members = ["bencode", "bittorent_core"]
-resolver = "2"                          # Recommended for new workspaces
+members = ["bittorent_core"]
+resolver = "2"               # Recommended for new workspaces
 
 [workspace.dependencies]
 sha1 = "0.10"
