@@ -2,9 +2,8 @@ use std::{collections::BTreeMap, fs::File, io::Read, path::PathBuf};
 
 use sha1::{Digest, Sha1};
 
-use crate::torrent::bencode::Bencode;
-
 use super::bencode::{BencodeError, Encode};
+use crate::{torrent::bencode::Bencode, types::InfoHash};
 
 /// Main metainfo structure representing a .torrent file
 #[derive(Debug, Clone)]
@@ -26,7 +25,7 @@ pub struct TorrentInfo {
 
     pub encoding: Option<String>,
 
-    pub info_hash: [u8; 20],
+    pub info_hash: InfoHash,
 }
 
 /// Info dictionary containing torrent file information
@@ -228,9 +227,6 @@ fn parse_torrent_from_bencode(bencode: &Bencode) -> Result<TorrentInfo, TorrentP
     let info_bencode = dict
         .get(KEY_INFO)
         .ok_or_else(|| TorrentParseError::MissingField("info".to_string()))?;
-
-    // Calculate info hash
-    // let info_hash = calculate_info_hash(raw_data)?;
 
     // Parse info dictionary
     let info = parse_info_dict(info_bencode)?;
@@ -442,12 +438,11 @@ fn parse_announce_list(
 
 fn calculate_info_hash(info: &Info) -> Result<[u8; 20], TorrentParseError> {
     let bencoded_info = Bencode::encode(info);
-    dbg!(&bencoded_info);
 
     let hash_generic_array = Sha1::digest(&bencoded_info);
-
     let hash_array: [u8; 20] = hash_generic_array.into();
-    Ok(hash_array) // Use the From<[u8; 20]> impl
+
+    Ok(hash_array)
 }
 
 impl Encode for Info {

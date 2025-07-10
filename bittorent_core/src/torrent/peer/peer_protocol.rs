@@ -2,7 +2,10 @@ use std::io::{self};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio_util::codec::{Decoder, Encoder};
-use tracing::info;
+
+use crate::types::{InfoHash, PeerID};
+
+// TODO: Implement Extended Handshake Message code/decode
 
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
 pub struct BlockInfo {
@@ -18,6 +21,12 @@ pub struct Block {
     pub data: Bytes,
 }
 
+// #[derive(Debug)]
+// pub struct BitField {
+//     inner: Box<[u8]>,
+//     total_pieces: usize,
+// }
+
 #[derive(Debug)]
 pub enum Message {
     KeepAlive,
@@ -30,12 +39,14 @@ pub enum Message {
     Request(BlockInfo),
     Piece(Block),
     Cancel(BlockInfo),
+    // ExtendedHandshake,
 }
 
 #[derive(Debug)]
 pub struct Handshake {
-    pub peer_id: [u8; 20],
-    pub info_hash: [u8; 20],
+    pub peer_id: PeerID,
+    pub info_hash: InfoHash,
+    pub reserved: [u8; 8],
 }
 
 // handshake: <pstrlen><pstr><reserved><info_hash><peer_id>
@@ -50,30 +61,48 @@ impl Handshake {
     const PSTR: &[u8; 19] = b"BitTorrent protocol";
 
     pub const HANDSHAKE_LEN: usize = 68;
+    pub const EXTENSION_PROTOCOL_FLAG: u8 = 0x10; // bit 43 (5th bit of 6th byte)
 
     pub fn new(peer_id: [u8; 20], info_hash: [u8; 20]) -> Self {
-        Handshake { peer_id, info_hash }
+        let mut reserved = [0u8; 8];
+        // Enable extension protocol support
+        reserved[5] |= Self::EXTENSION_PROTOCOL_FLAG;
+        Handshake {
+            peer_id,
+            info_hash,
+            reserved,
+        }
+    }
+
+    /// The bit selected for the extension protocol is bit 20 from the right (counting starts at 0). So (reserved_byte[5] & 0x10) is the expression to use for checking if the client supports extended messaging.
+    pub fn support_extended_message(&self) -> bool {
+        self.reserved[5] & Self::EXTENSION_PROTOCOL_FLAG != 0
     }
 
     pub fn to_bytes(&self) -> Bytes {
         let mut bytes = BytesMut::with_capacity(Self::HANDSHAKE_LEN);
         bytes.put_u8(Self::PSTRLEN);
         bytes.put_slice(Self::PSTR);
-        bytes.put_slice(&[0; 8]);
+        bytes.put_slice(&self.reserved);
         bytes.put_slice(&self.info_hash);
         bytes.put_slice(&self.peer_id);
         bytes.freeze()
     }
 
     pub fn from_bytes(src: &[u8]) -> Option<Self> {
-        info!("Received handshake bytes: {:?}", src);
         if src.len() != Self::HANDSHAKE_LEN || src[0] != Self::PSTRLEN || &src[1..20] != Self::PSTR
         {
             return None;
         }
+        let reserved: [u8; 8] = src.get(20..28)?.try_into().ok()?;
         let info_hash: [u8; 20] = src.get(28..48)?.try_into().ok()?;
         let peer_id: [u8; 20] = src.get(48..68)?.try_into().ok()?;
-        Some(Handshake { peer_id, info_hash })
+
+        Some(Handshake {
+            reserved,
+            peer_id,
+            info_hash,
+        })
     }
 }
 
@@ -87,6 +116,7 @@ enum MessageId {
     Request = 6,
     Piece = 7,
     Cancel = 8,
+    ExtendedHandshake = 20,
 }
 
 impl From<u8> for MessageId {
@@ -101,6 +131,7 @@ impl From<u8> for MessageId {
             k if k == MessageId::Request as u8 => MessageId::Request,
             k if k == MessageId::Piece as u8 => MessageId::Piece,
             k if k == MessageId::Cancel as u8 => Self::Cancel,
+            k if k == MessageId::ExtendedHandshake as u8 => Self::ExtendedHandshake,
             _ => unreachable!(),
         }
     }
@@ -181,6 +212,9 @@ impl Decoder for MessageDecoder {
                     begin,
                     length,
                 })
+            }
+            MessageId::ExtendedHandshake => {
+                todo!("Parse extended handshake")
             }
         };
 
