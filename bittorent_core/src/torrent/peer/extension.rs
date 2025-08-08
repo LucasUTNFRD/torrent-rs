@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use bytes::Bytes;
 
-/// (docs)[https://www.libtorrent.org/extension_protocol.html]
+/// [docs](https://www.libtorrent.org/extension_protocol.html)
 pub struct ExtendedHandshake {
     /// Dictionary of supported extension messages which maps names of
     /// extensions to an extended message ID
