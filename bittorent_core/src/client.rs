@@ -21,7 +21,7 @@ pub struct BittorentClient {
 }
 
 impl BittorentClient {
-    #![allow(clippy::new_without_default)]
+    #[allow(clippy::new_without_default)]
     pub fn new(/*load some user config*/) -> Self {
         let peer_id = generate_peer_id();
         Self {
