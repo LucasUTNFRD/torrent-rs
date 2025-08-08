@@ -1,5 +1,5 @@
 # TODO
-- [x] Implemenet peer wire protocol
+- [x] Implement peer wire protocol
 - [x] Implement Metainfo parsing
 - [ ] Implement Tracker communication
 - [ ] Implement Piece Cache
