@@ -63,7 +63,7 @@ impl Handshake {
     pub const HANDSHAKE_LEN: usize = 68;
     pub const EXTENSION_PROTOCOL_FLAG: u8 = 0x10; // bit 43 (5th bit of 6th byte)
 
-    pub fn new(peer_id: [u8; 20], info_hash: [u8; 20]) -> Self {
+    pub fn new(peer_id: PeerID, info_hash: InfoHash) -> Self {
         let mut reserved = [0u8; 8];
         // Enable extension protocol support
         reserved[5] |= Self::EXTENSION_PROTOCOL_FLAG;
@@ -84,8 +84,8 @@ impl Handshake {
         bytes.put_u8(Self::PSTRLEN);
         bytes.put_slice(Self::PSTR);
         bytes.put_slice(&self.reserved);
-        bytes.put_slice(&self.info_hash);
-        bytes.put_slice(&self.peer_id);
+        bytes.put_slice(self.info_hash.as_bytes());
+        bytes.put_slice(self.peer_id.as_bytes());
         bytes.freeze()
     }
 
@@ -100,8 +100,8 @@ impl Handshake {
 
         Some(Handshake {
             reserved,
-            peer_id,
-            info_hash,
+            peer_id: peer_id.into(),
+            info_hash: info_hash.into(),
         })
     }
 }

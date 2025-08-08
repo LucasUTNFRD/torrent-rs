@@ -1,3 +1,3 @@
-mod bencode;
+pub mod bencode;
 pub mod metainfo;
-mod peer;
+pub mod peer;

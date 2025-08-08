@@ -247,7 +247,7 @@ fn parse_torrent_from_bencode(bencode: &Bencode) -> Result<TorrentInfo, TorrentP
         comment,
         created_by,
         encoding,
-        info_hash,
+        info_hash: info_hash.into(),
     })
 }
 
