@@ -67,12 +67,12 @@ impl From<&Events> for u32 {
 }
 
 impl Events {
-    pub fn as_str(&self) -> Option<&'static str> {
+    pub fn to_string(&self) -> Option<String> {
         match self {
             Events::None => None,
-            Events::Started => Some("started"),
-            Events::Stopped => Some("stopped"),
-            Events::Completed => Some("completed"),
+            Events::Started => Some("started".to_string()),
+            Events::Stopped => Some("stopped".to_string()),
+            Events::Completed => Some("completed".to_string()),
         }
     }
 }

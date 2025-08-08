@@ -54,8 +54,8 @@ impl HttpTrackerClient {
         ];
 
         // Add event parameter if not None
-        if let Some(event_str) = params.event.as_str() {
-            query_pairs.push(("event", event_str.to_string().into_bytes()));
+        if let Some(event_str) = params.event.to_string() {
+            query_pairs.push(("event", event_str.into_bytes()));
         }
 
         // Build the query string manually
