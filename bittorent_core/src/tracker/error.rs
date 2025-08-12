@@ -28,6 +28,6 @@ pub enum TrackerError {
     InvalidString,
     #[error("Invalid Url {0}")]
     InvalidUrl(String),
-    #[error("Packes it too short")]
+    #[error("Packet is too short")]
     TooShort,
 }
