@@ -32,7 +32,6 @@ impl BittorentClient {
     }
 
     pub fn start(&self) {
-        // Each torrent get its own tracker supervisor but SHARES the tracker manager
         let tracker_manager = TrackerHandler::new(self.peer_id);
     }
 }

@@ -26,4 +26,6 @@ pub enum TrackerError {
     BencodeError(BencodeError),
     #[error("Invalid string")]
     InvalidString,
+    #[error("Invalid Url {0}")]
+    InvalidUrl(String),
 }

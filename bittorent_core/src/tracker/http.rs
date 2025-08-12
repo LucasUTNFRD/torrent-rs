@@ -1,41 +1,42 @@
-use std::net::SocketAddr;
+use std::{collections::BTreeMap, net::SocketAddr, time::Duration};
 
-use reqwest::Client;
-use url::Url;
+use crate::torrent::bencode::Bencode;
 
-use crate::{
-    torrent::bencode::Bencode,
-    types::{InfoHash, PeerID},
-};
+use super::{TrackerClient, TrackerResponse, error::TrackerError};
 
-use super::{Events, TrackerResponse, error::TrackerError};
-
+#[derive(Clone)]
 pub struct HttpTrackerClient {
-    announce_url: String,
-    client: Client,
+    client: reqwest::Client,
 }
 
-#[derive(Debug, Clone)]
-pub struct AnnounceParams {
-    pub info_hash: InfoHash,
-    pub peer_id: PeerID,
-    pub port: u16,
-    pub uploaded: u64,
-    pub downloaded: u64,
-    pub left: u64,
-    pub event: Events,
-    pub compact: bool,
+#[async_trait::async_trait]
+impl TrackerClient for HttpTrackerClient {
+    async fn announce(
+        &self,
+        params: &super::AnnounceParams,
+        tracker_url: url::Url,
+    ) -> Result<TrackerResponse, TrackerError> {
+        // self.announce(params, url).await
+        todo!()
+    }
 }
 
 impl HttpTrackerClient {
-    pub fn new(announce_url: &str, client: &Client) -> Result<Self, TrackerError> {
+    pub fn new() -> Result<Self, TrackerError> {
         Ok(Self {
-            announce_url: announce_url.to_string(),
-            client: client.clone(),
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(15))
+                .build()
+                .expect("Failed to create HTTP client"),
         })
     }
-    pub async fn announce(&self, params: &AnnounceParams) -> Result<TrackerResponse, TrackerError> {
-        let mut url = Url::parse(&self.announce_url)?;
+
+    pub async fn announce(
+        &self,
+        params: &super::AnnounceParams,
+        tracker: url::Url,
+    ) -> Result<TrackerResponse, TrackerError> {
+        let mut url = tracker;
 
         // Prepare query parameters as byte vectors
         let mut query_pairs = vec![
@@ -45,12 +46,7 @@ impl HttpTrackerClient {
             ("uploaded", params.uploaded.to_string().into_bytes()),
             ("downloaded", params.downloaded.to_string().into_bytes()),
             ("left", params.left.to_string().into_bytes()),
-            (
-                "compact",
-                if params.compact { "1" } else { "0" }
-                    .to_string()
-                    .into_bytes(),
-            ),
+            ("compact", "1".to_string().into_bytes()),
         ];
 
         // Add event parameter if not None
@@ -141,9 +137,7 @@ impl HttpTrackerClient {
     }
 }
 
-fn parse_peers(
-    dict: &std::collections::BTreeMap<Vec<u8>, Bencode>,
-) -> Result<Vec<SocketAddr>, TrackerError> {
+fn parse_peers(dict: &BTreeMap<Vec<u8>, Bencode>) -> Result<Vec<SocketAddr>, TrackerError> {
     match dict.get(KEY_PEERS) {
         Some(Bencode::Bytes(bytes)) => {
             if bytes.len() % 6 != 0 {
@@ -194,7 +188,7 @@ fn parse_peers(
 }
 
 fn get_string_from_dict(
-    dict: &std::collections::BTreeMap<Vec<u8>, Bencode>,
+    dict: &BTreeMap<Vec<u8>, Bencode>,
     key: &[u8],
 ) -> Result<String, TrackerError> {
     let bytes = get_bytes_from_dict(dict, key)?;
@@ -204,10 +198,7 @@ fn get_string_from_dict(
         .map_err(|_| TrackerError::InvalidString) // TODO:: Improve this
 }
 
-fn get_optional_string_from_dict(
-    dict: &std::collections::BTreeMap<Vec<u8>, Bencode>,
-    key: &[u8],
-) -> Option<String> {
+fn get_optional_string_from_dict(dict: &BTreeMap<Vec<u8>, Bencode>, key: &[u8]) -> Option<String> {
     dict.get(key).and_then(|bencode| match bencode {
         Bencode::Bytes(bytes) => std::str::from_utf8(bytes).ok().map(|s| s.to_string()),
         _ => None,
@@ -215,7 +206,7 @@ fn get_optional_string_from_dict(
 }
 
 fn get_bytes_from_dict(
-    dict: &std::collections::BTreeMap<Vec<u8>, Bencode>,
+    dict: &BTreeMap<Vec<u8>, Bencode>,
     key: &[u8],
 ) -> Result<Vec<u8>, TrackerError> {
     match dict.get(key) {
@@ -225,10 +216,7 @@ fn get_bytes_from_dict(
     }
 }
 
-fn get_int_from_dict(
-    dict: &std::collections::BTreeMap<Vec<u8>, Bencode>,
-    key: &[u8],
-) -> Result<i64, TrackerError> {
+fn get_int_from_dict(dict: &BTreeMap<Vec<u8>, Bencode>, key: &[u8]) -> Result<i64, TrackerError> {
     match dict.get(key) {
         Some(Bencode::Int(value)) => Ok(*value),
         Some(_) => panic!(),
@@ -236,10 +224,7 @@ fn get_int_from_dict(
     }
 }
 
-fn get_optional_int_from_dict(
-    dict: &std::collections::BTreeMap<Vec<u8>, Bencode>,
-    key: &[u8],
-) -> Option<i64> {
+fn get_optional_int_from_dict(dict: &BTreeMap<Vec<u8>, Bencode>, key: &[u8]) -> Option<i64> {
     dict.get(key).and_then(|bencode| match bencode {
         Bencode::Int(value) => Some(*value),
         _ => None,
