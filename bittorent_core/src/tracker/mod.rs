@@ -29,9 +29,9 @@ pub struct AnnounceParams {
     pub info_hash: InfoHash,
     pub peer_id: PeerID,
     pub port: u16,
-    pub uploaded: u64,
-    pub downloaded: u64,
-    pub left: u64,
+    pub uploaded: i64,
+    pub downloaded: i64,
+    pub left: i64,
     pub event: Events,
     // pub compact: bool,
 }
@@ -55,7 +55,7 @@ impl From<&Actions> for i32 {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub enum Events {
     None,
     Completed,

@@ -1,17 +1,17 @@
 use std::{
     collections::HashMap,
-    io::Cursor,
     net::{Ipv4Addr, SocketAddr},
-    sync::{Arc, Mutex, RwLock},
+    sync::{Arc, RwLock},
     time::{Duration, Instant},
-    u8,
 };
 
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::{Bytes, BytesMut};
 use rand::Rng;
-use tokio::{net::UdpSocket, sync::oneshot};
+use tokio::{net::UdpSocket, sync::oneshot, time::timeout};
 use url::Url;
 
+const MAX_RETRIES: usize = 8;
+const CONNECTION_ID_EXIPIRATION: Duration = Duration::from_secs(60);
 use crate::types::{InfoHash, PeerID};
 
 use super::{Actions, AnnounceParams, Events, TrackerClient, error::TrackerError};
@@ -23,14 +23,68 @@ pub enum TrackerState {
         instant: Instant,
         tx: oneshot::Sender<ConnectionResponse>,
     },
+    /// A client can use a connection ID until one minute after it has received it.
+    ConnectReceived {
+        connection_id: i64,
+        instant: Instant,
+    },
     AnnounceSent {
         txn_id: i32,
         connection_id: i64,
+        tx: oneshot::Sender<AnnounceResponse>,
     },
     AnnounceReceived {
         timestamp: i64,
         num_peers: i32,
     },
+}
+
+#[derive(Debug)]
+pub struct AnnounceResponse {
+    action: i32, // 1 for announce
+    transaction_id: i32,
+    interval: i32,
+    leechers: i32,
+    seeders: i32,
+    peers: Vec<SocketAddr>,
+}
+
+impl TryFrom<&[u8]> for AnnounceResponse {
+    type Error = TrackerError;
+    fn try_from(buf: &[u8]) -> Result<Self, Self::Error> {
+        if buf.len() < 20 {
+            return Err(TrackerError::TooShort);
+        }
+
+        let action = i32::from_be_bytes(buf[0..4].try_into().unwrap());
+        let transaction_id = i32::from_be_bytes(buf[4..8].try_into().unwrap());
+        let interval = i32::from_be_bytes(buf[8..12].try_into().unwrap());
+        let leechers = i32::from_be_bytes(buf[12..16].try_into().unwrap());
+        let seeders = i32::from_be_bytes(buf[16..20].try_into().unwrap());
+
+        let mut peers = Vec::new();
+        let mut offset = 20;
+        while offset + 6 <= buf.len() {
+            let ip = Ipv4Addr::new(
+                buf[offset],
+                buf[offset + 1],
+                buf[offset + 2],
+                buf[offset + 3],
+            );
+            let port = u16::from_be_bytes(buf[offset + 4..offset + 6].try_into().unwrap());
+            peers.push((ip, port).into());
+            offset += 6;
+        }
+
+        Ok(Self {
+            action,
+            transaction_id,
+            interval,
+            leechers,
+            seeders,
+            peers,
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -121,6 +175,24 @@ impl From<[u8; 16]> for ConnectionResponse {
     }
 }
 
+impl TryFrom<&[u8]> for ConnectionResponse {
+    type Error = TrackerError;
+    fn try_from(buf: &[u8]) -> Result<Self, Self::Error> {
+        if buf.len() < 16 {
+            return Err(TrackerError::TooShort);
+        }
+        let action_bytes: [u8; 4] = buf[0..4].try_into().unwrap();
+        let transaction_id_bytes: [u8; 4] = buf[4..8].try_into().unwrap();
+        let connection_id_bytes: [u8; 8] = buf[8..16].try_into().unwrap();
+
+        Ok(ConnectionResponse {
+            action: i32::from_be_bytes(action_bytes),
+            transaction_id: i32::from_be_bytes(transaction_id_bytes),
+            connection_id: i64::from_be_bytes(connection_id_bytes),
+        })
+    }
+}
+
 impl AnnounceRequest {
     pub fn to_bytes(&self) -> Bytes {
         let mut buff = BytesMut::with_capacity(98);
@@ -148,14 +220,65 @@ impl TrackerClient for UdpTrackerClient {
         params: &AnnounceParams,
         tracker_url: Url,
     ) -> Result<super::TrackerResponse, TrackerError> {
+        // this should be a method that resolves a url into a socket addrs
         let tracker = tracker_url
             .socket_addrs(|| None)
             .map_err(|_| TrackerError::InvalidUrl(tracker_url.to_string()))?
             .into_iter()
             .next()
             .ok_or_else(|| TrackerError::InvalidUrl(tracker_url.to_string()))?;
-        let conn_id = self.connect(tracker).await?;
-        todo!()
+
+        let connection_id = self.connect(tracker).await?;
+        for n in 0..=MAX_RETRIES {
+            let tx_id = rand::rng().random();
+            let announce_req = AnnounceRequest {
+                connection_id,
+                action: Actions::Announce,
+                tx_id,
+                info_hash: params.info_hash,
+                peer_id: params.peer_id,
+                downloaded: params.downloaded,
+                left: params.left,
+                uploaded: params.uploaded,
+                event: params.event,
+                ip_address: Ipv4Addr::from(0), // default
+                key: 0,                        // default
+                num_want: -1,                  // default
+                port: params.port,
+            };
+
+            let (tx, rx) = oneshot::channel();
+
+            {
+                self.socket
+                    .send_to(&announce_req.to_bytes(), tracker)
+                    .await?;
+                let mut guard = self.state.write().unwrap();
+                guard.insert(
+                    tracker,
+                    TrackerState::AnnounceSent {
+                        txn_id: tx_id,
+                        tx,
+                        connection_id: announce_req.connection_id,
+                    },
+                );
+            }
+
+            let wait_secs = 15 * (1 << n);
+            match timeout(Duration::from_secs(wait_secs), rx).await {
+                Ok(Ok(resp)) => {
+                    return Ok(super::TrackerResponse {
+                        peers: resp.peers,
+                        interval: resp.interval,
+                        leechers: resp.leechers,
+                        seeders: resp.leechers,
+                    });
+                }
+                Ok(Err(_)) => tracing::error!("Oneshot channel closed unexpectedly"),
+                Err(_) => tracing::warn!("Connect request timed out (attempt {})", n + 1),
+            }
+        }
+        Err(TrackerError::Timeout)
     }
 }
 
@@ -187,40 +310,68 @@ impl UdpTrackerClient {
         loop {
             match socket.recv_from(&mut buf).await {
                 Ok((len, addr)) => {
-                    let guard = state.write().unwrap();
-                    if let Some(state) = guard.get(&addr) {
+                    let mut guard = state.write().unwrap();
+                    if let Some(state) = guard.remove(&addr) {
+                        // we need ownership
+                        // of state
                         match state {
                             TrackerState::ConnectSent {
                                 txd_id,
                                 instant,
                                 tx,
                             } => {
-                                //Check whether the transaction ID is equal to the one you chose.
-                                //Check whether the action is connect.
-                                //Store the connection ID for future use.
-                                if len == 16 {
-                                    let packet: [u8; 16] = buf[..len].try_into().unwrap();
-                                    let conn_resp = ConnectionResponse::from(packet);
-
+                                if let Ok(conn_resp) = ConnectionResponse::try_from(&buf[..len]) {
+                                    //Check whether the transaction ID is equal to the one you chose.
+                                    //     //Check whether the action is connect.
                                     if conn_resp.transaction_id == txd_id
                                         && conn_resp.action == Actions::Connect as i32
                                     {
+                                        // Switch state to ConnectionReceived
+                                        guard.insert(
+                                            addr,
+                                            TrackerState::ConnectReceived {
+                                                connection_id: conn_resp.connection_id,
+                                                instant: Instant::now(),
+                                            },
+                                        );
                                         let _ = tx.send(conn_resp);
                                     }
-
-                                    buf.clear();
                                 } else {
+                                    guard.insert(
+                                        addr,
+                                        TrackerState::ConnectSent {
+                                            txd_id,
+                                            instant,
+                                            tx,
+                                        },
+                                    );
                                     tracing::error!("payload should be at least 16 bytes")
                                 }
                             }
                             TrackerState::AnnounceSent {
                                 txn_id,
                                 connection_id,
-                            } => todo!(),
-                            TrackerState::AnnounceReceived {
-                                timestamp,
-                                num_peers,
-                            } => todo!(),
+                                tx,
+                            } => {
+                                if let Ok(announce_resp) = AnnounceResponse::try_from(&buf[..len]) {
+                                    if announce_resp.transaction_id == txn_id
+                                        && announce_resp.action == Actions::Announce as i32
+                                    {
+                                        let _ = tx.send(announce_resp);
+                                    }
+                                } else {
+                                    // Mantain state
+                                    guard.insert(
+                                        addr,
+                                        TrackerState::AnnounceSent {
+                                            txn_id,
+                                            connection_id,
+                                            tx,
+                                        },
+                                    );
+                                }
+                            }
+                            _ => panic!("invalid state"),
                         }
                     }
                 }
@@ -231,30 +382,53 @@ impl UdpTrackerClient {
         }
     }
 
-    async fn connect(&self, tracker: SocketAddr) -> Result<(), TrackerError> {
-        let connect_req = ConnectionRequest::new();
+    fn is_expired(instant: Instant) -> bool {
+        Instant::now() - instant >= CONNECTION_ID_EXIPIRATION
+    }
 
-        self.socket
-            .send_to(&connect_req.to_bytes(), tracker)
-            .await?;
-
-        let (response_tx, response_rx) = oneshot::channel();
-
+    async fn connect(&self, tracker: SocketAddr) -> Result<i64, TrackerError> {
+        // Check if we are already connected to this peer
         {
-            // Set state to connect sent
-            let mut guard = self.state.write().unwrap();
-            guard.insert(
-                tracker,
-                TrackerState::ConnectSent {
-                    txd_id: connect_req.transaction_id,
-                    instant: Instant::now(),
-                    tx: response_tx,
-                },
-            );
+            let guard = self.state.read().unwrap();
+            if let Some(TrackerState::ConnectReceived {
+                connection_id,
+                instant,
+            }) = guard.get(&tracker)
+            {
+                if !Self::is_expired(*instant) {
+                    return Ok(*connection_id);
+                }
+            }
+        }
+        for n in 0..=MAX_RETRIES {
+            let connect_req = ConnectionRequest::new();
+            self.socket
+                .send_to(&connect_req.to_bytes(), tracker)
+                .await?;
+
+            let (response_tx, response_rx) = oneshot::channel();
+
+            {
+                // Set state to ConnectSent
+                let mut guard = self.state.write().unwrap();
+                guard.insert(
+                    tracker,
+                    TrackerState::ConnectSent {
+                        txd_id: connect_req.transaction_id,
+                        instant: Instant::now(),
+                        tx: response_tx,
+                    },
+                );
+            }
+
+            let wait_secs = 15 * (1 << n);
+            match timeout(Duration::from_secs(wait_secs), response_rx).await {
+                Ok(Ok(conn_resp)) => return Ok(conn_resp.connection_id),
+                Ok(Err(_)) => tracing::error!("Oneshot channel closed unexpectedly"),
+                Err(_) => tracing::warn!("Connect request timed out (attempt {})", n + 1),
+            }
         }
 
-        // time out response_rx
-
-        todo!()
+        Err(TrackerError::Timeout)
     }
 }
