@@ -110,7 +110,7 @@ impl HttpTrackerClient {
         // Extract interval
         const DEFAULT_ANNOUNCE_INTERVAL: i64 = 20;
         let interval = get_optional_int_from_dict(&dict, b"interval")
-            .unwrap_or(DEFAULT_ANNOUNCE_INTERVAL) as u32;
+            .unwrap_or(DEFAULT_ANNOUNCE_INTERVAL) as i32;
 
         // Extract min interval (optional)
         let min_interval = get_optional_string_from_dict(&dict, KEY_MIN_INTERVAL);

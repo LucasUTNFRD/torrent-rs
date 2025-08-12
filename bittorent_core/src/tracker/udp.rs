@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    io::Cursor,
     net::{Ipv4Addr, SocketAddr},
     sync::{Arc, Mutex, RwLock},
     time::{Duration, Instant},
@@ -8,18 +9,28 @@ use std::{
 
 use bytes::{Buf, Bytes, BytesMut};
 use rand::Rng;
-use tokio::net::UdpSocket;
+use tokio::{net::UdpSocket, sync::oneshot};
 use url::Url;
 
 use crate::types::{InfoHash, PeerID};
 
 use super::{Actions, AnnounceParams, Events, TrackerClient, error::TrackerError};
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum TrackerState {
-    ConnectSent { txd_id: i32 },
-    AnnounceSent { txn_id: i32, connection_id: i64 },
-    AnnounceReceived { timestamp: i64, num_peers: i32 },
+    ConnectSent {
+        txd_id: i32,
+        instant: Instant,
+        tx: oneshot::Sender<ConnectionResponse>,
+    },
+    AnnounceSent {
+        txn_id: i32,
+        connection_id: i64,
+    },
+    AnnounceReceived {
+        timestamp: i64,
+        num_peers: i32,
+    },
 }
 
 #[derive(Clone)]
@@ -47,14 +58,14 @@ const PROTOCOL_ID: u64 = 0x41727101980;
 // 98
 #[derive(Debug)]
 pub struct AnnounceRequest {
-    pub connection_id: u64,
+    pub connection_id: i64,
     pub action: Actions,
-    pub tx_id: u32,
+    pub tx_id: i32,
     pub info_hash: InfoHash,
     pub peer_id: PeerID,
-    pub downloaded: u64,
-    pub left: u64,
-    pub uploaded: u64,
+    pub downloaded: i64,
+    pub left: i64,
+    pub uploaded: i64,
     pub event: Events,        // 0: none, 1: completed, 2: started, 3: stopped
     pub ip_address: Ipv4Addr, // 0 for default
     pub key: u32,
@@ -69,14 +80,14 @@ pub struct AnnounceRequest {
 // 16
 #[derive(Debug)]
 pub struct ConnectionRequest {
-    pub action: u32,
+    pub action: i32,
     pub transaction_id: i32,
 }
 
 impl ConnectionRequest {
     pub fn new() -> Self {
         Self {
-            action: Actions::Connect as u32,
+            action: Actions::Connect as i32,
             transaction_id: rand::rng().random(),
         }
     }
@@ -89,18 +100,39 @@ impl ConnectionRequest {
     }
 }
 
+#[derive(Debug)]
+pub struct ConnectionResponse {
+    pub action: i32,
+    pub transaction_id: i32,
+    pub connection_id: i64,
+}
+
+impl From<[u8; 16]> for ConnectionResponse {
+    fn from(buf: [u8; 16]) -> Self {
+        let action_bytes: [u8; 4] = buf[0..4].try_into().unwrap();
+        let transaction_id_bytes: [u8; 4] = buf[4..8].try_into().unwrap();
+        let connection_id_bytes: [u8; 8] = buf[8..16].try_into().unwrap();
+
+        ConnectionResponse {
+            action: i32::from_be_bytes(action_bytes),
+            transaction_id: i32::from_be_bytes(transaction_id_bytes),
+            connection_id: i64::from_be_bytes(connection_id_bytes),
+        }
+    }
+}
+
 impl AnnounceRequest {
     pub fn to_bytes(&self) -> Bytes {
         let mut buff = BytesMut::with_capacity(98);
         buff.extend_from_slice(&self.connection_id.to_be_bytes());
-        buff.extend_from_slice(&u32::from(&self.action).to_be_bytes());
+        buff.extend_from_slice(&i32::from(&self.action).to_be_bytes());
         buff.extend_from_slice(&self.tx_id.to_be_bytes());
         buff.extend_from_slice(self.info_hash.as_slice());
         buff.extend_from_slice(self.peer_id.as_slice());
         buff.extend_from_slice(&self.downloaded.to_be_bytes());
         buff.extend_from_slice(&self.left.to_be_bytes());
         buff.extend_from_slice(&self.uploaded.to_be_bytes());
-        buff.extend_from_slice(&u32::from(&self.event).to_be_bytes());
+        buff.extend_from_slice(&i32::from(&self.event).to_be_bytes());
         buff.extend_from_slice(&self.ip_address.to_bits().to_be_bytes());
         buff.extend_from_slice(&self.key.to_be_bytes());
         buff.extend_from_slice(&self.num_want.to_be_bytes());
@@ -155,7 +187,42 @@ impl UdpTrackerClient {
         loop {
             match socket.recv_from(&mut buf).await {
                 Ok((len, addr)) => {
-                    Self::process_msg(&buf[..len], addr, state.clone()).await;
+                    let guard = state.write().unwrap();
+                    if let Some(state) = guard.get(&addr) {
+                        match state {
+                            TrackerState::ConnectSent {
+                                txd_id,
+                                instant,
+                                tx,
+                            } => {
+                                //Check whether the transaction ID is equal to the one you chose.
+                                //Check whether the action is connect.
+                                //Store the connection ID for future use.
+                                if len == 16 {
+                                    let packet: [u8; 16] = buf[..len].try_into().unwrap();
+                                    let conn_resp = ConnectionResponse::from(packet);
+
+                                    if conn_resp.transaction_id == txd_id
+                                        && conn_resp.action == Actions::Connect as i32
+                                    {
+                                        let _ = tx.send(conn_resp);
+                                    }
+
+                                    buf.clear();
+                                } else {
+                                    tracing::error!("payload should be at least 16 bytes")
+                                }
+                            }
+                            TrackerState::AnnounceSent {
+                                txn_id,
+                                connection_id,
+                            } => todo!(),
+                            TrackerState::AnnounceReceived {
+                                timestamp,
+                                num_peers,
+                            } => todo!(),
+                        }
+                    }
                 }
                 Err(e) => {
                     eprintln!("Error receiving UDP packet: {}", e);
@@ -164,26 +231,30 @@ impl UdpTrackerClient {
         }
     }
 
-    async fn process_msg(
-        buf: &[u8],
-        addr: SocketAddr,
-        state: Arc<RwLock<HashMap<SocketAddr, TrackerState>>>,
-    ) {
-        todo!()
-    }
-
     async fn connect(&self, tracker: SocketAddr) -> Result<(), TrackerError> {
         let connect_req = ConnectionRequest::new();
-        {
-            // Set state to connect sent
-            let mut guard = self.state.write().unwrap();
-            guard.entry(tracker).or_insert(TrackerState::ConnectSent {
-                txd_id: connect_req.transaction_id,
-            });
-        }
+
         self.socket
             .send_to(&connect_req.to_bytes(), tracker)
             .await?;
+
+        let (response_tx, response_rx) = oneshot::channel();
+
+        {
+            // Set state to connect sent
+            let mut guard = self.state.write().unwrap();
+            guard.insert(
+                tracker,
+                TrackerState::ConnectSent {
+                    txd_id: connect_req.transaction_id,
+                    instant: Instant::now(),
+                    tx: response_tx,
+                },
+            );
+        }
+
+        // time out response_rx
+
         todo!()
     }
 }

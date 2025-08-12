@@ -19,9 +19,9 @@ use url::Url;
 #[derive(Debug)]
 pub struct TrackerResponse {
     pub peers: Vec<SocketAddr>,
-    pub interval: u32,
-    pub leechers: u32,
-    pub seeders: u32,
+    pub interval: i32,
+    pub leechers: i32,
+    pub seeders: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -44,7 +44,7 @@ pub enum Actions {
     Error,
 }
 
-impl From<&Actions> for u32 {
+impl From<&Actions> for i32 {
     fn from(action: &Actions) -> Self {
         match action {
             Actions::Connect => 0,
@@ -63,7 +63,7 @@ pub enum Events {
     Stopped,
 }
 
-impl From<&Events> for u32 {
+impl From<&Events> for i32 {
     fn from(events: &Events) -> Self {
         match events {
             Events::None => 0,
