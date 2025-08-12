@@ -11,7 +11,7 @@ use tokio::{net::UdpSocket, sync::oneshot, time::timeout};
 use url::Url;
 
 const MAX_RETRIES: usize = 8;
-const CONNECTION_ID_EXIPIRATION: Duration = Duration::from_secs(60);
+const CONNECTION_ID_EXPIRATION: Duration = Duration::from_secs(60);
 use crate::types::{InfoHash, PeerID};
 
 use super::{Actions, AnnounceParams, Events, TrackerClient, error::TrackerError};
