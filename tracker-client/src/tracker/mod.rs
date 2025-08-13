@@ -1,14 +1,13 @@
 use std::{net::SocketAddr, sync::Arc};
 
+use bittorent_core::{
+    torrent::metainfo::TorrentInfo,
+    types::{InfoHash, PeerID},
+};
 use error::TrackerError;
 use http::HttpTrackerClient;
 use tokio::sync::{mpsc, oneshot};
 use udp::UdpTrackerClient;
-
-use crate::{
-    torrent::metainfo::TorrentInfo,
-    // types::{InfoHash, PeerID},
-};
 
 pub mod error;
 mod http;
@@ -206,6 +205,33 @@ impl TrackerManager {
     }
 }
 
+#[derive(Debug, Copy, Clone)]
+pub struct ClientState {
+    downloaded: i64,
+    left: i64,
+    uploaded: i64,
+    event: Events,
+}
+
+impl ClientState {
+    pub fn new(
+        bytes_downloaded: i64,
+        bytes_left: i64,
+        bytes_uploaded: i64,
+        event: Events,
+    ) -> ClientState {
+        ClientState {
+            downloaded: bytes_downloaded,
+            left: bytes_left,
+            uploaded: bytes_uploaded,
+            event,
+        }
+    }
+}
+
+// the idea is to use client state to avoid sharing a reference to torrent info, and only send
+// client state + tracker url + response_tx to
+
 pub enum TrackerMessage {
     Announce {
         torrent: Arc<TorrentInfo>,
@@ -243,16 +269,12 @@ impl TrackerHandler {
 mod test {
     use std::sync::Arc;
 
+    use bittorent_core::{client::PORT, torrent::metainfo::parse_torrent_from_file, types::PeerID};
     use futures::future::join_all;
     use rand::Rng;
 
-    use crate::{
-        client::PORT,
-        torrent::metainfo::parse_torrent_from_file,
-        tracker::{
-            AnnounceParams, Events, TrackerClient, http::HttpTrackerClient, udp::UdpTrackerClient,
-        },
-        types::PeerID,
+    use crate::tracker::{
+        AnnounceParams, Events, TrackerClient, http::HttpTrackerClient, udp::UdpTrackerClient,
     };
 
     fn generate_peer_id() -> PeerID {
@@ -300,26 +322,7 @@ mod test {
 
         // safety: This is alredy checked above
         let r = result.unwrap();
-
-        // // Test full TrackerManager flow
-        // let (tx, rx) = mpsc::channel(100);
-        // let manager = TrackerManager::new(rx, peer_id);
-        // tokio::spawn(manager.run());
-        //
-        // let (response_tx, response_rx) = oneshot::channel();
-        // tx.send(TrackerMessage::Announce {
-        //     torrent: torrent.clone(),
-        //     response_tx,
-        // })
-        // .await
-        // .unwrap();
-        //
-        // let response = response_rx.await.unwrap();
-        // assert!(
-        //     response.is_ok(),
-        //     "TrackerManager announce failed: {:?}",
-        //     response.err()
-        // );
+        println!("result {r:?}");
     }
 
     #[tokio::test]

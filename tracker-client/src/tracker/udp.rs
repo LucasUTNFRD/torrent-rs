@@ -5,6 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use bittorent_core::types::{InfoHash, PeerID};
 use bytes::{Bytes, BytesMut};
 use rand::Rng;
 use tokio::{net::UdpSocket, sync::oneshot, time::timeout};
@@ -12,7 +13,6 @@ use url::Url;
 
 const MAX_RETRIES: usize = 8;
 const CONNECTION_ID_EXPIRATION: Duration = Duration::from_secs(60);
-// use crate::types::{InfoHash, PeerID};
 
 use super::{Actions, AnnounceParams, Events, TrackerClient, error::TrackerError};
 
