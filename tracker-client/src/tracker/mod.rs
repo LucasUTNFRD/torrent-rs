@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use bittorent_core::{
     torrent::metainfo::TorrentInfo,
@@ -6,7 +6,10 @@ use bittorent_core::{
 };
 use error::TrackerError;
 use http::HttpTrackerClient;
-use tokio::sync::{mpsc, oneshot};
+use tokio::{
+    sync::{mpsc, oneshot},
+    time::timeout,
+};
 use udp::UdpTrackerClient;
 
 pub mod error;
@@ -118,7 +121,11 @@ impl Clients {
 
         Self { udp, http }
     }
-    pub fn get_client(&self, scheme: &str) -> Result<Arc<dyn TrackerClient>, TrackerError> {
+
+    pub fn select_client_for_scheme(
+        &self,
+        scheme: &str,
+    ) -> Result<Arc<dyn TrackerClient>, TrackerError> {
         match scheme {
             "udp" => Ok(self.udp.clone()),
             "http" | "https" => Ok(self.http.clone()),
@@ -200,8 +207,13 @@ impl TrackerManager {
             // compact: true,
         };
 
-        let client = clients.get_client(url.scheme()).unwrap();
-        client.announce(&params, url).await
+        let client = clients.select_client_for_scheme(url.scheme()).unwrap();
+
+        // client.announce(&params, url).await
+        match timeout(Duration::from_secs(10), client.announce(&params, url)).await {
+            Ok(res) => res,                       // result from announce
+            Err(_) => Err(TrackerError::Timeout), // you'd need to add this variant
+        }
     }
 }
 
@@ -272,9 +284,11 @@ mod test {
     use bittorent_core::{client::PORT, torrent::metainfo::parse_torrent_from_file, types::PeerID};
     use futures::future::join_all;
     use rand::Rng;
+    use tokio::sync::oneshot;
 
     use crate::tracker::{
-        AnnounceParams, Events, TrackerClient, http::HttpTrackerClient, udp::UdpTrackerClient,
+        AnnounceParams, Events, TrackerClient, TrackerHandler, TrackerMessage,
+        http::HttpTrackerClient, udp::UdpTrackerClient,
     };
 
     fn generate_peer_id() -> PeerID {
@@ -292,6 +306,7 @@ mod test {
 
         let torrent = parse_torrent_from_file(file).expect("Failed to parse torrent");
         dbg!(hex::encode(torrent.info_hash));
+        dbg!(torrent.info_hash);
         let torrent = Arc::new(torrent);
         let peer_id = generate_peer_id();
 
@@ -323,6 +338,65 @@ mod test {
         // safety: This is alredy checked above
         let r = result.unwrap();
         println!("result {r:?}");
+    }
+
+    #[tokio::test]
+    async fn test_two_torrents_announcing_via_same_handler() {
+        // Parse two real torrents (with working trackers)
+        let file1 = "../sample_torrents/big-buck-bunny.torrent";
+        let file2 = "../sample_torrents/debian-12.10.0-amd64-netinst.iso.torrent";
+
+        let torrent1 = parse_torrent_from_file(file1).expect("Failed to parse torrent1");
+        let torrent2 = parse_torrent_from_file(file2).expect("Failed to parse torrent2");
+        let torrent1 = Arc::new(torrent1);
+        let torrent2 = Arc::new(torrent2);
+
+        let client_id = generate_peer_id();
+
+        let tracker_handler = TrackerHandler::new(client_id);
+
+        let (tx1, rx1) = oneshot::channel();
+        let (tx2, rx2) = oneshot::channel();
+
+        // Send announce message for torrent1
+        tracker_handler
+            .tracker_tx
+            .send(TrackerMessage::Announce {
+                torrent: torrent1.clone(),
+                response_tx: tx1,
+            })
+            .await
+            .expect("failed to send announce for torrent1");
+
+        // Send announce message for torrent2
+        tracker_handler
+            .tracker_tx
+            .send(TrackerMessage::Announce {
+                torrent: torrent2.clone(),
+                response_tx: tx2,
+            })
+            .await
+            .expect("failed to send announce for torrent2");
+
+        // Await both responses
+        let (res1, res2) = tokio::join!(rx1, rx2);
+
+        let res1 = res1.expect("announce1 channel dropped");
+        let res2 = res2.expect("announce2 channel dropped");
+
+        // Assert both succeeded
+        assert!(res1.is_ok(), "torrent1 announce failed: {:?}", res1.err());
+        assert!(res2.is_ok(), "torrent2 announce failed: {:?}", res2.err());
+
+        // Assert both have peers
+        let peers1 = res1.unwrap().peers;
+        let peers2 = res2.unwrap().peers;
+
+        assert!(!peers1.is_empty(), "torrent1 returned no peers");
+        assert!(!peers2.is_empty(), "torrent2 returned no peers");
+
+        println!("Torrent1 peers: {}", peers1.len());
+        println!("Torrent2 peers: {}", peers2.len());
     }
 
     #[tokio::test]

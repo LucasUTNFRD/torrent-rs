@@ -4,52 +4,33 @@ use bencode::bencode::Bencode;
 
 use super::{TrackerClient, TrackerResponse, error::TrackerError};
 
-#[derive(Clone)]
-pub struct HttpTrackerClient {
-    client: reqwest::Client,
+use url::Url;
+
+pub struct QueryParamsBuilder<'a> {
+    url: Url,
+    params: &'a super::AnnounceParams,
 }
 
-#[async_trait::async_trait]
-impl TrackerClient for HttpTrackerClient {
-    async fn announce(
-        &self,
-        params: &super::AnnounceParams,
-        tracker_url: url::Url,
-    ) -> Result<TrackerResponse, TrackerError> {
-        self.announce_impl(params, tracker_url).await
-    }
-}
-
-impl HttpTrackerClient {
-    pub fn new() -> Result<Self, TrackerError> {
-        Ok(Self {
-            client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(15))
-                .build()
-                .expect("Failed to create HTTP client"),
-        })
+impl<'a> QueryParamsBuilder<'a> {
+    pub fn new(url: Url, params: &'a super::AnnounceParams) -> Self {
+        Self { url, params }
     }
 
-    pub async fn announce_impl(
-        &self,
-        params: &super::AnnounceParams,
-        tracker: url::Url,
-    ) -> Result<TrackerResponse, TrackerError> {
-        let mut url = tracker;
-
-        // Prepare query parameters as byte vectors
+    pub fn build(mut self) -> Url {
         let mut query_pairs = vec![
-            ("info_hash", params.info_hash.as_bytes().to_vec()),
-            ("peer_id", params.peer_id.as_bytes().to_vec()),
-            ("port", params.port.to_string().into_bytes()),
-            ("uploaded", params.uploaded.to_string().into_bytes()),
-            ("downloaded", params.downloaded.to_string().into_bytes()),
-            ("left", params.left.to_string().into_bytes()),
-            ("compact", "1".to_string().into_bytes()),
+            ("info_hash", self.params.info_hash.as_bytes().to_vec()),
+            ("peer_id", self.params.peer_id.as_bytes().to_vec()),
+            ("port", self.params.port.to_string().into_bytes()),
+            ("uploaded", self.params.uploaded.to_string().into_bytes()),
+            (
+                "downloaded",
+                self.params.downloaded.to_string().into_bytes(),
+            ),
+            ("left", self.params.left.to_string().into_bytes()),
+            ("compact", b"1".to_vec()),
         ];
 
-        // Add event parameter if not None
-        if let Some(event_str) = params.event.to_string() {
+        if let Some(event_str) = self.params.event.to_string() {
             query_pairs.push(("event", event_str.into_bytes()));
         }
 
@@ -63,27 +44,50 @@ impl HttpTrackerClient {
             query_string.push('=');
 
             if *key == "info_hash" || *key == "peer_id" {
-                // Binary data needs special URL encoding
                 for &byte in value {
                     query_string.push('%');
                     query_string.push_str(&format!("{:02X}", byte));
                 }
             } else {
-                // For other parameters, use standard encoding
                 query_string
                     .push_str(&url::form_urlencoded::byte_serialize(value).collect::<String>());
             }
         }
 
         // Apply the encoded query string
-        url.set_query(Some(&query_string));
+        self.url.set_query(Some(&query_string));
+        self.url
+    }
+}
 
-        dbg!(&url);
-        let response = self.client.get(url).send().await?;
-        dbg!(&response);
+#[derive(Clone)]
+pub struct HttpTrackerClient {
+    client: reqwest::Client,
+}
+
+#[async_trait::async_trait]
+impl TrackerClient for HttpTrackerClient {
+    async fn announce(
+        &self,
+        params: &super::AnnounceParams,
+        tracker_url: url::Url,
+    ) -> Result<TrackerResponse, TrackerError> {
+        let tracker_url = QueryParamsBuilder::new(tracker_url, params).build();
+        println!("{tracker_url}");
+        let response = self.client.get(tracker_url).send().await?;
         let bytes = response.bytes().await?;
-
         self.parse_announce_response(&bytes).await
+    }
+}
+
+impl HttpTrackerClient {
+    pub fn new() -> Result<Self, TrackerError> {
+        Ok(Self {
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(15))
+                .build()
+                .expect("Failed to create HTTP client"),
+        })
     }
 
     async fn parse_announce_response(&self, data: &[u8]) -> Result<TrackerResponse, TrackerError> {
@@ -98,31 +102,31 @@ impl HttpTrackerClient {
         };
 
         //Error Checking
-        if let Some(failure_reason) = get_optional_string_from_dict(&dict, KEY_FAILURE_REASON) {
-            dbg!("HERE");
-            return Err(TrackerError::TrackerError(failure_reason));
+        if let Some(failure_reason) = dict.get_str(KEY_FAILURE_REASON) {
+            return Err(TrackerError::TrackerError(failure_reason.to_string()));
         }
-        if let Some(warning_message) = get_optional_string_from_dict(&dict, KEY_WARNING_MESSAGE) {
+        if let Some(warning_message) = dict.get_str(KEY_WARNING_MESSAGE) {
             tracing::warn!(warning_message)
         }
 
         // Extract interval
         const DEFAULT_ANNOUNCE_INTERVAL: i64 = 20;
-        let interval = get_optional_int_from_dict(&dict, b"interval")
+        let interval = dict
+            .get_i64(b"interval")
             .unwrap_or(DEFAULT_ANNOUNCE_INTERVAL) as i32;
 
-        // Extract min interval (optional)
-        let min_interval = get_optional_string_from_dict(&dict, KEY_MIN_INTERVAL);
-
-        // Extract tracker id (optional)
-        let tracker_id = get_optional_string_from_dict(&dict, KEY_TRACKER_ID);
-
-        // Extract complete and incomplete peers
-        let complete: u32 =
-            get_optional_int_from_dict(&dict, b"complete").unwrap_or_default() as u32;
-
-        let incomplete =
-            get_optional_int_from_dict(&dict, b"incomplete").unwrap_or_default() as u32;
+        // // Extract min interval (optional)
+        // let min_interval = get_optional_string_from_dict(&dict, KEY_MIN_INTERVAL);
+        //
+        // // Extract tracker id (optional)
+        // let tracker_id = get_optional_string_from_dict(&dict, KEY_TRACKER_ID);
+        //
+        // // Extract complete and incomplete peers
+        // let complete: u32 =
+        //     get_optional_int_from_dict(&dict, b"complete").unwrap_or_default() as u32;
+        //
+        // let incomplete =
+        //     get_optional_int_from_dict(&dict, b"incomplete").unwrap_or_default() as u32;
 
         // Parse peers - could be dictionary model or binary model
         let peers = parse_peers(&dict)?;
@@ -167,12 +171,13 @@ fn parse_peers(dict: &BTreeMap<Vec<u8>, Bencode>) -> Result<Vec<SocketAddr>, Tra
                     }
                 };
 
-                let ip = get_optional_string_from_dict(dict, KEY_IP)
+                let ip = dict
+                    .get_str(KEY_IP)
                     .ok_or_else(|| TrackerError::InvalidResponse("Missing or invalid IP".into()))?
                     .parse()
                     .map_err(|_| TrackerError::InvalidResponse("Invalid IP format".into()))?;
 
-                let port: u16 = get_optional_int_from_dict(dict, KEY_PORT).ok_or_else(|| {
+                let port: u16 = dict.get_i64(KEY_PORT).ok_or_else(|| {
                     TrackerError::InvalidResponse("Missing or invalid port".into())
                 })? as u16;
 
@@ -186,48 +191,47 @@ fn parse_peers(dict: &BTreeMap<Vec<u8>, Bencode>) -> Result<Vec<SocketAddr>, Tra
     }
 }
 
-fn get_string_from_dict(
-    dict: &BTreeMap<Vec<u8>, Bencode>,
-    key: &[u8],
-) -> Result<String, TrackerError> {
-    let bytes = get_bytes_from_dict(dict, key)?;
-    std::str::from_utf8(&bytes)
-        .map(|s| s.to_string())
-        // .map_err(TrackerError::BencodeError)
-        .map_err(|_| TrackerError::InvalidString) // TODO:: Improve this
+pub trait BencodeDictExt {
+    fn get_bytes(&self, key: &[u8]) -> Option<&[u8]>;
+    fn get_str(&self, key: &[u8]) -> Option<&str>;
+    fn get_i64(&self, key: &[u8]) -> Option<i64>;
+    fn get_list(&self, key: &[u8]) -> Option<&[Bencode]>;
+    fn get_dict(&self, key: &[u8]) -> Option<&BTreeMap<Vec<u8>, Bencode>>;
 }
 
-fn get_optional_string_from_dict(dict: &BTreeMap<Vec<u8>, Bencode>, key: &[u8]) -> Option<String> {
-    dict.get(key).and_then(|bencode| match bencode {
-        Bencode::Bytes(bytes) => std::str::from_utf8(bytes).ok().map(|s| s.to_string()),
-        _ => None,
-    })
-}
-
-fn get_bytes_from_dict(
-    dict: &BTreeMap<Vec<u8>, Bencode>,
-    key: &[u8],
-) -> Result<Vec<u8>, TrackerError> {
-    match dict.get(key) {
-        Some(Bencode::Bytes(bytes)) => Ok(bytes.clone()),
-        Some(_) => panic!(),
-        None => panic!(),
+impl BencodeDictExt for BTreeMap<Vec<u8>, Bencode> {
+    fn get_bytes(&self, key: &[u8]) -> Option<&[u8]> {
+        match self.get(key) {
+            Some(Bencode::Bytes(b)) => Some(b.as_slice()),
+            _ => None,
+        }
     }
-}
 
-fn get_int_from_dict(dict: &BTreeMap<Vec<u8>, Bencode>, key: &[u8]) -> Result<i64, TrackerError> {
-    match dict.get(key) {
-        Some(Bencode::Int(value)) => Ok(*value),
-        Some(_) => panic!(),
-        None => panic!(),
+    fn get_str(&self, key: &[u8]) -> Option<&str> {
+        self.get_bytes(key)
+            .and_then(|b| std::str::from_utf8(b).ok())
     }
-}
 
-fn get_optional_int_from_dict(dict: &BTreeMap<Vec<u8>, Bencode>, key: &[u8]) -> Option<i64> {
-    dict.get(key).and_then(|bencode| match bencode {
-        Bencode::Int(value) => Some(*value),
-        _ => None,
-    })
+    fn get_i64(&self, key: &[u8]) -> Option<i64> {
+        match self.get(key) {
+            Some(Bencode::Int(i)) => Some(*i),
+            _ => None,
+        }
+    }
+
+    fn get_list(&self, key: &[u8]) -> Option<&[Bencode]> {
+        match self.get(key) {
+            Some(Bencode::List(l)) => Some(l.as_slice()),
+            _ => None,
+        }
+    }
+
+    fn get_dict(&self, key: &[u8]) -> Option<&BTreeMap<Vec<u8>, Bencode>> {
+        match self.get(key) {
+            Some(Bencode::Dict(d)) => Some(d),
+            _ => None,
+        }
+    }
 }
 
 const KEY_FAILURE_REASON: &[u8] = b"failure reason";
