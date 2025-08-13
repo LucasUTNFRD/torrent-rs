@@ -171,7 +171,7 @@ impl TrackerManager {
         let trackers = torrent.all_trackers();
 
         for tracker_url in trackers.iter() {
-            dbg!(tracker_url);
+            tracing::debug!("Announcing to tracker: {}", tracker_url);
             match Self::try_announce(client_id, tracker_url, torrent.clone(), clients.clone()).await
             {
                 Ok(response) => return Ok(response),
