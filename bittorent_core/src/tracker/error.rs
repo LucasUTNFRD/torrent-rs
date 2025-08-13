@@ -1,6 +1,5 @@
+use bencode::bencode::BencodeError;
 use thiserror::Error;
-
-use crate::torrent::bencode::BencodeError;
 
 #[derive(Debug, Error)]
 pub enum TrackerError {

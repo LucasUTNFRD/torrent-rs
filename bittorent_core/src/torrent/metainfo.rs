@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, fs::File, io::Read, path::PathBuf};
 
-use bencode::bencode::{Bencode, Encode};
+use bencode::bencode::{Bencode, BencodeError, Encode};
 use sha1::{Digest, Sha1};
 
 use crate::types::InfoHash;
