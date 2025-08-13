@@ -16,8 +16,7 @@ impl TrackerClient for HttpTrackerClient {
         params: &super::AnnounceParams,
         tracker_url: url::Url,
     ) -> Result<TrackerResponse, TrackerError> {
-        // self.announce(params, url).await
-        todo!()
+        self.announce_impl(params, tracker_url).await
     }
 }
 
@@ -31,7 +30,7 @@ impl HttpTrackerClient {
         })
     }
 
-    pub async fn announce(
+    pub async fn announce_impl(
         &self,
         params: &super::AnnounceParams,
         tracker: url::Url,

@@ -16,6 +16,7 @@ mod udp;
 
 use url::Url;
 
+#[derive(Debug)]
 pub struct TrackerResponse {
     pub peers: Vec<SocketAddr>,
     pub interval: i32,
@@ -326,7 +327,6 @@ mod test {
         // This test requires internet access and a real torrent file
 
         let file = "../sample_torrents/big-buck-bunny.torrent";
-        // linuxmint-21.2-mate-64bit.iso.torrent";
 
         let torrent = parse_torrent_from_file(file).expect("Failed to parse torrent");
         dbg!(hex::encode(torrent.info_hash));
@@ -369,7 +369,10 @@ mod test {
                     };
 
                     match client.announce(&params, tracker_url).await {
-                        Ok(response) => (tracker, Ok(response)),
+                        Ok(response) => {
+                            println!("{response:?}");
+                            (tracker, Ok(response))
+                        }
                         Err(e) => (tracker, Err(format!("{:?}", e))),
                     }
                 })

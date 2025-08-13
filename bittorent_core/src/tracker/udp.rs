@@ -396,7 +396,7 @@ impl UdpTrackerClient {
     }
 
     fn is_expired(instant: Instant) -> bool {
-        Instant::now() - instant >= CONNECTION_ID_EXIPIRATION
+        Instant::now() - instant >= CONNECTION_ID_EXPIRATION
     }
 
     async fn connect(&self, tracker: SocketAddr) -> Result<i64, TrackerError> {
