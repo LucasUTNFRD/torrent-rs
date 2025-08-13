@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 
 use crate::{
-    tracker::TrackerHandler,
     types::{InfoHash, PeerID},
     util::generate_peer_id,
 };
@@ -32,7 +31,7 @@ impl BittorentClient {
     }
 
     pub fn start(&self) {
-        let tracker_manager = TrackerHandler::new(self.peer_id);
+        todo!();
     }
 }
 
