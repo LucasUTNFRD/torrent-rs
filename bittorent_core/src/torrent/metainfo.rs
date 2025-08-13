@@ -1,9 +1,9 @@
 use std::{collections::BTreeMap, fs::File, io::Read, path::PathBuf};
 
+use bencode::bencode::{Bencode, Encode};
 use sha1::{Digest, Sha1};
 
-use super::bencode::{BencodeError, Encode};
-use crate::{torrent::bencode::Bencode, types::InfoHash};
+use crate::types::InfoHash;
 
 /// Main metainfo structure representing a .torrent file
 #[derive(Debug, Clone)]

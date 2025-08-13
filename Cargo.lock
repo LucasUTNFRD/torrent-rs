@@ -56,10 +56,19 @@ dependencies = [
 ]
 
 [[package]]
+<<<<<<< HEAD
 name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+||||||| ce2717a
+=======
+name = "bencode"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
+>>>>>>> main
 
 [[package]]
 name = "bitflags"
@@ -71,7 +80,12 @@ checksum = "1b8e56985ec62d17e9c1001dc89c88ecd7dc08e47eba5ec7c29c7b5eeecde967"
 name = "bittorent_core"
 version = "0.1.0"
 dependencies = [
+<<<<<<< HEAD
  "async-trait",
+||||||| ce2717a
+=======
+ "bencode",
+>>>>>>> main
  "bytes",
  "futures",
  "hex",
