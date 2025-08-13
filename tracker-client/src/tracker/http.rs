@@ -73,7 +73,7 @@ impl TrackerClient for HttpTrackerClient {
         tracker_url: url::Url,
     ) -> Result<TrackerResponse, TrackerError> {
         let tracker_url = QueryParamsBuilder::new(tracker_url, params).build();
-        println!("{tracker_url}");
+        tracing::debug!("Announcing to tracker URL: {}", tracker_url);
         let response = self.client.get(tracker_url).send().await?;
         let bytes = response.bytes().await?;
         self.parse_announce_response(&bytes).await
