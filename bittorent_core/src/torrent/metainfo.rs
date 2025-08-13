@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, fs::File, io::Read, path::PathBuf};
 
-use bencode::bencode::{Bencode, Encode};
+use bencode::bencode::{Bencode, BencodeError, Encode};
 use sha1::{Digest, Sha1};
 
 use crate::types::InfoHash;
@@ -108,8 +108,8 @@ pub struct FileInfo {
 
 impl TorrentInfo {
     /// Get the total size of all files in the torrent
-    pub fn total_size(&self) -> u64 {
-        self.info.mode.length() as u64
+    pub fn total_size(&self) -> i64 {
+        self.info.mode.length()
     }
 
     /// Get the number of pieces in the torrent
@@ -247,7 +247,7 @@ fn parse_torrent_from_bencode(bencode: &Bencode) -> Result<TorrentInfo, TorrentP
         comment,
         created_by,
         encoding,
-        info_hash,
+        info_hash: info_hash.into(),
     })
 }
 

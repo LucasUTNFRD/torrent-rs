@@ -1,9 +1,10 @@
 [package]
-name = "bittorent_core"
+name = "tracker-client"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+bittorent_core = { path = "../bittorent_core/" }
 sha1.workspace = true
 async-trait = "0.1"
 thiserror.workspace = true

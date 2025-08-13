@@ -1,2 +1,2 @@
 pub mod metainfo;
-mod peer;
+pub mod peer;

@@ -1,5 +1,5 @@
 [workspace]
-members = [ "bencode","bittorent_core"]
+members = [ "bencode","bittorent_core", "tracker-client"]
 resolver = "2"               # Recommended for new workspaces
 
 [workspace.dependencies]
