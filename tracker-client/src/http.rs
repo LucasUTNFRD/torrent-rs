@@ -162,6 +162,7 @@ impl HttpTrackerClient {
 
         //Error Checking
         if let Some(failure_reason) = dict.get_str(KEY_FAILURE_REASON) {
+            println!("{failure_reason}");
             return Err(TrackerError::TrackerError(failure_reason.to_string()));
         }
         if let Some(warning_message) = dict.get_str(KEY_WARNING_MESSAGE) {
@@ -247,14 +248,13 @@ fn parse_peers(dict: &BTreeMap<Vec<u8>, Bencode>) -> Result<Vec<SocketAddr>, Tra
     }
 }
 
-#[cfg(test)]
 mod tests {
+    use std::net::{Ipv4Addr, SocketAddr};
+
     use bittorent_core::{client::PORT, torrent::metainfo::parse_torrent_from_file, types::PeerID};
     use url::Url;
 
-    use crate::types::{AnnounceParams, Events};
-
-    use super::QueryParamsBuilder;
+    use crate::{AnnounceParams, Events, HttpTrackerClient, http::QueryParamsBuilder};
 
     #[test]
     fn test_query_parameter_building() {
@@ -278,5 +278,130 @@ mod tests {
         let expected_url = Url::parse(expected_url).unwrap();
 
         assert_eq!(expected_url, tracker_url)
+    }
+
+    fn be_string(s: &str) -> String {
+        format!("{}:{}", s.len(), s)
+    }
+
+    fn be_bytes_len(len: usize) -> String {
+        format!("{}:", len)
+    }
+
+    fn bencode_http_compact_response(
+        peers: &[(Ipv4Addr, u16)],
+        interval: i64,
+        complete: i64,
+        incomplete: i64,
+    ) -> Vec<u8> {
+        // Build compact peers bytes
+        let mut compact = Vec::with_capacity(peers.len() * 6);
+        for (ip, port) in peers {
+            let o = ip.octets();
+            compact.extend_from_slice(&[o[0], o[1], o[2], o[3]]);
+            compact.extend_from_slice(&port.to_be_bytes());
+        }
+
+        // d8:completei<e>9:incompletei<e>8:intervali<e>5:peers<byteslen>:<bytes>e
+        let header = format!(
+            "d{}i{}e{}i{}e{}i{}e{}",
+            be_string("complete"),
+            complete,
+            be_string("incomplete"),
+            incomplete,
+            be_string("interval"),
+            interval,
+            be_string("peers"),
+        );
+
+        let mut out = Vec::new();
+        out.extend_from_slice(header.as_bytes());
+        out.extend_from_slice(be_bytes_len(compact.len()).as_bytes());
+        out.extend_from_slice(&compact);
+        out.extend_from_slice(b"e");
+        out
+    }
+
+    fn bencode_http_dict_response(
+        peers: &[(Ipv4Addr, u16)],
+        interval: i64,
+        complete: i64,
+        incomplete: i64,
+    ) -> Vec<u8> {
+        // d8:completei<e>9:incompletei<e>8:intervali<e>5:peersl
+        let mut s = format!(
+            "d{}i{}e{}i{}e{}i{}e{}l",
+            be_string("complete"),
+            complete,
+            be_string("incomplete"),
+            incomplete,
+            be_string("interval"),
+            interval,
+            be_string("peers")
+        );
+
+        // Each peer: d2:IP<ip_str>4:porti<port>ee
+        for (ip, port) in peers {
+            let ip_str = ip.to_string();
+            s.push_str(&format!(
+                "d{}{}{}i{}ee",
+                be_string("IP"),
+                be_string(&ip_str),
+                be_string("port"),
+                port
+            ));
+        }
+
+        s.push('e'); // end list
+        s.push('e'); // end dict
+        s.into_bytes()
+    }
+
+    #[tokio::test]
+    async fn parse_compact_peers_response() {
+        let client = HttpTrackerClient::new().unwrap();
+        let peers = &[
+            (Ipv4Addr::new(1, 2, 3, 4), 6881),
+            (Ipv4Addr::new(9, 8, 7, 6), 51413),
+        ];
+        let data = bencode_http_compact_response(peers, 1800, 3, 7);
+
+        let resp = client.parse_announce_response(&data).await.unwrap();
+        assert_eq!(resp.interval, 1800);
+        assert_eq!(resp.seeders, 3);
+        assert_eq!(resp.leechers, 7);
+        assert_eq!(resp.peers.len(), 2);
+        assert_eq!(
+            resp.peers[0],
+            SocketAddr::new(Ipv4Addr::new(1, 2, 3, 4).into(), 6881)
+        );
+        assert_eq!(
+            resp.peers[1],
+            SocketAddr::new(Ipv4Addr::new(9, 8, 7, 6).into(), 51413)
+        );
+    }
+
+    #[tokio::test]
+    async fn parse_dict_peers_response() {
+        let client = HttpTrackerClient::new().unwrap();
+        let peers = &[
+            (Ipv4Addr::new(10, 0, 0, 1), 6881),
+            (Ipv4Addr::new(192, 168, 1, 50), 51413),
+        ];
+        let data = bencode_http_dict_response(peers, 900, 5, 12);
+
+        let resp = client.parse_announce_response(&data).await.unwrap();
+        assert_eq!(resp.interval, 900);
+        assert_eq!(resp.seeders, 5);
+        assert_eq!(resp.leechers, 12);
+        assert_eq!(resp.peers.len(), 2);
+        assert_eq!(
+            resp.peers[0],
+            SocketAddr::new(Ipv4Addr::new(10, 0, 0, 1).into(), 6881)
+        );
+        assert_eq!(
+            resp.peers[1],
+            SocketAddr::new(Ipv4Addr::new(192, 168, 1, 50).into(), 51413)
+        );
     }
 }

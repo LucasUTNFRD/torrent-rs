@@ -7,6 +7,7 @@ use std::{
 
 use bittorent_core::types::{InfoHash, PeerID};
 use bytes::{Bytes, BytesMut};
+// use bytes::{Bytes, BytesMut};
 use rand::Rng;
 use tokio::{net::UdpSocket, sync::oneshot, time::timeout};
 use url::Url;
