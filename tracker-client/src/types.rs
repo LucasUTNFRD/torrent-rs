@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use bittorent_core::types::{InfoHash, PeerID};
+use bittorrent_core::types::{InfoHash, PeerID};
 
 #[derive(Debug)]
 pub struct TrackerResponse {

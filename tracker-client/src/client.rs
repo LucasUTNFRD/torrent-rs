@@ -1,6 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
-use bittorent_core::{
+use bittorrent_core::{
     torrent::metainfo::TorrentInfo,
     types::{InfoHash, PeerID},
 };

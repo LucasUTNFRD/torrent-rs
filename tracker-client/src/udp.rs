@@ -5,7 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use bittorent_core::types::{InfoHash, PeerID};
+use bittorrent_core::types::{InfoHash, PeerID};
 use bytes::{Bytes, BytesMut};
 // use bytes::{Bytes, BytesMut};
 use rand::Rng;
