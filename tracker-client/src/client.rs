@@ -1,91 +1,24 @@
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
-use bittorent_core::{
+use bittorrent_core::{
     torrent::metainfo::TorrentInfo,
     types::{InfoHash, PeerID},
 };
-use error::TrackerError;
-use http::HttpTrackerClient;
+
 use tokio::{
     sync::{mpsc, oneshot},
     time::timeout,
 };
-use udp::UdpTrackerClient;
-
-pub mod error;
-mod http;
-mod udp;
-
 use url::Url;
 
-#[derive(Debug)]
-pub struct TrackerResponse {
-    pub peers: Vec<SocketAddr>,
-    pub interval: i32,
-    pub leechers: i32,
-    pub seeders: i32,
-}
+use crate::{
+    TrackerError,
+    http::HttpTrackerClient,
+    types::{AnnounceParams, Events, TrackerResponse},
+    udp::UdpTrackerClient,
+};
 
-#[derive(Debug, Clone)]
-pub struct AnnounceParams {
-    pub info_hash: InfoHash,
-    pub peer_id: PeerID,
-    pub port: u16,
-    pub uploaded: i64,
-    pub downloaded: i64,
-    pub left: i64,
-    pub event: Events,
-    // pub compact: bool,
-}
-
-#[derive(Debug)]
-pub enum Actions {
-    Connect,
-    Announce,
-    Scrape,
-    Error,
-}
-
-impl From<&Actions> for i32 {
-    fn from(action: &Actions) -> Self {
-        match action {
-            Actions::Connect => 0,
-            Actions::Announce => 1,
-            Actions::Scrape => 2,
-            Actions::Error => 3,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub enum Events {
-    None,
-    Completed,
-    Started,
-    Stopped,
-}
-
-impl From<&Events> for i32 {
-    fn from(events: &Events) -> Self {
-        match events {
-            Events::None => 0,
-            Events::Completed => 1,
-            Events::Started => 2,
-            Events::Stopped => 3,
-        }
-    }
-}
-
-impl Events {
-    pub fn to_string(self) -> Option<String> {
-        match self {
-            Events::None => None,
-            Events::Started => Some("started".to_string()),
-            Events::Stopped => Some("stopped".to_string()),
-            Events::Completed => Some("completed".to_string()),
-        }
-    }
-}
+// TODO: restructure crate
 
 pub struct TrackerManager {
     // cmd_rx
@@ -277,7 +210,7 @@ impl TrackerHandler {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "real_trackers"))]
 mod test {
     use std::sync::Arc;
 
@@ -286,18 +219,21 @@ mod test {
     use rand::Rng;
     use tokio::sync::oneshot;
 
-    use crate::tracker::{
-        AnnounceParams, Events, TrackerClient, TrackerHandler, TrackerMessage,
-        http::HttpTrackerClient, udp::UdpTrackerClient,
+    use crate::{
+        TrackerHandler, UdpTrackerClient,
+        client::{TrackerClient, TrackerMessage},
+        http::HttpTrackerClient,
+        types::{AnnounceParams, Events},
     };
 
+    //
     fn generate_peer_id() -> PeerID {
         let mut peer_id = [0u8; 20];
         peer_id[0..3].copy_from_slice(b"-RS"); // Client identifier
         rand::rng().fill(&mut peer_id[3..]); // Random bytes
         peer_id.into()
     }
-
+    //
     #[tokio::test]
     async fn http_test_with_real_torrent() {
         // This test requires internet access and a real torrent file
@@ -403,7 +339,7 @@ mod test {
     async fn udp_test_with_real_torrent() {
         // This test requires internet access and a real torrent file
 
-        let file = "../sample_torrents/big-buck-bunny.torrent";
+        let file = "../sample_torrents/linuxmint-21.2-mate-64bit.iso.torrent";
 
         let torrent = parse_torrent_from_file(file).expect("Failed to parse torrent");
         dbg!(hex::encode(torrent.info_hash));

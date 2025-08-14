@@ -4,13 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-bittorent_core = { path = "../bittorent-core/" }
-sha1.workspace = true
+bittorrent-core = { path = "../bittorrent-core/" }
 async-trait = "0.1"
 thiserror.workspace = true
-hex = "0.4.3"
 bytes = "1.10.1"
-tokio-util = { version = "0.7.15", features = ["codec"] }
 futures = "0.3.31"
 tracing.workspace = true
 tokio.workspace = true
@@ -19,3 +16,10 @@ reqwest = "0.12.22"
 url = "2.5.4"
 urlencoding = "2.1.3"
 bencode = { path = "../bencode" }
+
+
+[features]
+real_trackers = []
+
+[dev-dependencies]
+wiremock = "0.6"

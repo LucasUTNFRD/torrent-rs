@@ -5,16 +5,21 @@ use std::{
     time::{Duration, Instant},
 };
 
-use bittorent_core::types::{InfoHash, PeerID};
+use bittorrent_core::types::{InfoHash, PeerID};
 use bytes::{Bytes, BytesMut};
+// use bytes::{Bytes, BytesMut};
 use rand::Rng;
 use tokio::{net::UdpSocket, sync::oneshot, time::timeout};
 use url::Url;
 
+use crate::{
+    TrackerError,
+    client::TrackerClient,
+    types::{Actions, AnnounceParams, Events, TrackerResponse},
+};
+
 const MAX_RETRIES: usize = 8;
 const CONNECTION_ID_EXPIRATION: Duration = Duration::from_secs(60);
-
-use super::{Actions, AnnounceParams, Events, TrackerClient, error::TrackerError};
 
 #[derive(Debug)]
 pub enum TrackerState {
@@ -221,7 +226,7 @@ impl TrackerClient for UdpTrackerClient {
         &self,
         params: &AnnounceParams,
         tracker_url: Url,
-    ) -> Result<super::TrackerResponse, TrackerError> {
+    ) -> Result<TrackerResponse, TrackerError> {
         // this should be a method that resolves a url into a socket addrs
         let tracker = tracker_url
             .socket_addrs(|| None)
@@ -275,7 +280,7 @@ impl TrackerClient for UdpTrackerClient {
             let wait_secs = 15 * (1 << n);
             match timeout(Duration::from_secs(wait_secs), rx).await {
                 Ok(Ok(resp)) => {
-                    return Ok(super::TrackerResponse {
+                    return Ok(TrackerResponse {
                         peers: resp.peers,
                         interval: resp.interval,
                         leechers: resp.leechers,
