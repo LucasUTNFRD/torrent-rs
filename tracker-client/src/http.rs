@@ -2,17 +2,21 @@ use std::{collections::BTreeMap, net::SocketAddr, time::Duration};
 
 use bencode::bencode::Bencode;
 
-use super::{TrackerClient, TrackerResponse, error::TrackerError};
+use crate::{
+    TrackerError,
+    client::TrackerClient,
+    types::{AnnounceParams, TrackerResponse},
+};
 
 use url::Url;
 
 pub struct QueryParamsBuilder<'a> {
     url: Url,
-    params: &'a super::AnnounceParams,
+    params: &'a AnnounceParams,
 }
 
 impl<'a> QueryParamsBuilder<'a> {
-    pub fn new(url: Url, params: &'a super::AnnounceParams) -> Self {
+    pub fn new(url: Url, params: &'a AnnounceParams) -> Self {
         Self { url, params }
     }
 
@@ -60,6 +64,60 @@ impl<'a> QueryParamsBuilder<'a> {
     }
 }
 
+pub trait BencodeDictExt {
+    fn get_bytes(&self, key: &[u8]) -> Option<&[u8]>;
+    fn get_str(&self, key: &[u8]) -> Option<&str>;
+    fn get_i64(&self, key: &[u8]) -> Option<i64>;
+
+    #[allow(dead_code)]
+    fn get_list(&self, key: &[u8]) -> Option<&[Bencode]>;
+    #[allow(dead_code)]
+    fn get_dict(&self, key: &[u8]) -> Option<&BTreeMap<Vec<u8>, Bencode>>;
+}
+
+impl BencodeDictExt for BTreeMap<Vec<u8>, Bencode> {
+    fn get_bytes(&self, key: &[u8]) -> Option<&[u8]> {
+        match self.get(key) {
+            Some(Bencode::Bytes(b)) => Some(b.as_slice()),
+            _ => None,
+        }
+    }
+
+    fn get_str(&self, key: &[u8]) -> Option<&str> {
+        self.get_bytes(key)
+            .and_then(|b| std::str::from_utf8(b).ok())
+    }
+
+    fn get_i64(&self, key: &[u8]) -> Option<i64> {
+        match self.get(key) {
+            Some(Bencode::Int(i)) => Some(*i),
+            _ => None,
+        }
+    }
+
+    fn get_list(&self, key: &[u8]) -> Option<&[Bencode]> {
+        match self.get(key) {
+            Some(Bencode::List(l)) => Some(l.as_slice()),
+            _ => None,
+        }
+    }
+
+    fn get_dict(&self, key: &[u8]) -> Option<&BTreeMap<Vec<u8>, Bencode>> {
+        match self.get(key) {
+            Some(Bencode::Dict(d)) => Some(d),
+            _ => None,
+        }
+    }
+}
+
+const KEY_FAILURE_REASON: &[u8] = b"failure reason";
+const KEY_WARNING_MESSAGE: &[u8] = b"warning message";
+const KEY_PORT: &[u8] = b"port";
+const KEY_IP: &[u8] = b"IP";
+const KEY_PEERS: &[u8] = b"peers";
+// const KEY_MIN_INTERVAL: &[u8] = b"min interval";
+// const KEY_TRACKER_ID: &[u8] = b"tracker id";
+
 #[derive(Clone)]
 pub struct HttpTrackerClient {
     client: reqwest::Client,
@@ -69,11 +127,12 @@ pub struct HttpTrackerClient {
 impl TrackerClient for HttpTrackerClient {
     async fn announce(
         &self,
-        params: &super::AnnounceParams,
+        params: &AnnounceParams,
         tracker_url: url::Url,
     ) -> Result<TrackerResponse, TrackerError> {
         let tracker_url = QueryParamsBuilder::new(tracker_url, params).build();
         tracing::debug!("Announcing to tracker URL: {}", tracker_url);
+        println!("Announcing to tracker URL: {}", tracker_url);
         let response = self.client.get(tracker_url).send().await?;
         let bytes = response.bytes().await?;
         self.parse_announce_response(&bytes).await
@@ -120,13 +179,10 @@ impl HttpTrackerClient {
         //
         // // Extract tracker id (optional)
         // let tracker_id = get_optional_string_from_dict(&dict, KEY_TRACKER_ID);
-        //
-        // // Extract complete and incomplete peers
-        // let complete: u32 =
-        //     get_optional_int_from_dict(&dict, b"complete").unwrap_or_default() as u32;
-        //
-        // let incomplete =
-        //     get_optional_int_from_dict(&dict, b"incomplete").unwrap_or_default() as u32;
+
+        // Extract complete and incomplete peers
+        let complete = dict.get_i64(b"complete").unwrap_or_default() as i32;
+        let incomplete = dict.get_i64(b"incomplete").unwrap_or_default() as i32;
 
         // Parse peers - could be dictionary model or binary model
         let peers = parse_peers(&dict)?;
@@ -134,8 +190,8 @@ impl HttpTrackerClient {
         Ok(TrackerResponse {
             peers,
             interval,
-            leechers: 0,
-            seeders: 0,
+            leechers: incomplete,
+            seeders: complete,
         })
     }
 }
@@ -191,53 +247,36 @@ fn parse_peers(dict: &BTreeMap<Vec<u8>, Bencode>) -> Result<Vec<SocketAddr>, Tra
     }
 }
 
-pub trait BencodeDictExt {
-    fn get_bytes(&self, key: &[u8]) -> Option<&[u8]>;
-    fn get_str(&self, key: &[u8]) -> Option<&str>;
-    fn get_i64(&self, key: &[u8]) -> Option<i64>;
-    fn get_list(&self, key: &[u8]) -> Option<&[Bencode]>;
-    fn get_dict(&self, key: &[u8]) -> Option<&BTreeMap<Vec<u8>, Bencode>>;
-}
+#[cfg(test)]
+mod tests {
+    use bittorent_core::{client::PORT, torrent::metainfo::parse_torrent_from_file, types::PeerID};
+    use url::Url;
 
-impl BencodeDictExt for BTreeMap<Vec<u8>, Bencode> {
-    fn get_bytes(&self, key: &[u8]) -> Option<&[u8]> {
-        match self.get(key) {
-            Some(Bencode::Bytes(b)) => Some(b.as_slice()),
-            _ => None,
-        }
-    }
+    use crate::types::{AnnounceParams, Events};
 
-    fn get_str(&self, key: &[u8]) -> Option<&str> {
-        self.get_bytes(key)
-            .and_then(|b| std::str::from_utf8(b).ok())
-    }
+    use super::QueryParamsBuilder;
 
-    fn get_i64(&self, key: &[u8]) -> Option<i64> {
-        match self.get(key) {
-            Some(Bencode::Int(i)) => Some(*i),
-            _ => None,
-        }
-    }
+    #[test]
+    fn test_query_parameter_building() {
+        let file = "../sample_torrents/sample.torrent";
+        let torrent = parse_torrent_from_file(file).expect("Failed to parse torrent");
 
-    fn get_list(&self, key: &[u8]) -> Option<&[Bencode]> {
-        match self.get(key) {
-            Some(Bencode::List(l)) => Some(l.as_slice()),
-            _ => None,
-        }
-    }
+        let params = AnnounceParams {
+            info_hash: torrent.info_hash,
+            peer_id: PeerID::new([0u8; 20]),
+            port: PORT,
+            uploaded: 0,
+            downloaded: 0,
+            left: torrent.total_size(),
+            event: Events::Started,
+        };
 
-    fn get_dict(&self, key: &[u8]) -> Option<&BTreeMap<Vec<u8>, Bencode>> {
-        match self.get(key) {
-            Some(Bencode::Dict(d)) => Some(d),
-            _ => None,
-        }
+        let announce_url = url::Url::parse(torrent.all_trackers().first().unwrap()).unwrap();
+        let tracker_url = QueryParamsBuilder::new(announce_url, &params).build();
+
+        let expected_url = "http://bittorrent-test-tracker.codecrafters.io/announce?info_hash=%D6%9F%91%E6%B2%AE%4C%54%24%68%D1%07%3A%71%D4%EA%13%87%9A%7F&peer_id=%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00&port=6881&uploaded=0&downloaded=0&left=92063&compact=1&event=started";
+        let expected_url = Url::parse(expected_url).unwrap();
+
+        assert_eq!(expected_url, tracker_url)
     }
 }
-
-const KEY_FAILURE_REASON: &[u8] = b"failure reason";
-const KEY_WARNING_MESSAGE: &[u8] = b"warning message";
-const KEY_PORT: &[u8] = b"port";
-const KEY_IP: &[u8] = b"IP";
-const KEY_PEERS: &[u8] = b"peers";
-const KEY_MIN_INTERVAL: &[u8] = b"min interval";
-const KEY_TRACKER_ID: &[u8] = b"tracker id";
