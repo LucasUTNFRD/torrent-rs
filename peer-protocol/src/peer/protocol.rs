@@ -3,7 +3,7 @@ use std::io::{self};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio_util::codec::{Decoder, Encoder};
 
-use crate::types::{InfoHash, PeerID};
+use bittorrent_core::types::{InfoHash, PeerID};
 
 // TODO: Implement Extended Handshake Message code/decode
 
@@ -39,6 +39,7 @@ pub enum Message {
     Request(BlockInfo),
     Piece(Block),
     Cancel(BlockInfo),
+    // Handshake(Handshake)
     // ExtendedHandshake,
 }
 
@@ -46,7 +47,7 @@ pub enum Message {
 pub struct Handshake {
     pub peer_id: PeerID,
     pub info_hash: InfoHash,
-    pub reserved: [u8; 8],
+    reserved: [u8; 8],
 }
 
 // handshake: <pstrlen><pstr><reserved><info_hash><peer_id>
@@ -138,6 +139,7 @@ impl From<u8> for MessageId {
 }
 
 #[derive(Debug, Clone)]
+// Rename this PeerCodec
 pub struct MessageDecoder {}
 
 impl Decoder for MessageDecoder {
@@ -196,8 +198,6 @@ impl Decoder for MessageDecoder {
                 let begin = src.get_u32();
 
                 let data = src.split_to(msg_length as usize - 9).freeze();
-                // let mut block = vec![0; msg_length as usize - 9];
-                // src.copy_to_slice(&mut block);
 
                 Message::Piece(Block { index, begin, data })
             }
