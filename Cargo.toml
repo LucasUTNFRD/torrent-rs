@@ -1,6 +1,6 @@
 [workspace]
-members = ["bencode", "bittorent-core", "tracker-client"]
-resolver = "2"                                            # Recommended for new workspaces
+members = ["bencode", "bittorrent-core", "peer", "peer-protocol", "tracker-client"]
+resolver = "2"                                             # Recommended for new workspaces
 
 [workspace.dependencies]
 sha1 = "0.10"

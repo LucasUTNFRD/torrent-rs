@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 use bittorrent_core::{
-    torrent::metainfo::TorrentInfo,
+    metainfo::TorrentInfo,
     types::{InfoHash, PeerID},
 };
 
@@ -207,6 +207,23 @@ impl TrackerHandler {
             tracker_actor.run().await
         });
         Self { tracker_tx }
+    }
+
+    pub async fn announce(
+        &self,
+        torrent: Arc<TorrentInfo>,
+    ) -> Result<TrackerResponse, TrackerError> {
+        let (otx, orx) = oneshot::channel();
+        let _ = self
+            .tracker_tx
+            .send(TrackerMessage::Announce {
+                torrent,
+                response_tx: otx,
+            })
+            .await;
+
+        // FIX: Error mapping
+        orx.await.map_err(|e| TrackerError::Timeout)?
     }
 }
 
