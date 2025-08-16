@@ -16,7 +16,6 @@ pub enum ManagerCommand {
     AddPeer {
         peer_info: PeerInfo,
         stream: TcpStream,
-        response: oneshot::Sender<Result<(), PeerError>>,
     },
     RemovePeer(PeerInfo),
 }
@@ -52,16 +51,14 @@ impl PeerManagerHandle {
     }
 
     pub async fn add_peer(&self, info: PeerInfo, stream: TcpStream) -> Result<(), PeerError> {
-        let (tx, rx) = oneshot::channel();
         self.manager_tx
             .send(ManagerCommand::AddPeer {
                 peer_info: info,
                 stream,
-                response: tx,
             })
             .map_err(|_| PeerError::Disconnected)?;
 
-        rx.await.map_err(|_| PeerError::Disconnected)?
+        Ok(())
     }
 }
 
@@ -79,17 +76,12 @@ impl PeerManager {
         while let Some(cmd) = self.manager_rx.recv().await {
             use ManagerCommand::*;
             match cmd {
-                AddPeer {
-                    peer_info,
-                    stream,
-                    response,
-                } => {
+                AddPeer { peer_info, stream } => {
                     let (event_tx, event_rx) = mpsc::channel(32);
                     self.peers.insert(peer_info, event_tx);
                     let conn = PeerConnection::new(peer_info, event_rx);
 
                     tokio::spawn(conn.run(stream));
-                    let _ = response.send(Ok(()));
                 }
                 _ => unimplemented!(),
             }

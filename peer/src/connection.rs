@@ -3,7 +3,10 @@ use std::net::SocketAddr;
 use bittorrent_core::types::{InfoHash, PeerID};
 use bytes::BytesMut;
 use futures::{SinkExt, StreamExt};
-use peer_protocol::{MessageDecoder, protocol::Handshake};
+use peer_protocol::{
+    MessageDecoder,
+    protocol::{self, Handshake},
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
@@ -51,6 +54,7 @@ pub struct PeerConnection {
     cmd_rx: mpsc::Receiver<PeerEvent>,
     peer_state: PeerState,
 }
+
 #[derive(Debug)]
 struct PeerState {
     ///this client is choking the peer
@@ -153,23 +157,47 @@ impl PeerConnection {
             tokio::select! {
                 maybe_msg = stream.next() => {
                     match maybe_msg {
-                        Some(Ok(msg)) => { /* handle incoming message */ }
+                        Some(Ok(msg)) => self.handle_msg(&msg),
                         Some(Err(e)) => return Err(PeerError::IoError(e)),
-                        None => break,
+                        None => return Err(PeerError::Disconnected),
                     }
                 }
                 maybe_event= self.cmd_rx.recv() => {
-                    if let Some(event) = maybe_event{
-                        use PeerEvent::*;
-                        match event{
-                            SendMessage(msg) => sink.send(msg).await.map_err(PeerError::IoError)?,
-                            Disconnect => todo!(),
+                    match maybe_event {
+                        Some(PeerEvent::SendMessage(msg)) => {
+                            sink.send(msg).await.map_err(PeerError::IoError)?;
                         }
-                    } else { break; }
+                        Some(PeerEvent::Disconnect) => {
+                            // return Err(PeerError::Disconnect);
+                        }
+                        None => break,
+                    }
                 }
             }
         }
 
         Ok(())
     }
+
+    fn handle_msg(&mut self, msg: &protocol::Message) {
+        use protocol::Message::*;
+        match msg {
+            KeepAlive => todo!(),
+            Choke => todo!(),
+            Unchoke => todo!(),
+            Interested => todo!(),
+            NotInterested => todo!(),
+            Have { piece_index: u32 } => todo!(),
+            Bitfield(Bytes) => todo!(),
+            Request(BlockInfo) => todo!(),
+            Piece(Block) => todo!(),
+            Cancel(BlockInfo) => todo!(),
+        }
+    }
 }
+
+// impl Drop for PeerConnection {
+//     fn drop(&mut self) {
+//         // self.manager_tx.send(TrackerMessage::Disconnect)
+//     }
+// }

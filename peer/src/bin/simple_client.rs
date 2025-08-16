@@ -34,6 +34,7 @@ async fn main() {
             if let Ok(stream) = TcpStream::connect(addr).await {
                 match manager.add_peer(info, stream).await {
                     Ok(_) => tracing::info!("Connected to {addr:?}"),
+                    // This error is not clear, why adding a peer could fail?
                     Err(e) => tracing::error!("{e}"),
                 }
             }
