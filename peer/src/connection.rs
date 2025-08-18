@@ -238,14 +238,17 @@ impl Peer<Connected> {
     }
 
     // helper function to map protocol message to peer events so manager react to them
-    async fn handle_msg(&self, msg: protocol::Message) {
+    async fn handle_msg(&mut self, msg: protocol::Message) {
         use protocol::Message::*;
         match msg {
             KeepAlive => todo!(),
-            Choke => todo!(),
-            Unchoke => todo!(),
+            // Can we request related
+            Choke => self.state.peer_state.am_choking = true,
+            Unchoke => self.state.peer_state.am_choking = false,
+            // Choke related
             Interested => todo!(),
             NotInterested => todo!(),
+            // Swarm info related
             Have { piece_index } => self
                 .manager_tx
                 .send(PeerEvent::Have {
@@ -259,6 +262,7 @@ impl Peer<Connected> {
                 .send(PeerEvent::Bitfield(self.peer_info.remote_pid, payload))
                 .await
                 .unwrap(),
+            // Piece Related
             Request(BlockInfo) => todo!(),
             Piece(Block) => todo!(),
             Cancel(BlockInfo) => todo!(),
