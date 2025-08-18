@@ -90,6 +90,7 @@ impl Handshake {
         bytes.freeze()
     }
 
+    //TODO: impl TryFrom<&[u8]>
     pub fn from_bytes(src: &[u8]) -> Option<Self> {
         if src.len() != Self::HANDSHAKE_LEN || src[0] != Self::PSTRLEN || &src[1..20] != Self::PSTR
         {
@@ -227,6 +228,7 @@ impl Encoder<Message> for MessageDecoder {
 
     /// <length prefix><message ID><payload>. The length prefix is a four byte big-endian value. The message ID is a single decimal byte. The payload is message dependent.
     fn encode(&mut self, item: Message, dst: &mut BytesMut) -> Result<(), Self::Error> {
+        // TODO: Avoid magic numbers use const
         match item {
             Message::KeepAlive => {
                 dst.put_u32(0);

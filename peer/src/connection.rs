@@ -1,34 +1,42 @@
-use std::net::SocketAddr;
-
+use crate::{
+    PeerError,
+    manager::{Id, PeerCommand, PeerEvent},
+};
 use bittorrent_core::types::{InfoHash, PeerID};
 use bytes::BytesMut;
-use futures::{SinkExt, StreamExt};
+use futures::{
+    SinkExt, StreamExt,
+    stream::{SplitSink, SplitStream},
+};
 use peer_protocol::{
     MessageDecoder,
-    protocol::{self, Handshake},
+    protocol::{self, Handshake, Message},
 };
+use std::{fmt::Debug, net::SocketAddr, time::Duration};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
     sync::mpsc,
+    time::{interval, timeout},
 };
 use tokio_util::codec::Framed;
-
-use crate::{PeerError, manager::PeerEvent};
+use tracing::instrument;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub struct PeerInfo {
-    pid: PeerID,
+    local_pid: PeerID,
+    remote_pid: Id,
     info_hash: InfoHash,
     addr: SocketAddr,
 }
 
 impl PeerInfo {
-    pub fn new(pid: PeerID, info_hash: InfoHash, addr: SocketAddr) -> Self {
+    pub fn new(local_pid: PeerID, remote_pid: Id, info_hash: InfoHash, addr: SocketAddr) -> Self {
         Self {
-            pid,
+            local_pid,
             info_hash,
             addr,
+            remote_pid,
         }
     }
 
@@ -38,8 +46,8 @@ impl PeerInfo {
     }
 
     /// Retrieve the peer id.
-    pub fn peer_id(&self) -> &PeerID {
-        &self.pid
+    pub fn local_peer_id(&self) -> &PeerID {
+        &self.local_pid
     }
 
     /// Retrieve the peer info hash.
@@ -49,13 +57,7 @@ impl PeerInfo {
 }
 
 #[derive(Debug)]
-pub struct PeerConnection {
-    peer_info: PeerInfo,
-    cmd_rx: mpsc::Receiver<PeerEvent>,
-    peer_state: PeerState,
-}
-
-#[derive(Debug)]
+// TODO: Idk how to rename this, because peer state is an enum, this is also a peer state
 struct PeerState {
     ///this client is choking the peer
     pub am_choking: bool,
@@ -79,45 +81,89 @@ impl Default for PeerState {
     }
 }
 
-impl PeerConnection {
-    pub fn new(peer_info: PeerInfo, cmd_rx: mpsc::Receiver<PeerEvent>) -> Self {
+pub trait State: Debug {}
+
+#[derive(Debug)]
+struct New {}
+impl State for New {}
+
+#[derive(Debug)]
+struct Handshaking {
+    stream: TcpStream,
+}
+impl State for Handshaking {}
+
+#[derive(Debug)]
+struct Connected {
+    sink: SplitSink<Framed<TcpStream, MessageDecoder>, Message>,
+    stream: SplitStream<Framed<TcpStream, MessageDecoder>>,
+    peer_state: PeerState,
+}
+
+impl Connected {
+    pub fn new(stream: TcpStream) -> Self {
+        let framed = Framed::new(stream, MessageDecoder {});
+        let (sink, stream) = framed.split();
         Self {
-            peer_info,
-            cmd_rx,
+            sink,
+            stream,
             peer_state: PeerState::default(),
         }
     }
+}
+impl State for Connected {}
 
-    // async fn handshake_peer(&self, stream: &mut TcpStream) -> Result<(), PeerError> {
-    //     let handshake = Handshake::new(*self.peer_info.peer_id(), *self.peer_info.info_hash());
-    //     stream
-    //         .write_all(&handshake.to_bytes())
-    //         .await
-    //         .map_err(PeerError::IoError)?;
-    //
-    //     let mut buf = BytesMut::zeroed(Handshake::HANDSHAKE_LEN);
-    //     stream
-    //         .read_exact(&mut buf)
-    //         .await
-    //         .map_err(PeerError::IoError)?;
-    //
-    //     let remote_handshake = Handshake::from_bytes(&buf).ok_or(PeerError::InvalidHandshake)?;
-    //
-    //     if remote_handshake.info_hash != *self.peer_info.info_hash() {
-    //         return Err(PeerError::InvalidHandshake);
-    //     }
-    //     Ok(())
-    // }
+struct Peer<S: State> {
+    state: S,
+    peer_info: PeerInfo,
+    manager_tx: mpsc::Sender<PeerEvent>,
+    cmd_rx: mpsc::Receiver<PeerCommand>,
+}
 
-    async fn handshake_peer(&self, stream: &mut TcpStream) -> Result<(), PeerError> {
+impl Peer<New> {
+    pub fn new(
+        peer_info: PeerInfo,
+        manager_tx: mpsc::Sender<PeerEvent>,
+        cmd_rx: mpsc::Receiver<PeerCommand>,
+    ) -> Self {
+        Self {
+            state: New {},
+            peer_info,
+            manager_tx,
+            cmd_rx,
+        }
+    }
+
+    pub async fn connect(self) -> Result<Peer<Handshaking>, PeerError> {
+        let stream = timeout(
+            Duration::from_secs(10),
+            TcpStream::connect(self.peer_info.addr()),
+        )
+        .await
+        .map_err(|_| PeerError::Timeout)?
+        .map_err(PeerError::IoError)?;
+
+        Ok(Peer {
+            state: Handshaking { stream },
+            peer_info: self.peer_info,
+            manager_tx: self.manager_tx,
+            cmd_rx: self.cmd_rx,
+        })
+    }
+}
+
+impl Peer<Handshaking> {
+    pub async fn handshake(mut self) -> Result<Peer<Connected>, PeerError> {
         tracing::info!(
             "Initiating handshake with peer at {}",
             self.peer_info.addr()
         );
-        let handshake = Handshake::new(*self.peer_info.peer_id(), *self.peer_info.info_hash());
+        let handshake =
+            Handshake::new(*self.peer_info.local_peer_id(), *self.peer_info.info_hash());
 
         tracing::debug!("Sending handshake message to peer");
-        stream
+        self.state
+            .stream
             .write_all(&handshake.to_bytes())
             .await
             .map_err(PeerError::IoError)?;
@@ -125,7 +171,8 @@ impl PeerConnection {
 
         tracing::debug!("Waiting to receive handshake from peer");
         let mut buf = BytesMut::zeroed(Handshake::HANDSHAKE_LEN);
-        stream
+        self.state
+            .stream
             .read_exact(&mut buf)
             .await
             .map_err(PeerError::IoError)?;
@@ -143,35 +190,46 @@ impl PeerConnection {
             "Handshake successful with peer at {}",
             self.peer_info.addr()
         );
-        Ok(())
+
+        Ok(Peer {
+            state: Connected::new(self.state.stream),
+            peer_info: self.peer_info,
+            manager_tx: self.manager_tx,
+            cmd_rx: self.cmd_rx,
+        })
     }
+}
 
-    pub async fn run(mut self, mut stream: TcpStream) -> Result<(), PeerError> {
-        //The handshake is a required message and must be the first message transmitted by the client.
-        self.handshake_peer(&mut stream).await?;
-
-        let framed = Framed::new(stream, MessageDecoder {});
-        let (mut sink, mut stream) = framed.split();
+impl Peer<Connected> {
+    #[instrument(
+    name = "peer",
+    skip_all,
+    fields(
+        pid = ?self.peer_info.remote_pid,
+        addr = %self.peer_info.addr,
+        )
+    )]
+    pub async fn run(mut self) -> Result<(), PeerError> {
+        let mut heartbeat = interval(Duration::from_secs(60));
 
         loop {
             tokio::select! {
-                maybe_msg = stream.next() => {
+                maybe_msg = self.state.stream.next() => {
                     match maybe_msg {
-                        Some(Ok(msg)) => self.handle_msg(&msg),
+                        Some(Ok(msg)) => self.handle_msg(msg).await,
                         Some(Err(e)) => return Err(PeerError::IoError(e)),
                         None => return Err(PeerError::Disconnected),
                     }
                 }
-                maybe_event= self.cmd_rx.recv() => {
-                    match maybe_event {
-                        Some(PeerEvent::SendMessage(msg)) => {
-                            sink.send(msg).await.map_err(PeerError::IoError)?;
-                        }
-                        Some(PeerEvent::Disconnect) => {
-                            // return Err(PeerError::Disconnect);
-                        }
+                maybe_cmd= self.cmd_rx.recv() => {
+                    match maybe_cmd{
+                        Some(PeerCommand::SendMessage(msg)) => self.state.sink.send(msg).await.map_err(PeerError::IoError)?,
+                        Some(PeerCommand::Disconnect) => break,
                         None => break,
                     }
+                }
+                _ = heartbeat.tick() => {
+                    self.state.sink.send(Message::KeepAlive).await.map_err(PeerError::IoError)?
                 }
             }
         }
@@ -179,7 +237,8 @@ impl PeerConnection {
         Ok(())
     }
 
-    fn handle_msg(&mut self, msg: &protocol::Message) {
+    // helper function to map protocol message to peer events so manager react to them
+    async fn handle_msg(&self, msg: protocol::Message) {
         use protocol::Message::*;
         match msg {
             KeepAlive => todo!(),
@@ -187,8 +246,19 @@ impl PeerConnection {
             Unchoke => todo!(),
             Interested => todo!(),
             NotInterested => todo!(),
-            Have { piece_index: u32 } => todo!(),
-            Bitfield(Bytes) => todo!(),
+            Have { piece_index } => self
+                .manager_tx
+                .send(PeerEvent::Have {
+                    pid: self.peer_info.remote_pid,
+                    piece_idx: piece_index,
+                })
+                .await
+                .unwrap(),
+            Bitfield(payload) => self
+                .manager_tx
+                .send(PeerEvent::Bitfield(self.peer_info.remote_pid, payload))
+                .await
+                .unwrap(),
             Request(BlockInfo) => todo!(),
             Piece(Block) => todo!(),
             Cancel(BlockInfo) => todo!(),
@@ -196,8 +266,32 @@ impl PeerConnection {
     }
 }
 
-// impl Drop for PeerConnection {
-//     fn drop(&mut self) {
-//         // self.manager_tx.send(TrackerMessage::Disconnect)
-//     }
-// }
+pub fn spawn_peer(
+    info: PeerInfo,
+    manager_tx: mpsc::Sender<PeerEvent>,
+) -> mpsc::Sender<PeerCommand> {
+    let (cmd_tx, cmd_rx) = mpsc::channel(64);
+
+    tokio::spawn(async move {
+        // attach context to all logs from this task
+
+        let result = async {
+            let p0 = Peer::new(info, manager_tx.clone(), cmd_rx);
+            // Establish connection to remote peer
+            let p1 = p0.connect().await?;
+            // Handshake remote peer
+            let p2 = p1.handshake().await?;
+            p2.run().await
+        }
+        .await;
+
+        if let Err(err) = result {
+            tracing::warn!(?err, "peer task exited with error");
+            let _ = manager_tx
+                .send(PeerEvent::PeerError(info.remote_pid, err))
+                .await;
+        }
+    });
+
+    cmd_tx
+}

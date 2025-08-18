@@ -2,6 +2,8 @@ use std::collections::HashMap;
 
 use bytes::Bytes;
 
+// TODO: Implement ExtendedHandshake
+
 /// [docs](https://www.libtorrent.org/extension_protocol.html)
 pub struct ExtendedHandshake {
     /// Dictionary of supported extension messages which maps names of

@@ -1,10 +1,13 @@
 use std::sync::Arc;
 
 use bittorrent_core::{metainfo::parse_torrent_from_file, types::PeerID};
-use peer::{PeerInfo, PeerManagerHandle};
-use tokio::net::TcpStream;
+use peer::PeerManagerHandle;
 use tracker_client::TrackerHandler;
 
+// TODO: Flaws of this:
+// use need to take address from peer and need to perform tcp connections, and then also await on
+// this
+// what we actually want is to await on peer manager ending
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
@@ -17,31 +20,19 @@ async fn main() {
     let client_id = PeerID::new([0u8; 20]);
 
     let tracker = TrackerHandler::new(client_id);
-    let peers = tracker
+    let tracker_resp = tracker
         .announce(torrent.clone())
         .await
-        .expect("failed to announce to tracker")
-        .peers;
+        .expect("failed to announce to tracker");
 
-    let manager = PeerManagerHandle::new();
-
-    let mut handles = vec![];
-    for addr in peers {
-        tracing::info!("Connecting to {addr:?}");
-        let info = PeerInfo::new(client_id, torrent.info_hash, addr);
-        let manager = manager.clone();
-        let handle = tokio::spawn(async move {
-            if let Ok(stream) = TcpStream::connect(addr).await {
-                match manager.add_peer(info, stream).await {
-                    Ok(_) => tracing::info!("Connected to {addr:?}"),
-                    // This error is not clear, why adding a peer could fail?
-                    Err(e) => tracing::error!("{e}"),
-                }
-            }
-        });
-        handles.push(handle);
+    let manager = PeerManagerHandle::new(torrent.clone());
+    for addr in tracker_resp.peers {
+        manager
+            .add_peer(addr,client_id)
+            .unwrap();
     }
-    for handle in handles {
-        handle.await.expect("failed to join handle");
-    }
+    // Park until Ctrl+C
+    tokio::signal::ctrl_c()
+        .await
+        .expect("failed to listen for ctrl_c");
 }
