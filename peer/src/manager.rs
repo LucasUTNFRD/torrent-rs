@@ -11,7 +11,7 @@ use bitfield::Bitfield;
 use bittorrent_core::{metainfo::TorrentInfo, types::PeerID};
 use bytes::Bytes;
 use peer_protocol::protocol::Message;
-use picker::{AvailabilityUpdate, Picker};
+use picker::{AvailabilityUpdate, Picker, PieceState};
 use tokio::sync::mpsc;
 
 use crate::{
@@ -103,6 +103,7 @@ struct PeerState {
     pub pid: Id,
     pub sender: mpsc::Sender<PeerCommand>,
     pub bitfield: Bitfield,
+    pub am_interested: bool,
 }
 
 impl PeerManager {
@@ -158,6 +159,7 @@ impl PeerManager {
                         pid: id,
                         sender: peer_tx,
                         bitfield: Bitfield::new(self.torrent.num_pieces()),
+                        am_interested: false,
                     },
                 );
             }
@@ -195,15 +197,32 @@ impl PeerManager {
                         self.picker
                             .increment_availability(AvailabilityUpdate::Bitfield(&peer.bitfield));
 
-                        // Send our bitfield
-                        let _ = peer
-                            .sender
-                            .send(PeerCommand::SendMessage(Message::Bitfield(
-                                self.bitfield.as_bytes(),
-                            )))
-                            .await;
+                        // Send our bitfield if we have at least one piece
+                        if !self.bitfield.is_empty() {
+                            let _ = peer
+                                .sender
+                                .send(PeerCommand::SendMessage(Message::Bitfield(
+                                    self.bitfield.as_bytes(),
+                                )))
+                                .await;
+                        }
 
                         // determine if we are interested
+                        if self
+                            .picker
+                            .send_interest(AvailabilityUpdate::Bitfield(&peer.bitfield))
+                        {
+                            let _ = peer
+                                .sender
+                                .send(PeerCommand::SendMessage(Message::Interested))
+                                .await;
+
+                            if let Some((idx, piece)) = self.picker.pick_piece(&peer.bitfield) {
+                                // peer.sender.send(PeerCommand::Request(piece))
+                                self.picker.mark_piece_as(idx, PieceState::Requested);
+                                //TODO: Add piece request expiration policy
+                            }
+                        }
                         // and if so set download queue
                     }
                     Err(e) => {
@@ -221,10 +240,9 @@ mod picker {
     use std::sync::Arc;
 
     use bittorrent_core::metainfo::TorrentInfo;
-    use bytes::BufMut;
     use peer_protocol::protocol::BlockInfo;
 
-    use super::{Id, bitfield::Bitfield};
+    use super::bitfield::Bitfield;
 
     pub const BLOCK_SIZE: u32 = 1 << 14;
 
@@ -241,6 +259,7 @@ mod picker {
         partial: bool,
         state: PieceState,
         size: usize,
+        // blocks: Vec<BlockInfo>,
     }
 
     #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -265,6 +284,7 @@ mod picker {
                     partial: false,
                     state: PieceState::None,
                     size: torrent.get_piece_len(piece_idx) as usize,
+                    // blocks:
                 })
                 .collect();
             Self {
@@ -295,6 +315,26 @@ mod picker {
             }
         }
 
+        // returns true if peer has a piece we dont
+        // this could be called when the peer sends their bitifled
+        // or the peer sent his bitfield and previously we were not interested
+        // and now he sent a have, and we could be now interested
+        pub fn send_interest(&self, update: AvailabilityUpdate) -> bool {
+            match update {
+                AvailabilityUpdate::Bitfield(bitfield) => {
+                    for idx in bitfield.iter_set() {
+                        if self.piece_availability[idx].state == PieceState::None {
+                            return true;
+                        }
+                    }
+                    false
+                }
+                AvailabilityUpdate::Index(idx) => {
+                    self.piece_availability[idx as usize].state == PieceState::None
+                }
+            }
+        }
+
         pub fn decrement_availability(&mut self, update: AvailabilityUpdate) {
             match update {
                 AvailabilityUpdate::Bitfield(bitfield) => {
@@ -316,24 +356,41 @@ mod picker {
             }
         }
 
+        fn get_blocks(&self, piece_idx: usize) -> Vec<BlockInfo> {
+            let piece_size = self.piece_availability[piece_idx].size;
+            (0..piece_size)
+                .step_by(BLOCK_SIZE as usize)
+                .map(|offset| BlockInfo {
+                    index: piece_idx as u32,
+                    begin: offset as u32,
+                    length: BLOCK_SIZE.min(piece_size as u32 - offset as u32),
+                })
+                .collect()
+        }
+
         /// Called of this function, Must call Mark_as_downloading
-        pub fn pick_pieces(
-            &self,
-            our_bitifled: &Bitfield,
-            peer_bitfield: &Bitfield,
-        ) -> Option<(usize, Vec<usize>)> {
+        pub fn pick_piece(&self, peer_bitfield: &Bitfield) -> Option<(usize, Vec<BlockInfo>)> {
             let mut candidate = Vec::new();
             for idx_peer_has in peer_bitfield.iter_set() {
-                if !our_bitifled.has(idx_peer_has) {
+                if self.piece_availability[idx_peer_has].state == PieceState::None {
                     candidate.push(idx_peer_has);
                 }
             }
-            // piece peer has and we dont are candidate
-            // sort them by availabilty + if partial
-            // candidate.is_empty().then_some(candidate)
-            todo!()
+
+            let piece_idx = candidate.first()?;
+            let blocks = self.get_blocks(*piece_idx);
+
+            Some((*piece_idx, blocks))
+        }
+
+        pub fn mark_piece_as(&mut self, piece_idx: usize, state: PieceState) {
+            if let Some(piece) = self.piece_availability.get_mut(piece_idx) {
+                piece.state = state;
+            }
         }
     }
+
+    // TODO: Add unit test for picker
 }
 
 mod bitfield {
@@ -414,6 +471,10 @@ mod bitfield {
             Bytes::from(self.bits.clone())
         }
 
+        pub fn is_empty(&self) -> bool {
+            self.bits.iter().all(|b| *b == 0)
+        }
+
         pub fn all_set(&self) -> bool {
             if self.nbits == 0 {
                 return false;
@@ -448,6 +509,7 @@ mod bitfield {
             true
         }
 
+        #[allow(dead_code)]
         pub fn has(&self, index: usize) -> bool {
             if index >= self.nbits {
                 return false;

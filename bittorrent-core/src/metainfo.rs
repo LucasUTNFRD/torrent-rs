@@ -134,6 +134,19 @@ impl TorrentInfo {
         trackers
     }
 
+    pub fn get_piece_len(&self, piece_idx: usize) -> u32 {
+        if piece_idx == self.num_pieces() - 1 {
+            let last_len = self.total_size() as u32 % self.info.piece_length as u32;
+            if last_len == 0 {
+                self.info.piece_length as u32
+            } else {
+                last_len
+            }
+        } else {
+            self.info.piece_length as u32
+        }
+    }
+
     /// Check if this is a private torrent
     pub fn is_private(&self) -> bool {
         self.info.private == Some(1)
