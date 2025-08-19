@@ -10,14 +10,19 @@ use futures::{
 };
 use peer_protocol::{
     MessageDecoder,
-    protocol::{self, Handshake, Message},
+    protocol::{self, Block, BlockInfo, Handshake, Message},
 };
-use std::{fmt::Debug, net::SocketAddr, time::Duration};
+use std::{
+    collections::HashSet,
+    fmt::Debug,
+    net::SocketAddr,
+    time::{Duration, Instant},
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
     sync::mpsc,
-    time::{interval, timeout},
+    time::{interval_at, timeout},
 };
 use tokio_util::codec::Framed;
 use tracing::instrument;
@@ -98,6 +103,13 @@ struct Connected {
     sink: SplitSink<Framed<TcpStream, MessageDecoder>, Message>,
     stream: SplitStream<Framed<TcpStream, MessageDecoder>>,
     peer_state: PeerState,
+    download_queue: Option<Vec<BlockInfo>>,
+    outbound_requests: HashSet<BlockInfo>,
+    // Track of pieces we requested and we are awaiting
+    // outbound_requests:
+    // track of pieces peer requested
+    // inbound_requests
+    // inflight_blocks:
 }
 
 impl Connected {
@@ -108,6 +120,8 @@ impl Connected {
             sink,
             stream,
             peer_state: PeerState::default(),
+            download_queue: None,
+            outbound_requests: HashSet::new(),
         }
     }
 }
@@ -210,20 +224,49 @@ impl Peer<Connected> {
         )
     )]
     pub async fn run(mut self) -> Result<(), PeerError> {
-        let mut heartbeat = interval(Duration::from_secs(60));
+        // send message to keep the connection alive
+        let mut heartbeat = interval_at(
+            tokio::time::Instant::now() + Duration::from_secs(60),
+            Duration::from_secs(60),
+        );
+
+        let mut last_message_time = Instant::now();
 
         loop {
             tokio::select! {
                 maybe_msg = self.state.stream.next() => {
                     match maybe_msg {
-                        Some(Ok(msg)) => self.handle_msg(msg).await,
+                        Some(Ok(msg)) => {
+                        // last_message_time =
+                            self.handle_msg(msg).await;
+                        }
                         Some(Err(e)) => return Err(PeerError::IoError(e)),
                         None => return Err(PeerError::Disconnected),
                     }
                 }
                 maybe_cmd= self.cmd_rx.recv() => {
                     match maybe_cmd{
-                        Some(PeerCommand::SendMessage(msg)) => self.state.sink.send(msg).await.map_err(PeerError::IoError)?,
+                        Some(PeerCommand::SendMessage(msg)) => {
+                            // before sending process state
+                            tracing::debug!("Sending {msg:?}");
+                            match msg{
+                                Message::Interested => {
+                                    self.state.peer_state.am_interested=true;
+                                }
+                                Message::NotInterested => {
+                                    self.state.peer_state.am_interested = false;
+                                }
+                                _ => {}
+                            };
+
+                            self.state.sink.send(msg).await.map_err(PeerError::IoError)?;
+                        }
+                        Some(PeerCommand::AvailableTask(tasks)) => {
+                            self.state.download_queue = Some(tasks);
+                            if let Err(e)  = self.try_request_blocks().await{
+                                todo!()
+                            }
+                        }
                         Some(PeerCommand::Disconnect) => break,
                         None => break,
                     }
@@ -237,7 +280,36 @@ impl Peer<Connected> {
         Ok(())
     }
 
-    // helper function to map protocol message to peer events so manager react to them
+    async fn try_request_blocks(&mut self) -> Result<(), PeerError> {
+        if self.state.peer_state.am_interested
+            && !self.state.peer_state.peer_choking & self.state.download_queue.is_some()
+        {
+            self.request_blocks().await?
+        }
+        Ok(())
+    }
+
+    const MAX_PIPELINE: usize = 5;
+    async fn request_blocks(&mut self) -> Result<(), PeerError> {
+        while let Some(block) = self.pop_block() {
+            if self.state.outbound_requests.len() < Self::MAX_PIPELINE {
+                self.state.outbound_requests.insert(block);
+
+                self.state
+                    .sink
+                    .send(Message::Request(block))
+                    .await
+                    .map_err(PeerError::IoError)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn pop_block(&mut self) -> Option<BlockInfo> {
+        self.state.download_queue.as_mut().and_then(|q| q.pop())
+    }
+
+    // helper function to map protocol message recv from remote peer  to PeerEvent so manager react to them
     async fn handle_msg(&mut self, msg: protocol::Message) {
         use protocol::Message::*;
         match msg {
@@ -263,12 +335,25 @@ impl Peer<Connected> {
                 .await
                 .unwrap(),
             // Piece Related
-            Request(BlockInfo) => todo!(),
-            Piece(Block) => todo!(),
+            Request(block_info) => todo!(),
+            Piece(block) => {
+                // check if we requested this block
+                let block_info = BlockInfo {
+                    index: block.index,
+                    begin: block.begin,
+                    length: block.data.len() as u32,
+                };
+
+                if self.state.outbound_requests.remove(&block_info) {
+                    self.manager_tx.send(PeerEvent::AddBlock(block))
+                }
+            }
             Cancel(BlockInfo) => todo!(),
         }
     }
 }
+
+// IDEA: Use an Arc<SharedState> wit atomics to share download stats,
 
 pub fn spawn_peer(
     info: PeerInfo,

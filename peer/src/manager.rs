@@ -10,8 +10,9 @@ use std::{
 use bitfield::Bitfield;
 use bittorrent_core::{metainfo::TorrentInfo, types::PeerID};
 use bytes::Bytes;
-use peer_protocol::protocol::Message;
+use peer_protocol::protocol::{Block, BlockInfo, Message};
 use picker::{AvailabilityUpdate, Picker, PieceState};
+use piece_cache::PieceCache;
 use tokio::sync::mpsc;
 
 use crate::{
@@ -33,12 +34,14 @@ pub enum PeerEvent {
     Have { pid: Id, piece_idx: u32 },
     Bitfield(Id, Bytes),
     PeerError(Id, PeerError),
+    AddBlock(Block),
 }
 
 #[derive(Debug)]
 pub enum PeerCommand {
     SendMessage(Message),
     Disconnect,
+    AvailableTask(Vec<BlockInfo>),
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
@@ -95,6 +98,7 @@ struct PeerManager {
     // Actor managers
     //disk
     picker: Picker,
+    cache: PieceCache,
     //choker
 }
 
@@ -117,6 +121,7 @@ impl PeerManager {
             manager_rx,
             peer_event_tx,
             peer_event_rx,
+            cache: PieceCache::new(torrent.clone()),
             bitfield: Bitfield::new(torrent.num_pieces()),
             picker: Picker::new(torrent.clone()),
             torrent,
@@ -181,6 +186,25 @@ impl PeerManager {
 
                 self.picker
                     .increment_availability(AvailabilityUpdate::Index(piece_idx));
+
+                if !peer.am_interested
+                    && self
+                        .picker
+                        .send_interest(AvailabilityUpdate::Bitfield(&peer.bitfield))
+                {
+                    let _ = peer
+                        .sender
+                        .send(PeerCommand::SendMessage(Message::Interested))
+                        .await;
+
+                    peer.am_interested = true;
+
+                    if let Some((idx, piece)) = self.picker.pick_piece(&peer.bitfield) {
+                        let _ = peer.sender.send(PeerCommand::AvailableTask(piece));
+                        self.picker.mark_piece_as(idx, PieceState::Requested);
+                        //TODO: Add piece request expiration policy
+                    }
+                }
             }
             Bitfield(pid, payload) => {
                 // A bitfield of the wrong length is considered an error.
@@ -216,6 +240,7 @@ impl PeerManager {
                                 .sender
                                 .send(PeerCommand::SendMessage(Message::Interested))
                                 .await;
+                            peer.am_interested = true;
 
                             if let Some((idx, piece)) = self.picker.pick_piece(&peer.bitfield) {
                                 // peer.sender.send(PeerCommand::Request(piece))
@@ -226,10 +251,22 @@ impl PeerManager {
                         // and if so set download queue
                     }
                     Err(e) => {
+                        tracing::warn!("dropping peer connection - reason {e}");
+                        // POTENTIAL BUG: We are dropping connection and remove peer entry in this
+                        // block
                         let peer = self.peers.remove(&pid).unwrap();
                         let _ = peer.sender.send(PeerCommand::Disconnect).await;
                     }
                 };
+            }
+            AddBlock(block) => {
+                // cache the block
+                if let Some(completed_piece) = self.cache.insert_block(&block) {
+                    self.picker
+                        .mark_piece_as(block.index as usize, PieceState::Writing);
+
+                    todo!("Validate piece")
+                }
             }
             PeerError(id, err) => {}
         }
@@ -341,16 +378,17 @@ mod picker {
                     if bitfield.all_set() {
                         self.piece_availability
                             .iter_mut()
-                            .for_each(|p| p.availabilty += 1);
+                            .for_each(|p| p.availabilty = p.availabilty.saturating_sub(1));
                     } else {
                         for idx in bitfield.iter_set() {
-                            self.piece_availability[idx].availabilty += 1;
+                            let p = &mut self.piece_availability[idx];
+                            p.availabilty = p.availabilty.saturating_sub(1);
                         }
                     }
                 }
                 AvailabilityUpdate::Index(idx) => {
                     if let Some(p) = self.piece_availability.get_mut(idx as usize) {
-                        p.availabilty += 1;
+                        p.availabilty = p.availabilty.saturating_sub(1)
                     }
                 }
             }
@@ -370,17 +408,16 @@ mod picker {
 
         /// Called of this function, Must call Mark_as_downloading
         pub fn pick_piece(&self, peer_bitfield: &Bitfield) -> Option<(usize, Vec<BlockInfo>)> {
-            let mut candidate = Vec::new();
-            for idx_peer_has in peer_bitfield.iter_set() {
-                if self.piece_availability[idx_peer_has].state == PieceState::None {
-                    candidate.push(idx_peer_has);
-                }
-            }
+            // Rarest-first among pieces we don't have (state == None) and the peer has
+            let piece_idx = peer_bitfield
+                .iter_set()
+                .filter(|&i| self.piece_availability[i].state == PieceState::None)
+                .min_by_key(|&i| self.piece_availability[i].availabilty)?;
 
-            let piece_idx = candidate.first()?;
-            let blocks = self.get_blocks(*piece_idx);
+            // let piece_idx = candidate.first()?;
+            let blocks = self.get_blocks(piece_idx);
 
-            Some((*piece_idx, blocks))
+            Some((piece_idx, blocks))
         }
 
         pub fn mark_piece_as(&mut self, piece_idx: usize, state: PieceState) {
@@ -391,6 +428,56 @@ mod picker {
     }
 
     // TODO: Add unit test for picker
+}
+
+mod piece_cache {
+    use std::{collections::HashMap, sync::Arc};
+
+    use bittorrent_core::metainfo::TorrentInfo;
+    use peer_protocol::protocol::Block;
+
+    pub struct PieceCache {
+        pieces: HashMap<usize, PieceMetadata>,
+    }
+
+    struct PieceMetadata {
+        buffer: Box<[u8]>,
+        piece_length: usize,
+        downloaded: usize,
+    }
+
+    impl PieceCache {
+        pub fn new(torrent: Arc<TorrentInfo>) -> Self {
+            let mut pieces = HashMap::with_capacity(torrent.num_pieces());
+            for i in 0..torrent.num_pieces() {
+                let piece_length = torrent.get_piece_len(i) as usize;
+                let buffer = vec![0; piece_length as usize].into_boxed_slice();
+                let piece_metadata = PieceMetadata {
+                    buffer,
+                    piece_length,
+                    downloaded: 0,
+                };
+                pieces.insert(i, piece_metadata);
+            }
+            Self { pieces }
+        }
+
+        pub fn insert_block(&mut self, block: &Block) -> Option<Box<[u8]>> {
+            let index = block.index as usize;
+
+            let piece = self.pieces.get_mut(&index)?;
+            let offset = block.begin as usize;
+            piece.buffer[offset..offset + block.data.len()].copy_from_slice(&block.data);
+            // BUG: WE overcount if presence of duplicates
+            piece.downloaded += block.data.len();
+            if piece.downloaded >= piece.piece_length {
+                // Remove the piece from the cache
+                let piece = self.pieces.remove(&index).unwrap();
+                return Some(piece.buffer);
+            }
+            None
+        }
+    }
 }
 
 mod bitfield {
