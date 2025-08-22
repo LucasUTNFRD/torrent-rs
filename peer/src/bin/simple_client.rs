@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use bittorrent_core::{metainfo::parse_torrent_from_file, types::PeerID};
+use bittorrent_common::{metainfo::parse_torrent_from_file, types::PeerID};
 use peer::PeerManagerHandle;
 use tracker_client::TrackerHandler;
 
@@ -27,9 +27,7 @@ async fn main() {
 
     let manager = PeerManagerHandle::new(torrent.clone());
     for addr in tracker_resp.peers {
-        manager
-            .add_peer(addr,client_id)
-            .unwrap();
+        manager.add_peer(addr, client_id).unwrap();
     }
     // Park until Ctrl+C
     tokio::signal::ctrl_c()

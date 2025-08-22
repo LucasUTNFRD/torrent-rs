@@ -3,7 +3,7 @@ use std::io::{self};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio_util::codec::{Decoder, Encoder};
 
-use bittorrent_core::types::{InfoHash, PeerID};
+use bittorrent_common::types::{InfoHash, PeerID};
 
 // TODO: Implement Extended Handshake Message code/decode
 

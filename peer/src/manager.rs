@@ -8,7 +8,7 @@ use std::{
 };
 
 use bitfield::Bitfield;
-use bittorrent_core::{metainfo::TorrentInfo, types::PeerID};
+use bittorrent_common::{metainfo::TorrentInfo, types::PeerID};
 use bytes::Bytes;
 use peer_protocol::protocol::{Block, BlockInfo, Message};
 use picker::{AvailabilityUpdate, Picker, PieceState};
@@ -45,7 +45,7 @@ pub enum PeerCommand {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
-pub struct Id(usize);
+pub struct Id(pub usize);
 static PEER_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 // Peer manager is in charge of choking and unchoking
@@ -156,6 +156,7 @@ impl PeerManager {
             } => {
                 let id = PEER_COUNTER.fetch_add(1, Ordering::Relaxed);
                 let id = Id(id);
+
                 let peer_info = PeerInfo::new(our_client_id, id, self.torrent.info_hash, peer_addr);
                 let peer_tx = spawn_peer(peer_info, self.peer_event_tx.clone());
                 self.peers.insert(
@@ -200,7 +201,7 @@ impl PeerManager {
                     peer.am_interested = true;
 
                     if let Some((idx, piece)) = self.picker.pick_piece(&peer.bitfield) {
-                        let _ = peer.sender.send(PeerCommand::AvailableTask(piece));
+                        let _ = peer.sender.send(PeerCommand::AvailableTask(piece)).await;
                         self.picker.mark_piece_as(idx, PieceState::Requested);
                         //TODO: Add piece request expiration policy
                     }
@@ -276,7 +277,7 @@ impl PeerManager {
 mod picker {
     use std::sync::Arc;
 
-    use bittorrent_core::metainfo::TorrentInfo;
+    use bittorrent_common::metainfo::TorrentInfo;
     use peer_protocol::protocol::BlockInfo;
 
     use super::bitfield::Bitfield;
@@ -433,7 +434,7 @@ mod picker {
 mod piece_cache {
     use std::{collections::HashMap, sync::Arc};
 
-    use bittorrent_core::metainfo::TorrentInfo;
+    use bittorrent_common::metainfo::TorrentInfo;
     use peer_protocol::protocol::Block;
 
     pub struct PieceCache {
@@ -451,7 +452,7 @@ mod piece_cache {
             let mut pieces = HashMap::with_capacity(torrent.num_pieces());
             for i in 0..torrent.num_pieces() {
                 let piece_length = torrent.get_piece_len(i) as usize;
-                let buffer = vec![0; piece_length as usize].into_boxed_slice();
+                let buffer = vec![0; piece_length].into_boxed_slice();
                 let piece_metadata = PieceMetadata {
                     buffer,
                     piece_length,

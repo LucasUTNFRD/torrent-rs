@@ -18,4 +18,4 @@ reqwest = "0.12.22"
 url = "2.5.4"
 urlencoding = "2.1.3"
 bencode = { path = "../bencode" }
-bittorrent-core = { path = "../bittorrent-core/" }
+bittorrent-common = { path = "../bittorrent-common/" }

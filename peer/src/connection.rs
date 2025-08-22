@@ -2,7 +2,7 @@ use crate::{
     PeerError,
     manager::{Id, PeerCommand, PeerEvent},
 };
-use bittorrent_core::types::{InfoHash, PeerID};
+use bittorrent_common::types::{InfoHash, PeerID};
 use bytes::BytesMut;
 use futures::{
     SinkExt, StreamExt,
@@ -10,14 +10,9 @@ use futures::{
 };
 use peer_protocol::{
     MessageDecoder,
-    protocol::{self, Block, BlockInfo, Handshake, Message},
+    protocol::{self, BlockInfo, Handshake, Message},
 };
-use std::{
-    collections::HashSet,
-    fmt::Debug,
-    net::SocketAddr,
-    time::{Duration, Instant},
-};
+use std::{collections::HashSet, fmt::Debug, net::SocketAddr, time::Duration};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
@@ -89,17 +84,17 @@ impl Default for PeerState {
 pub trait State: Debug {}
 
 #[derive(Debug)]
-struct New {}
+pub struct New {}
 impl State for New {}
 
 #[derive(Debug)]
-struct Handshaking {
+pub struct Handshaking {
     stream: TcpStream,
 }
 impl State for Handshaking {}
 
 #[derive(Debug)]
-struct Connected {
+pub struct Connected {
     sink: SplitSink<Framed<TcpStream, MessageDecoder>, Message>,
     stream: SplitStream<Framed<TcpStream, MessageDecoder>>,
     peer_state: PeerState,
@@ -127,7 +122,7 @@ impl Connected {
 }
 impl State for Connected {}
 
-struct Peer<S: State> {
+pub struct Peer<S: State> {
     state: S,
     peer_info: PeerInfo,
     manager_tx: mpsc::Sender<PeerEvent>,
@@ -230,8 +225,6 @@ impl Peer<Connected> {
             Duration::from_secs(60),
         );
 
-        let mut last_message_time = Instant::now();
-
         loop {
             tokio::select! {
                 maybe_msg = self.state.stream.next() => {
@@ -264,7 +257,7 @@ impl Peer<Connected> {
                         Some(PeerCommand::AvailableTask(tasks)) => {
                             self.state.download_queue = Some(tasks);
                             if let Err(e)  = self.try_request_blocks().await{
-                                todo!()
+                                tracing::warn!(?e);
                             }
                         }
                         Some(PeerCommand::Disconnect) => break,
@@ -282,7 +275,8 @@ impl Peer<Connected> {
 
     async fn try_request_blocks(&mut self) -> Result<(), PeerError> {
         if self.state.peer_state.am_interested
-            && !self.state.peer_state.peer_choking & self.state.download_queue.is_some()
+            && !self.state.peer_state.peer_choking
+            && self.state.download_queue.is_some()
         {
             self.request_blocks().await?
         }
@@ -309,14 +303,14 @@ impl Peer<Connected> {
         self.state.download_queue.as_mut().and_then(|q| q.pop())
     }
 
-    // helper function to map protocol message recv from remote peer  to PeerEvent so manager react to them
+    // helper function to map protocol message recv from remote peer  to PeerEvent so manager reacts to them
     async fn handle_msg(&mut self, msg: protocol::Message) {
         use protocol::Message::*;
         match msg {
             KeepAlive => todo!(),
             // Can we request related
-            Choke => self.state.peer_state.am_choking = true,
-            Unchoke => self.state.peer_state.am_choking = false,
+            Choke => self.state.peer_state.peer_choking = true,
+            Unchoke => self.state.peer_state.peer_choking = false,
             // Choke related
             Interested => todo!(),
             NotInterested => todo!(),
@@ -343,9 +337,8 @@ impl Peer<Connected> {
                     begin: block.begin,
                     length: block.data.len() as u32,
                 };
-
                 if self.state.outbound_requests.remove(&block_info) {
-                    self.manager_tx.send(PeerEvent::AddBlock(block))
+                    let _ = self.manager_tx.send(PeerEvent::AddBlock(block)).await;
                 }
             }
             Cancel(BlockInfo) => todo!(),

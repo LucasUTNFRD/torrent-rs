@@ -251,7 +251,7 @@ fn parse_peers(dict: &BTreeMap<Vec<u8>, Bencode>) -> Result<Vec<SocketAddr>, Tra
 mod tests {
     use std::net::{Ipv4Addr, SocketAddr};
 
-    use bittorrent_core::{metainfo::parse_torrent_from_file, types::PeerID};
+    use bittorrent_common::{metainfo::parse_torrent_from_file, types::PeerID};
     use url::Url;
 
     use crate::{AnnounceParams, Events, HttpTrackerClient, http::QueryParamsBuilder};

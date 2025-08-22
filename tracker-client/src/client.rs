@@ -1,6 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
-use bittorrent_core::{
+use bittorrent_common::{
     metainfo::TorrentInfo,
     types::{InfoHash, PeerID},
 };
@@ -231,7 +231,9 @@ impl TrackerHandler {
 mod test {
     use std::sync::Arc;
 
-    use bittorent_core::{client::PORT, torrent::metainfo::parse_torrent_from_file, types::PeerID};
+    use bittorent_common::{
+        client::PORT, torrent::metainfo::parse_torrent_from_file, types::PeerID,
+    };
     use futures::future::join_all;
     use rand::Rng;
     use tokio::sync::oneshot;

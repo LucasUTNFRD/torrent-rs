@@ -1,6 +1,6 @@
 use std::net::Ipv4Addr;
 
-use bittorrent_core::{metainfo::parse_torrent_from_file, types::PeerID};
+use bittorrent_common::{metainfo::parse_torrent_from_file, types::PeerID};
 use tracker_client::{AnnounceParams, Events, HttpTrackerClient, TrackerClient};
 use url::Url;
 use wiremock::matchers::{method, path};
