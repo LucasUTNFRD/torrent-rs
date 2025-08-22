@@ -2,6 +2,7 @@
 members = [
   "bencode",
   "bittorrent-common",
+  "bittorrent-core",
   "peer",
   "peer-protocol",
   "storage",
@@ -14,3 +15,4 @@ sha1 = "0.10"
 thiserror = "2.0"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
+tracing-subscriber = "0.3"

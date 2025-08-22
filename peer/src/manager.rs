@@ -13,7 +13,7 @@ use bytes::Bytes;
 use peer_protocol::protocol::{Block, BlockInfo, Message};
 use picker::{AvailabilityUpdate, Picker, PieceState};
 use piece_cache::PieceCache;
-use tokio::sync::mpsc;
+use tokio::{sync::mpsc, task::JoinHandle};
 
 use crate::{
     PeerError,
@@ -53,9 +53,10 @@ static PEER_COUNTER: AtomicUsize = AtomicUsize::new(0);
 struct PeerConnectionConfig {}
 
 //  A handle is an object that other pieces of code can use to talk to the actor, and is also what keeps the actor alive.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct PeerManagerHandle {
     manager_tx: mpsc::UnboundedSender<ManagerCommand>,
+    pub handle: JoinHandle<()>,
 }
 
 impl PeerManagerHandle {
@@ -64,19 +65,16 @@ impl PeerManagerHandle {
         let (manager_tx, manager_rx) = mpsc::unbounded_channel();
 
         let manager = PeerManager::new(manager_rx, torrent);
-        tokio::spawn(async move { manager.run().await });
+        let handle = tokio::spawn(async move { manager.run().await });
 
-        Self { manager_tx }
+        Self { manager_tx, handle }
     }
 
-    pub fn add_peer(&self, addr: SocketAddr, client_id: PeerID) -> Result<(), PeerError> {
-        self.manager_tx
-            .send(ManagerCommand::AddPeer {
-                peer_addr: addr,
-                our_client_id: client_id,
-            })
-            .map_err(|_| PeerError::Disconnected)?;
-        Ok(())
+    pub fn add_peer(&self, addr: SocketAddr, client_id: PeerID) {
+        let _ = self.manager_tx.send(ManagerCommand::AddPeer {
+            peer_addr: addr,
+            our_client_id: client_id,
+        });
     }
 
     async fn shutdown(&self) -> Result<(), PeerError> {

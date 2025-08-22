@@ -1,4 +1,9 @@
-use std::{collections::BTreeMap, fs::File, io::Read, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    fs::File,
+    io::Read,
+    path::{Path, PathBuf},
+};
 
 use bencode::bencode::{Bencode, BencodeError, Encode};
 use sha1::{Digest, Sha1};
@@ -216,9 +221,28 @@ pub enum TorrentParseError {
     InvalidUtf8,
 }
 
-pub fn parse_torrent_from_file(path: &str) -> Result<TorrentInfo, TorrentParseError> {
-    let mut file = File::open(path)?;
-    let mut byte_buf: Vec<u8> = Vec::new();
+pub fn parse_torrent_from_file(path: impl AsRef<Path>) -> Result<TorrentInfo, TorrentParseError> {
+    let path_ref = path.as_ref();
+
+    // Optional validation - remove if you prefer to let File::open handle errors
+    if !path_ref.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("File not found: {}", path_ref.display()),
+        )
+        .into());
+    }
+
+    if !path_ref.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("Path is not a file: {}", path_ref.display()),
+        )
+        .into());
+    }
+
+    let mut file = File::open(path_ref)?;
+    let mut byte_buf = Vec::new();
     file.read_to_end(&mut byte_buf)?;
 
     let bencode = Bencode::decode(&byte_buf)?;
