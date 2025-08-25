@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeMap,
+    fmt,
     fs::File,
     io::Read,
     path::{Path, PathBuf},
@@ -68,6 +69,65 @@ pub enum FileMode {
         /// List of files in the torrent
         files: Vec<FileInfo>,
     },
+}
+
+impl fmt::Display for TorrentInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match &self.info.mode {
+            FileMode::SingleFile { name, .. } => name.clone(),
+            FileMode::MultiFile { name, .. } => name.clone(),
+        };
+
+        write!(
+            f,
+            "Torrent[name=\"{}\", announce={}, pieces={}, piece_len={}, info_hash={}]",
+            name,
+            self.announce,
+            self.info.pieces.len(),
+            self.info.piece_length,
+            self.info_hash,
+        )
+    }
+}
+
+impl fmt::Display for Info {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.mode {
+            FileMode::SingleFile { name, length, .. } => {
+                write!(
+                    f,
+                    "SingleFile[name=\"{}\", size={} bytes, piece_len={}, pieces={}]",
+                    name,
+                    length,
+                    self.piece_length,
+                    self.pieces.len()
+                )
+            }
+            FileMode::MultiFile { name, files } => {
+                write!(
+                    f,
+                    "MultiFile[dir=\"{}\", files={}, piece_len={}, pieces={}]",
+                    name,
+                    files.len(),
+                    self.piece_length,
+                    self.pieces.len()
+                )
+            }
+        }
+    }
+}
+
+impl fmt::Display for FileMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FileMode::SingleFile { name, length, .. } => {
+                write!(f, "SingleFile(name=\"{}\", size={})", name, length)
+            }
+            FileMode::MultiFile { name, files } => {
+                write!(f, "MultiFile(dir=\"{}\", files={})", name, files.len())
+            }
+        }
+    }
 }
 
 impl FileMode {
