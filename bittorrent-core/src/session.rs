@@ -41,6 +41,10 @@ impl Session {
             directory: dir.as_ref().to_path_buf(),
         });
     }
+
+    pub fn shutdown(&self) {
+        let _ = self.tx.send(SessionCommand::Shutdown);
+    }
 }
 
 struct SessionManager {
@@ -79,13 +83,18 @@ impl SessionManager {
                         }
                     };
 
+                    tracing::info!(%metainfo);
+
                     let info_hash = metainfo.info_hash;
                     let torrent_session = TorrentSession::new(metainfo, tracker.clone(), client_id);
 
                     self.torrents.insert(info_hash, torrent_session);
                 }
                 SessionCommand::Shutdown => {
-                    todo!("Broadcast shutdown to all torrent sessions")
+                    for (info, torrent_session) in self.torrents.iter() {
+                        tracing::debug!(%info,"Shutdown ");
+                        torrent_session.shutdown();
+                    }
                 }
             }
         }

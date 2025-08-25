@@ -24,6 +24,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tracing::info!("Session completed normally");
         }
         _ = tokio::signal::ctrl_c() => {
+            // session.
             tracing::info!("Received shutdown signal, stopping session...");
         }
     }

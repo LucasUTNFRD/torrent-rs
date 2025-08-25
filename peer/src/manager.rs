@@ -27,6 +27,7 @@ pub enum ManagerCommand {
         our_client_id: PeerID,
     },
     RemovePeer(SocketAddr),
+    Shutdown,
 }
 
 #[derive(Debug)]
@@ -77,8 +78,8 @@ impl PeerManagerHandle {
         });
     }
 
-    async fn shutdown(&self) -> Result<(), PeerError> {
-        todo!()
+    pub fn shutdown(&self) {
+        let _ = self.manager_tx.send(ManagerCommand::Shutdown);
     }
 }
 
@@ -152,6 +153,7 @@ impl PeerManager {
                 peer_addr,
                 our_client_id,
             } => {
+                // TODO: Check that peer is not already connected
                 let id = PEER_COUNTER.fetch_add(1, Ordering::Relaxed);
                 let id = Id(id);
 
@@ -166,6 +168,11 @@ impl PeerManager {
                         am_interested: false,
                     },
                 );
+            }
+            Shutdown => {
+                for (_, peer_state) in self.peers.iter() {
+                    let _ = peer_state.sender.send(PeerCommand::Disconnect).await;
+                }
             }
             _ => unimplemented!(),
         }
