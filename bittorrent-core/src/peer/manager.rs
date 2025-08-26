@@ -13,9 +13,15 @@ use bytes::Bytes;
 use peer_protocol::protocol::{Block, BlockInfo, Message};
 use picker::{AvailabilityUpdate, Picker, PieceState};
 use piece_cache::PieceCache;
-use tokio::{sync::mpsc, task::JoinHandle};
+use tokio::{
+    sync::{mpsc, oneshot},
+    task::JoinHandle,
+};
 
-use crate::peer::connection::{PeerInfo, spawn_peer};
+use crate::{
+    peer::connection::{PeerInfo, spawn_peer},
+    storage::{self, Storage},
+};
 
 use super::error::PeerError;
 
@@ -61,10 +67,10 @@ pub struct PeerManagerHandle {
 
 impl PeerManagerHandle {
     // TODO: Implement a manager builder to pass a config
-    pub fn new(torrent: Arc<TorrentInfo>) -> Self {
+    pub fn new(torrent: Arc<TorrentInfo>, storage: Arc<Storage>) -> Self {
         let (manager_tx, manager_rx) = mpsc::unbounded_channel();
 
-        let manager = PeerManager::new(manager_rx, torrent);
+        let manager = PeerManager::new(manager_rx, torrent, storage);
         let handle = tokio::spawn(async move { manager.run().await });
 
         Self { manager_tx, handle }
@@ -97,6 +103,7 @@ struct PeerManager {
     //disk
     picker: Picker,
     cache: PieceCache,
+    storage: Arc<Storage>,
     //choker
 }
 
@@ -112,6 +119,7 @@ impl PeerManager {
     pub fn new(
         manager_rx: mpsc::UnboundedReceiver<ManagerCommand>,
         torrent: Arc<TorrentInfo>,
+        storage: Arc<Storage>,
     ) -> Self {
         let (peer_event_tx, peer_event_rx) = mpsc::channel(64);
         Self {
@@ -123,6 +131,7 @@ impl PeerManager {
             bitfield: Bitfield::new(torrent.num_pieces()),
             picker: Picker::new(torrent.clone()),
             torrent,
+            storage,
         }
     }
 
@@ -267,10 +276,32 @@ impl PeerManager {
             AddBlock(block) => {
                 // cache the block
                 if let Some(completed_piece) = self.cache.insert_block(&block) {
+                    let piece_index = block.index;
                     self.picker
-                        .mark_piece_as(block.index as usize, PieceState::Writing);
+                        .mark_piece_as(piece_index as usize, PieceState::Writing);
 
-                    todo!("Validate piece")
+                    let (verification_tx, verification_rx) = oneshot::channel();
+                    let torrent_id = self.torrent.info_hash;
+                    self.storage.verify_piece(
+                        torrent_id,
+                        piece_index,
+                        completed_piece.clone(),
+                        verification_tx,
+                    );
+
+                    let valid = verification_rx
+                        .await
+                        .expect("failed to receive piece validation");
+                    if valid {
+                        self.picker
+                            .mark_piece_as(piece_index as usize, PieceState::Writing);
+                        self.storage
+                            .write_piece(torrent_id, piece_index, completed_piece.clone());
+                    } else {
+                        // TODO: marking the piece as none results in donwloading from zero the piece
+                        self.picker
+                            .mark_piece_as(piece_index as usize, PieceState::None);
+                    }
                 }
             }
             PeerError(id, err) => {}
@@ -467,7 +498,7 @@ mod piece_cache {
             Self { pieces }
         }
 
-        pub fn insert_block(&mut self, block: &Block) -> Option<Box<[u8]>> {
+        pub fn insert_block(&mut self, block: &Block) -> Option<Arc<[u8]>> {
             let index = block.index as usize;
 
             let piece = self.pieces.get_mut(&index)?;
@@ -478,7 +509,7 @@ mod piece_cache {
             if piece.downloaded >= piece.piece_length {
                 // Remove the piece from the cache
                 let piece = self.pieces.remove(&index).unwrap();
-                return Some(piece.buffer);
+                return Some(piece.buffer.into());
             }
             None
         }
@@ -486,6 +517,8 @@ mod piece_cache {
 }
 
 mod bitfield {
+    use std::boxed;
+
     use bytes::Bytes;
     use thiserror::Error;
 

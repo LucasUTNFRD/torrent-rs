@@ -65,6 +65,8 @@ async fn start_torrent_session(
 ) -> Result<(), TorrentError> {
     let torrent = Arc::new(metainfo);
 
+    storage.add_torrent(torrent.clone());
+
     let announce_resp = tracker
         .announce(torrent.clone())
         .await
@@ -77,7 +79,7 @@ async fn start_torrent_session(
         Duration::from_secs(announce_resp.interval as u64),
     );
 
-    let peer_manager = Arc::new(PeerManagerHandle::new(torrent.clone()));
+    let peer_manager = Arc::new(PeerManagerHandle::new(torrent.clone(), storage.clone()));
 
     for peer_addr in announce_resp.peers {
         peer_manager.add_peer(peer_addr, client_id);

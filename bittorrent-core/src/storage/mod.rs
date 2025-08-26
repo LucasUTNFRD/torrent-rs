@@ -12,13 +12,13 @@ use bittorrent_common::{
     metainfo::{FileInfo, TorrentInfo},
     types::InfoHash,
 };
+use peer_protocol::protocol::BlockInfo;
 use sha1::{Digest, Sha1};
 use thiserror::Error;
+use tokio::sync::oneshot;
 
 #[derive(Error, Debug)]
 pub enum Error {}
-
-struct StorageHandler {}
 
 struct StorageManager {
     download_dir: PathBuf,
@@ -50,12 +50,13 @@ pub enum StorageMessage {
     Write {
         id: InfoHash,
         piece: u32,
-        data: Box<[u8]>,
+        data: Arc<[u8]>,
     },
     Verify {
         id: InfoHash,
         piece: u32,
-        data: Box<[u8]>,
+        data: Arc<[u8]>,
+        verification_tx: oneshot::Sender<bool>,
     },
 }
 
@@ -79,6 +80,49 @@ impl Storage {
             tx,
         }
     }
+
+    pub fn add_torrent(&self, torrent: Arc<TorrentInfo>) {
+        let _ = self.tx.send(StorageMessage::AddTorrent {
+            id: torrent.info_hash,
+            meta: torrent,
+        });
+    }
+    pub fn remove_torrent(&self, torrent_id: InfoHash) {
+        let _ = self
+            .tx
+            .send(StorageMessage::RemoveTorrent { id: torrent_id });
+    }
+
+    pub fn verify_piece(
+        &self,
+        torrent_id: InfoHash,
+        piece_index: u32,
+        piece_data: Arc<[u8]>,
+        verification_tx: oneshot::Sender<bool>,
+    ) {
+        let _ = self.tx.send(StorageMessage::Verify {
+            id: torrent_id,
+            piece: piece_index,
+            data: piece_data,
+            verification_tx,
+        });
+    }
+
+    pub fn write_piece(&self, torrent_id: InfoHash, piece_index: u32, piece_data: Arc<[u8]>) {
+        let _ = self.tx.send(StorageMessage::Write {
+            id: torrent_id,
+            piece: piece_index,
+            data: piece_data,
+        });
+    }
+    pub fn read_block(&self, torrent_id: InfoHash, block_info: BlockInfo) {
+        let _ = self.tx.send(StorageMessage::Read {
+            id: torrent_id,
+            piece_index: block_info.index,
+            begin: block_info.begin,
+            length: block_info.length,
+        });
+    }
 }
 
 impl StorageManager {
@@ -90,7 +134,7 @@ impl StorageManager {
         }
     }
 
-    pub fn handle_add_torrent(&mut self, id: InfoHash, meta: Arc<TorrentInfo>) {
+    fn handle_add_torrent(&mut self, id: InfoHash, meta: Arc<TorrentInfo>) {
         let files = meta.files();
 
         for fi in &files {
@@ -128,21 +172,35 @@ impl StorageManager {
                     begin,
                     length,
                 } => {
-                    let _ = self.read(id, piece_index, begin, length);
+                    let _data = self.read(id, piece_index, begin, length);
                 }
                 Write { id, piece, data } => {
-                    let _ = self.write(id, piece, &data);
+                    if let Err(e) = self.write(id, piece, &data) {
+                        tracing::error!(?e);
+                    }
                 }
-                Verify { id, piece, data } => {
-                    let expected_piece_hash =
-                        self.torrents.get(&id).unwrap().metainfo.info.pieces[piece as usize];
+                Verify {
+                    id,
+                    piece,
+                    data,
+                    verification_tx,
+                } => {
+                    let expected_piece_hash = self
+                        .torrents
+                        .get(&id)
+                        .expect("peice verification of a non registered torrent")
+                        .metainfo
+                        .info
+                        .pieces[piece as usize];
 
                     let mut hasher = Sha1::new();
                     hasher.update(data);
                     let piece_hash: [u8; 20] = hasher.finalize().into();
 
                     let matches = piece_hash == expected_piece_hash;
-                    // Here we should notify of the result
+                    if verification_tx.send(matches).is_err() {
+                        tracing::error!("failed to send verification to peer");
+                    };
                 }
             }
         }
@@ -153,6 +211,7 @@ impl StorageManager {
         let (files, piece_length) = {
             let cache = self.torrents.get(&info_hash).unwrap();
             (
+                // TODO: Remove this clone
                 cache.files.clone(),
                 cache.metainfo.info.piece_length as usize,
             )

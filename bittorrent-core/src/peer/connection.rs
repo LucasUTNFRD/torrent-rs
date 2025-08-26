@@ -275,15 +275,18 @@ impl Peer<Connected> {
     }
 
     async fn try_request_blocks(&mut self) -> Result<(), PeerError> {
+        tracing::debug!("triyng to request block to peer {}", self.peer_info.addr);
         if self.state.peer_state.am_interested
             && !self.state.peer_state.peer_choking
             && self.state.download_queue.is_some()
         {
+            tracing::debug!("requesting block to peer {}", self.peer_info.addr);
             self.request_blocks().await?
         }
         Ok(())
     }
 
+    // TODO Dynamically adjust pipeline by upload rate of peer
     const MAX_PIPELINE: usize = 5;
     async fn request_blocks(&mut self) -> Result<(), PeerError> {
         while let Some(block) = self.pop_block() {
@@ -313,8 +316,12 @@ impl Peer<Connected> {
             Choke => self.state.peer_state.peer_choking = true,
             Unchoke => self.state.peer_state.peer_choking = false,
             // Choke related
-            Interested => todo!(),
-            NotInterested => todo!(),
+            Interested => {
+                tracing::info!("peer is interested in us");
+            }
+            NotInterested => {
+                tracing::info!("peer is not interested in us");
+            }
             // Swarm info related
             Have { piece_index } => self
                 .manager_tx
@@ -330,7 +337,9 @@ impl Peer<Connected> {
                 .await
                 .unwrap(),
             // Piece Related
-            Request(block_info) => todo!(),
+            Request(block_info) => {
+                tracing::info!("peer request block : {:?}", block_info);
+            }
             Piece(block) => {
                 // check if we requested this block
                 let block_info = BlockInfo {
@@ -338,7 +347,9 @@ impl Peer<Connected> {
                     begin: block.begin,
                     length: block.data.len() as u32,
                 };
+
                 if self.state.outbound_requests.remove(&block_info) {
+                    tracing::debug!("Received block");
                     let _ = self.manager_tx.send(PeerEvent::AddBlock(block)).await;
                 }
             }
