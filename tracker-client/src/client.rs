@@ -231,9 +231,7 @@ impl TrackerHandler {
 mod test {
     use std::sync::Arc;
 
-    use bittorent_common::{
-        client::PORT, torrent::metainfo::parse_torrent_from_file, types::PeerID,
-    };
+    use bittorrent_common::{metainfo::parse_torrent_from_file, types::PeerID};
     use futures::future::join_all;
     use rand::Rng;
     use tokio::sync::oneshot;
@@ -245,7 +243,6 @@ mod test {
         types::{AnnounceParams, Events},
     };
 
-    //
     fn generate_peer_id() -> PeerID {
         let mut peer_id = [0u8; 20];
         peer_id[0..3].copy_from_slice(b"-RS"); // Client identifier
@@ -260,8 +257,6 @@ mod test {
         let file = "../sample_torrents/debian-12.10.0-amd64-netinst.iso.torrent";
 
         let torrent = parse_torrent_from_file(file).expect("Failed to parse torrent");
-        dbg!(hex::encode(torrent.info_hash));
-        dbg!(torrent.info_hash);
         let torrent = Arc::new(torrent);
         let peer_id = generate_peer_id();
 
@@ -278,7 +273,7 @@ mod test {
         let params = AnnounceParams {
             info_hash: torrent.info_hash,
             peer_id,
-            port: PORT,
+            port: 6881,
             uploaded: 0,
             downloaded: 0,
             left: torrent.total_size(),
@@ -361,7 +356,6 @@ mod test {
         let file = "../sample_torrents/linuxmint-21.2-mate-64bit.iso.torrent";
 
         let torrent = parse_torrent_from_file(file).expect("Failed to parse torrent");
-        dbg!(hex::encode(torrent.info_hash));
         let torrent = Arc::new(torrent);
         let peer_id = generate_peer_id();
 
@@ -377,7 +371,7 @@ mod test {
         let params = AnnounceParams {
             info_hash: torrent.info_hash,
             peer_id,
-            port: PORT,
+            port: 6881,
             uploaded: 0,
             downloaded: 0,
             left: torrent.total_size(),

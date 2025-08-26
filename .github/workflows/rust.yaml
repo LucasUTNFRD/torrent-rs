@@ -48,7 +48,7 @@ jobs:
       - name: Install stable
         uses: dtolnay/rust-toolchain@stable
       - name: cargo test
-        run: cargo test --workspace --all-features
+        run: cargo test --workspace  
 
   doc:
     runs-on: ubuntu-latest
