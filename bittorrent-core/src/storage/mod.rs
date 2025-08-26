@@ -90,7 +90,7 @@ impl StorageManager {
         }
     }
 
-    pub fn hanlde_add_torrent(&mut self, id: InfoHash, meta: Arc<TorrentInfo>) {
+    pub fn handle_add_torrent(&mut self, id: InfoHash, meta: Arc<TorrentInfo>) {
         let files = meta.files();
 
         for fi in &files {
@@ -117,7 +117,7 @@ impl StorageManager {
         while let Ok(msg) = self.rx.recv() {
             match msg {
                 AddTorrent { id, meta } => {
-                    self.hanlde_add_torrent(id, meta);
+                    self.handle_add_torrent(id, meta);
                 }
                 RemoveTorrent { id } => {
                     self.torrents.remove(&id);
@@ -385,7 +385,7 @@ mod test {
         let mut manager = StorageManager::new(download_dir.clone(), rx);
 
         // Insert torrent into manager cache
-        manager.hanlde_add_torrent(id, meta);
+        manager.handle_add_torrent(id, meta);
 
         // Prepare test data for each piece
         let piece0_data: Vec<u8> = (0..piece_length).map(|i| i as u8).collect();
@@ -470,7 +470,7 @@ mod test {
         let (_tx, rx) = mpsc::channel();
         let mut manager = StorageManager::new(download_dir.clone(), rx);
 
-        manager.hanlde_add_torrent(id, meta);
+        manager.handle_add_torrent(id, meta);
 
         // Write pieces individually
         let piece0_data: Vec<u8> = (0..512).map(|i| i as u8).collect();
@@ -546,7 +546,7 @@ mod test {
         let (_tx, rx) = mpsc::channel();
         let mut manager = StorageManager::new(download_dir.clone(), rx);
 
-        manager.hanlde_add_torrent(id, meta);
+        manager.handle_add_torrent(id, meta);
         // manager.torrents.insert(
         //     id,
         //     Cache {
