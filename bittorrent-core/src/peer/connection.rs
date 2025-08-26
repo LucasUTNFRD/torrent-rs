@@ -296,14 +296,17 @@ impl Peer<Connected> {
 
     async fn try_request_blocks(&mut self) -> Result<(), PeerError> {
         tracing::debug!("trying to request block to peer {}", self.peer_info.addr);
+
         let am_interested = self.state.peer_state.am_interested;
         let peer_not_choking = !self.state.peer_state.peer_choking;
         let has_queue = self.state.download_queue.is_some();
+
         tracing::debug!(am_interested, peer_not_choking, has_queue);
         if am_interested && peer_not_choking && has_queue {
             tracing::debug!("requesting block to peer {}", self.peer_info.addr);
             self.request_blocks().await?
         }
+
         Ok(())
     }
 
@@ -390,7 +393,7 @@ impl Peer<Connected> {
                     }
                 }
             }
-            Cancel(_blockInfo) => {
+            Cancel(_block_info) => {
                 tracing::info!("recv cancel");
             }
         }
