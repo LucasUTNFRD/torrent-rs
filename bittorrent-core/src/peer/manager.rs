@@ -40,7 +40,7 @@ pub enum PeerEvent {
     Have { pid: Id, piece_idx: u32 },
     Bitfield(Id, Bytes),
     PeerError(Id, PeerError),
-    AddBlock(Block),
+    AddBlock(Id, Block),
 }
 
 #[derive(Debug)]
@@ -113,6 +113,7 @@ struct PeerState {
     pub sender: mpsc::Sender<PeerCommand>,
     pub bitfield: Bitfield,
     pub am_interested: bool,
+    pub assigned_piece_idx: Option<usize>,
 }
 
 impl PeerManager {
@@ -174,6 +175,7 @@ impl PeerManager {
                         sender: peer_tx,
                         bitfield: Bitfield::new(self.torrent.num_pieces()),
                         am_interested: false,
+                        assigned_piece_idx: None,
                     },
                 );
             }
@@ -214,6 +216,7 @@ impl PeerManager {
                     peer.am_interested = true;
 
                     if let Some((idx, piece)) = self.picker.pick_piece(&peer.bitfield) {
+                        peer.assigned_piece_idx = Some(idx);
                         let _ = peer.sender.send(PeerCommand::AvailableTask(piece)).await;
                         self.picker.mark_piece_as(idx, PieceState::Requested);
                         //TODO: Add piece request expiration policy
@@ -259,6 +262,7 @@ impl PeerManager {
                             peer.am_interested = true;
 
                             if let Some((idx, piece)) = self.picker.pick_piece(&peer.bitfield) {
+                                peer.assigned_piece_idx = Some(idx);
                                 let _ = peer.sender.send(PeerCommand::AvailableTask(piece)).await;
                                 self.picker.mark_piece_as(idx, PieceState::Requested);
                                 //TODO: Add piece request expiration policy
@@ -275,13 +279,11 @@ impl PeerManager {
                     }
                 };
             }
-            AddBlock(block) => {
+            AddBlock(id, block) => {
                 // cache the block
                 if let Some(completed_piece) = self.cache.insert_block(&block) {
                     let piece_index = block.index;
-                    self.picker
-                        .mark_piece_as(piece_index as usize, PieceState::Writing);
-
+                    //
                     let (verification_tx, verification_rx) = oneshot::channel();
                     let torrent_id = self.torrent.info_hash;
                     self.storage.verify_piece(
@@ -294,19 +296,43 @@ impl PeerManager {
                     let valid = verification_rx
                         .await
                         .expect("failed to receive piece validation");
+
                     if valid {
                         self.picker
                             .mark_piece_as(piece_index as usize, PieceState::Writing);
                         self.storage
                             .write_piece(torrent_id, piece_index, completed_piece.clone());
                     } else {
-                        // TODO: marking the piece as none results in donwloading from zero the piece
+                        //  marking the piece as none results in downloading from zero the piece
                         self.picker
                             .mark_piece_as(piece_index as usize, PieceState::None);
                     }
                 }
             }
-            PeerError(id, err) => {}
+            PeerError(id, err) => {
+                tracing::error!(?err);
+                self.clean_up_peer(id);
+            }
+        }
+    }
+
+    //Removes disconnected peer from the peers HashMap
+    // Decrements piece availability for all pieces the peer had
+    // Logs the disconnect reason for debugging
+    fn clean_up_peer(&mut self, id: Id) {
+        let removed_peer = self
+            .peers
+            .remove(&id)
+            .expect("remove of a non existent peer");
+
+        self.picker
+            .decrement_availability(AvailabilityUpdate::Bitfield(&removed_peer.bitfield));
+
+        if let Some(piece_idx) = removed_peer.assigned_piece_idx {
+            // Mark pieces as None, so now this is free to be downloaded by other peer
+            self.picker.mark_piece_as(piece_idx, PieceState::None);
+            // If there were blocks in the cache we should drop them.
+            self.cache.drop_piece(piece_idx);
         }
     }
 }
@@ -514,6 +540,10 @@ mod piece_cache {
                 return Some(piece.buffer.into());
             }
             None
+        }
+
+        pub fn drop_piece(&mut self, piece_idx: usize) {
+            self.pieces.remove(&piece_idx);
         }
     }
 }

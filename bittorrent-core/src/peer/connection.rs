@@ -386,7 +386,10 @@ impl Peer<Connected> {
 
                 if self.state.outbound_requests.remove(&block_info) {
                     tracing::debug!("Received block");
-                    let _ = self.manager_tx.send(PeerEvent::AddBlock(block)).await;
+                    let _ = self
+                        .manager_tx
+                        .send(PeerEvent::AddBlock(self.peer_info.remote_pid, block))
+                        .await;
                     // We freed a pipeline slot; try to request more blocks from the queue
                     if let Err(e) = self.try_request_blocks().await {
                         tracing::warn!(?e);
