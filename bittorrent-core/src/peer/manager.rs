@@ -20,7 +20,7 @@ use tokio::{
 
 use crate::{
     peer::connection::{PeerInfo, spawn_peer},
-    storage::{self, Storage},
+    storage::Storage,
 };
 
 use super::error::PeerError;
@@ -138,6 +138,13 @@ impl PeerManager {
 
     pub async fn run(mut self) {
         loop {
+            if dbg!(self.bitfield.all_set()) {
+                tracing::info!(
+                    "torrent file {} has been leeched succesfully",
+                    self.torrent.info.mode.name()
+                )
+            }
+
             tokio::select! {
                 maybe_cmd= self.manager_rx.recv()=>{
                     match maybe_cmd {
@@ -297,6 +304,10 @@ impl PeerManager {
                             .mark_piece_as(piece_index as usize, PieceState::Writing);
                         self.storage
                             .write_piece(torrent_id, piece_index, completed_piece.clone());
+                        // mark piece as have
+                        self.bitfield.set(piece_index as usize).unwrap();
+                        // broadcast HAVE to all peers
+                        self.broadcast_have(piece_index).await;
                     } else {
                         //  marking the piece as none results in downloading from zero the piece
                         self.picker
@@ -305,9 +316,18 @@ impl PeerManager {
                 }
             }
             PeerError(id, err) => {
-                tracing::error!(?err);
+                tracing::warn!(?err);
                 self.clean_up_peer(id);
             }
+        }
+    }
+
+    async fn broadcast_have(&mut self, piece_index: u32) {
+        for (_id, state) in self.peers.iter() {
+            let _ = state
+                .sender
+                .send(PeerCommand::SendMessage(Message::Have { piece_index }))
+                .await;
         }
     }
 
