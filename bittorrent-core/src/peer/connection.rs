@@ -256,6 +256,7 @@ impl Peer<Connected> {
                             self.state.sink.send(msg).await.map_err(PeerError::IoError)?;
                         }
                         Some(PeerCommand::AvailableTask(tasks)) => {
+                            tracing::debug!("rec some download_queue");
                             self.state.download_queue = Some(tasks);
                             if let Err(e)  = self.try_request_blocks().await{
                                 tracing::warn!(?e);
@@ -276,10 +277,11 @@ impl Peer<Connected> {
 
     async fn try_request_blocks(&mut self) -> Result<(), PeerError> {
         tracing::debug!("triyng to request block to peer {}", self.peer_info.addr);
-        if self.state.peer_state.am_interested
-            && !self.state.peer_state.peer_choking
-            && self.state.download_queue.is_some()
-        {
+        let am_interested = self.state.peer_state.am_interested;
+        let peer_not_choking = !self.state.peer_state.peer_choking;
+        let some_dq = self.state.download_queue.is_some();
+        tracing::debug!(am_interested, peer_not_choking, some_dq);
+        if am_interested && peer_not_choking && some_dq {
             tracing::debug!("requesting block to peer {}", self.peer_info.addr);
             self.request_blocks().await?
         }
@@ -298,6 +300,8 @@ impl Peer<Connected> {
                     .send(Message::Request(block))
                     .await
                     .map_err(PeerError::IoError)?;
+            } else {
+                break;
             }
         }
         Ok(())
@@ -311,10 +315,17 @@ impl Peer<Connected> {
     async fn handle_msg(&mut self, msg: protocol::Message) {
         use protocol::Message::*;
         match msg {
-            KeepAlive => todo!(),
+            KeepAlive => {
+                tracing::debug!("recv keepalive");
+            }
             // Can we request related
             Choke => self.state.peer_state.peer_choking = true,
-            Unchoke => self.state.peer_state.peer_choking = false,
+            Unchoke => {
+                self.state.peer_state.peer_choking = false;
+                if let Err(e) = self.try_request_blocks().await {
+                    tracing::warn!(?e);
+                }
+            }
             // Choke related
             Interested => {
                 tracing::info!("peer is interested in us");
@@ -351,6 +362,10 @@ impl Peer<Connected> {
                 if self.state.outbound_requests.remove(&block_info) {
                     tracing::debug!("Received block");
                     let _ = self.manager_tx.send(PeerEvent::AddBlock(block)).await;
+                    // We freed a pipeline slot; try to request more blocks from the queue
+                    if let Err(e) = self.try_request_blocks().await {
+                        tracing::warn!(?e);
+                    }
                 }
             }
             Cancel(BlockInfo) => todo!(),

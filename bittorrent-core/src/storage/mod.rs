@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    env,
     fs::{File, OpenOptions},
     io,
     os::unix::fs::FileExt,
@@ -65,11 +66,24 @@ pub struct Storage {
     join_handle: JoinHandle<()>,
 }
 
+fn get_donwload_dir() -> PathBuf {
+    let downloads: PathBuf = match env::var_os("HOME") {
+        Some(home) => {
+            let mut p = PathBuf::from(home);
+            p.push("Downloads");
+            p.push("Torrents");
+            return p;
+        }
+        None => panic!("$HOME not set"),
+    };
+}
+
 impl Storage {
     pub fn new() -> Self {
         let (tx, rx) = mpsc::channel();
-        const BASE_DIR: &str = "$HOME/Downloads/Torrents/";
-        let mananger = StorageManager::new(PathBuf::from(BASE_DIR), rx);
+        // const BASE_DIR: &str = "$HOME/Downloads/Torrents/";
+
+        let mananger = StorageManager::new(get_donwload_dir(), rx);
         let builder = thread::Builder::new().name("Storage handler".to_string());
         let handle = builder
             .spawn(|| mananger.start())

@@ -230,6 +230,7 @@ impl PeerManager {
 
                 match bitfield::Bitfield::try_from((payload, self.torrent.num_pieces())) {
                     Ok(bitfield) => {
+                        tracing::debug!("setting bitfield to peer");
                         peer.bitfield = bitfield;
 
                         self.picker
@@ -246,18 +247,19 @@ impl PeerManager {
                         }
 
                         // determine if we are interested
-                        if self
-                            .picker
-                            .send_interest(AvailabilityUpdate::Bitfield(&peer.bitfield))
-                        {
+                        if dbg!(
+                            self.picker
+                                .send_interest(AvailabilityUpdate::Bitfield(&peer.bitfield))
+                        ) {
                             let _ = peer
                                 .sender
                                 .send(PeerCommand::SendMessage(Message::Interested))
                                 .await;
+
                             peer.am_interested = true;
 
                             if let Some((idx, piece)) = self.picker.pick_piece(&peer.bitfield) {
-                                // peer.sender.send(PeerCommand::Request(piece))
+                                let _ = peer.sender.send(PeerCommand::AvailableTask(piece)).await;
                                 self.picker.mark_piece_as(idx, PieceState::Requested);
                                 //TODO: Add piece request expiration policy
                             }
