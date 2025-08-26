@@ -29,7 +29,6 @@ struct StorageManager {
 struct Cache {
     metainfo: Arc<TorrentInfo>,
     files: Vec<FileInfo>,
-    // Cache file handles to avoid reopening files constantly
     file_handles: HashMap<PathBuf, File>,
 }
 
@@ -91,20 +90,56 @@ impl StorageManager {
         }
     }
 
+    pub fn hanlde_add_torrent(&mut self, id: InfoHash, meta: Arc<TorrentInfo>) {
+        let files = meta.files();
+
+        for fi in &files {
+            let full_path = self.download_dir.join(&fi.path);
+            if let Some(parent) = full_path.parent() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    eprintln!("storage: failed to create directory {:?}: {}", parent, e);
+                }
+            }
+        }
+
+        self.torrents.insert(
+            id,
+            Cache {
+                metainfo: meta,
+                files,
+                file_handles: HashMap::new(),
+            },
+        );
+    }
+
     pub fn start(mut self) {
         use StorageMessage::*;
         while let Ok(msg) = self.rx.recv() {
             match msg {
                 AddTorrent { id, meta } => {
-                    let files = meta.files();
-                    self.torrents.insert(
-                        id,
-                        Cache {
-                            metainfo: meta,
-                            files,
-                            file_handles: HashMap::new(),
-                        },
-                    );
+                    self.hanlde_add_torrent(id, meta);
+                    // let files = meta.files();
+                    //
+                    // for fi in &files {
+                    //     let full_path = self.download_dir.join(&fi.path);
+                    //     if let Some(parent) = full_path.parent() {
+                    //         if let Err(e) = std::fs::create_dir_all(parent) {
+                    //             eprintln!(
+                    //                 "storage: failed to create directory {:?}: {}",
+                    //                 parent, e
+                    //             );
+                    //         }
+                    //     }
+                    // }
+                    //
+                    // self.torrents.insert(
+                    //     id,
+                    //     Cache {
+                    //         metainfo: meta,
+                    //         files,
+                    //         file_handles: HashMap::new(),
+                    //     },
+                    // );
                 }
                 RemoveTorrent { id } => {
                     self.torrents.remove(&id);
@@ -257,9 +292,32 @@ impl StorageManager {
         Ok(result)
     }
 
-    // Helper function to get or open a file handle
+    // // Helper function to get or open a file handle
+    // fn get_or_open_file(&mut self, info_hash: InfoHash, file_path: &Path) -> io::Result<&mut File> {
+    //     let cache = self.torrents.get_mut(&info_hash).unwrap();
+    //
+    //     if !cache.file_handles.contains_key(file_path) {
+    //         let full_path = self.download_dir.join(file_path);
+    //         let file = open_file(&full_path)?;
+    //         cache.file_handles.insert(file_path.to_path_buf(), file);
+    //     }
+    //
+    //     Ok(cache.file_handles.get_mut(file_path).unwrap())
+    // }
     fn get_or_open_file(&mut self, info_hash: InfoHash, file_path: &Path) -> io::Result<&mut File> {
         let cache = self.torrents.get_mut(&info_hash).unwrap();
+
+        // On first access for this torrent, ensure parents exist for all files.
+        // This is more efficient than creating directories on every write/read,
+        // and it also covers tests that insert Cache directly (bypassing AddTorrent).
+        if cache.file_handles.is_empty() {
+            for fi in &cache.files {
+                let full_path = self.download_dir.join(&fi.path);
+                if let Some(parent) = full_path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+            }
+        }
 
         if !cache.file_handles.contains_key(file_path) {
             let full_path = self.download_dir.join(file_path);
@@ -308,7 +366,7 @@ mod test {
         types::InfoHash,
     };
 
-    use crate::storage::{Cache, StorageManager};
+    use crate::storage::{Cache, StorageManager, StorageMessage};
 
     // use super::*;
 
@@ -362,14 +420,7 @@ mod test {
         let mut manager = StorageManager::new(download_dir.clone(), rx);
 
         // Insert torrent into manager cache
-        manager.torrents.insert(
-            id,
-            Cache {
-                metainfo: meta.clone(),
-                files: meta.files(),
-                file_handles: HashMap::new(),
-            },
-        );
+        manager.hanlde_add_torrent(id, meta);
 
         // Prepare test data for each piece
         let piece0_data: Vec<u8> = (0..piece_length).map(|i| i as u8).collect();
@@ -454,15 +505,7 @@ mod test {
         let (_tx, rx) = mpsc::channel();
         let mut manager = StorageManager::new(download_dir.clone(), rx);
 
-        // Insert torrent into manager cache
-        manager.torrents.insert(
-            id,
-            Cache {
-                metainfo: meta.clone(),
-                files: meta.files(),
-                file_handles: HashMap::new(),
-            },
-        );
+        manager.hanlde_add_torrent(id, meta);
 
         // Write pieces individually
         let piece0_data: Vec<u8> = (0..512).map(|i| i as u8).collect();
@@ -538,15 +581,16 @@ mod test {
         let (_tx, rx) = mpsc::channel();
         let mut manager = StorageManager::new(download_dir.clone(), rx);
 
-        manager.torrents.insert(
-            id,
-            Cache {
-                metainfo: meta.clone(),
-                files: meta.files(),
-                file_handles: HashMap::new(),
-            },
-        );
-
+        manager.hanlde_add_torrent(id, meta);
+        // manager.torrents.insert(
+        //     id,
+        //     Cache {
+        //         metainfo: meta.clone(),
+        //         files: meta.files(),
+        //         file_handles: HashMap::new(),
+        //     },
+        // );
+        //
         // Initial state: no file handles cached
         assert_eq!(manager.torrents.get(&id).unwrap().file_handles.len(), 0);
 
@@ -611,14 +655,15 @@ mod test {
         let (_tx, rx) = mpsc::channel();
         let mut manager = StorageManager::new(download_dir.clone(), rx);
 
-        manager.torrents.insert(
-            id,
-            Cache {
-                metainfo: meta.clone(),
-                files: meta.files(),
-                file_handles: HashMap::new(),
-            },
-        );
+        manager.hanlde_add_torrent(id, meta);
+        // manager.torrents.insert(
+        //     id,
+        //     Cache {
+        //         metainfo: meta.clone(),
+        //         files: meta.files(),
+        //         file_handles: HashMap::new(),
+        //     },
+        // );
 
         // Write data - this should create the nested directories
         let piece_data = vec![123u8; 512];
@@ -645,7 +690,7 @@ mod test {
                 .join("file.dat")
                 .exists()
         );
-
+        //
         // Read back and verify
         let read_data = manager.read(id, 0, 0, 512).expect("read failed");
         assert_eq!(read_data, piece_data);
