@@ -3,7 +3,6 @@ members = [
   "bencode",
   "bittorrent-common",
   "bittorrent-core",
-  "peer",
   "peer-protocol",
   "tracker-client",
 ]

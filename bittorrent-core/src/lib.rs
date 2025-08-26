@@ -1,3 +1,4 @@
+mod peer;
 mod session;
 mod storage;
 mod torrent;

@@ -1,7 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
 use bittorrent_common::{metainfo::TorrentInfo, types::PeerID};
-use peer::PeerManagerHandle;
 use thiserror::Error;
 use tokio::{
     sync::mpsc::{self, UnboundedSender},
@@ -11,7 +10,7 @@ use tokio::{
 use tracing::instrument;
 use tracker_client::{TrackerError, TrackerHandler};
 
-use crate::storage::Storage;
+use crate::{peer::manager::PeerManagerHandle, storage::Storage};
 
 // Torrent Leeching abstraction
 pub struct TorrentSession {

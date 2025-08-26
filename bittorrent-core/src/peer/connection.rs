@@ -1,7 +1,3 @@
-use crate::{
-    PeerError,
-    manager::{Id, PeerCommand, PeerEvent},
-};
 use bittorrent_common::types::{InfoHash, PeerID};
 use bytes::BytesMut;
 use futures::{
@@ -9,7 +5,7 @@ use futures::{
     stream::{SplitSink, SplitStream},
 };
 use peer_protocol::{
-    MessageDecoder,
+    MessageCodec,
     protocol::{self, BlockInfo, Handshake, Message},
 };
 use std::{collections::HashSet, fmt::Debug, net::SocketAddr, time::Duration};
@@ -21,6 +17,11 @@ use tokio::{
 };
 use tokio_util::codec::Framed;
 use tracing::instrument;
+
+use super::{
+    error::PeerError,
+    manager::{Id, PeerCommand, PeerEvent},
+};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub struct PeerInfo {
@@ -95,8 +96,8 @@ impl State for Handshaking {}
 
 #[derive(Debug)]
 pub struct Connected {
-    sink: SplitSink<Framed<TcpStream, MessageDecoder>, Message>,
-    stream: SplitStream<Framed<TcpStream, MessageDecoder>>,
+    sink: SplitSink<Framed<TcpStream, MessageCodec>, Message>,
+    stream: SplitStream<Framed<TcpStream, MessageCodec>>,
     peer_state: PeerState,
     download_queue: Option<Vec<BlockInfo>>,
     outbound_requests: HashSet<BlockInfo>,
@@ -109,7 +110,7 @@ pub struct Connected {
 
 impl Connected {
     pub fn new(stream: TcpStream) -> Self {
-        let framed = Framed::new(stream, MessageDecoder {});
+        let framed = Framed::new(stream, MessageCodec {});
         let (sink, stream) = framed.split();
         Self {
             sink,

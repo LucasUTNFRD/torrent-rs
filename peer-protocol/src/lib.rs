@@ -1,4 +1,4 @@
 pub mod peer;
 pub use peer::protocol;
 
-pub use peer::protocol::MessageDecoder;
+pub use peer::protocol::MessageCodec;

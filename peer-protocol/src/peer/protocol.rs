@@ -141,9 +141,9 @@ impl From<u8> for MessageId {
 
 #[derive(Debug, Clone)]
 // Rename this PeerCodec
-pub struct MessageDecoder {}
+pub struct MessageCodec {}
 
-impl Decoder for MessageDecoder {
+impl Decoder for MessageCodec {
     type Item = Message;
     type Error = io::Error;
 
@@ -223,7 +223,7 @@ impl Decoder for MessageDecoder {
     }
 }
 
-impl Encoder<Message> for MessageDecoder {
+impl Encoder<Message> for MessageCodec {
     type Error = std::io::Error;
 
     /// <length prefix><message ID><payload>. The length prefix is a four byte big-endian value. The message ID is a single decimal byte. The payload is message dependent.

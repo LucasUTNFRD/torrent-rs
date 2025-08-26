@@ -15,10 +15,9 @@ use picker::{AvailabilityUpdate, Picker, PieceState};
 use piece_cache::PieceCache;
 use tokio::{sync::mpsc, task::JoinHandle};
 
-use crate::{
-    PeerError,
-    connection::{PeerInfo, spawn_peer},
-};
+use crate::peer::connection::{PeerInfo, spawn_peer};
+
+use super::error::PeerError;
 
 #[derive(Debug)]
 pub enum ManagerCommand {
