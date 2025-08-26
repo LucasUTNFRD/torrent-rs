@@ -141,6 +141,26 @@ impl FileMode {
         matches!(self, FileMode::MultiFile { .. })
     }
 
+    /// Return a normalized list of files contained in this torrent.
+    /// - SingleFile: one synthetic FileInfo with `path = name`.
+    /// - MultiFile: the existing list of files.
+    pub fn files(&self) -> Vec<FileInfo> {
+        match self {
+            FileMode::SingleFile {
+                name,
+                length,
+                md5sum,
+            } => {
+                vec![FileInfo {
+                    length: *length,
+                    md5sum: md5sum.clone(),
+                    path: std::path::PathBuf::from(name),
+                }]
+            }
+            FileMode::MultiFile { files, .. } => files.clone(),
+        }
+    }
+
     pub fn length(&self) -> i64 {
         match &self {
             FileMode::SingleFile { length, .. } => *length,
@@ -171,10 +191,22 @@ pub struct FileInfo {
     pub path: PathBuf,
 }
 
+#[derive(Debug)]
+pub struct TorrentFile {
+    pub path: PathBuf,
+    // TODO: Make it a shared pointer
+    pub md5sum: Option<String>,
+    pub length: u64,
+}
+
 impl TorrentInfo {
     /// Get the total size of all files in the torrent
     pub fn total_size(&self) -> i64 {
         self.info.mode.length()
+    }
+
+    pub fn files(&self) -> Vec<FileInfo> {
+        self.info.mode.files()
     }
 
     /// Get the number of pieces in the torrent

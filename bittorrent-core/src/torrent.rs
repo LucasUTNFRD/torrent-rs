@@ -11,6 +11,8 @@ use tokio::{
 use tracing::instrument;
 use tracker_client::{TrackerError, TrackerHandler};
 
+use crate::storage::Storage;
+
 // Torrent Leeching abstraction
 pub struct TorrentSession {
     handle: JoinHandle<Result<(), TorrentError>>,
@@ -29,11 +31,16 @@ pub enum TorrentError {
 }
 
 impl TorrentSession {
-    pub fn new(metainfo: TorrentInfo, tracker: Arc<TrackerHandler>, client_id: PeerID) -> Self {
+    pub fn new(
+        metainfo: TorrentInfo,
+        tracker: Arc<TrackerHandler>,
+        client_id: PeerID,
+        storage: Arc<Storage>,
+    ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
 
         let handle = tokio::task::spawn(async move {
-            start_torrent_session(metainfo, tracker, client_id, rx).await
+            start_torrent_session(metainfo, tracker, client_id, storage, rx).await
         });
 
         Self { handle, tx }
@@ -45,7 +52,7 @@ impl TorrentSession {
 }
 
 #[instrument(
-    skip(tracker, manager_rx,client_id,metainfo),   
+    skip(tracker, manager_rx,client_id,metainfo,storage),
     fields(
         torrent.info_hash = %metainfo.info_hash,
     )
@@ -54,6 +61,7 @@ async fn start_torrent_session(
     metainfo: TorrentInfo,
     tracker: Arc<TrackerHandler>,
     client_id: PeerID,
+    storage: Arc<Storage>,
     mut manager_rx: mpsc::UnboundedReceiver<TorrentMessage>,
 ) -> Result<(), TorrentError> {
     let torrent = Arc::new(metainfo);

@@ -16,6 +16,6 @@ reqwest = "0.12.22"
 url = "2.5.4"
 urlencoding = "2.1.3"
 bencode = { path = "../bencode" }
-storage = { path = "../storage/" }
 tracker-client = { path = "../tracker-client/" }
 peer = { path = "../peer/" }
+sha1 = "0.10"

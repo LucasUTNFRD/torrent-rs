@@ -5,7 +5,6 @@ members = [
   "bittorrent-core",
   "peer",
   "peer-protocol",
-  "storage",
   "tracker-client",
 ]
 resolver = "2" # Recommended for new workspaces

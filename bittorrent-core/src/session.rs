@@ -14,7 +14,7 @@ use tokio::{
 };
 use tracker_client::TrackerHandler;
 
-use crate::torrent::TorrentSession;
+use crate::{storage::Storage, torrent::TorrentSession};
 
 pub struct Session {
     pub handle: JoinHandle<()>,
@@ -67,8 +67,7 @@ impl SessionManager {
     pub async fn start(mut self) {
         let client_id = PeerID::generate();
         let tracker = Arc::new(TrackerHandler::new(client_id));
-        // TODO: Implement storage abstraction
-        // let disk_io = Disk::new():
+        let storage = Arc::new(Storage::new());
 
         while let Some(cmd) = self.rx.recv().await {
             match cmd {
@@ -86,7 +85,8 @@ impl SessionManager {
                     tracing::info!(%metainfo);
 
                     let info_hash = metainfo.info_hash;
-                    let torrent_session = TorrentSession::new(metainfo, tracker.clone(), client_id);
+                    let torrent_session =
+                        TorrentSession::new(metainfo, tracker.clone(), client_id, storage.clone());
 
                     self.torrents.insert(info_hash, torrent_session);
                 }
