@@ -1,6 +1,6 @@
 use std::net::{Ipv4Addr, SocketAddr};
 
-use bittorent_core::{torrent::metainfo::parse_torrent_from_file, types::PeerID};
+use bittorrent_core::{torrent::metainfo::parse_torrent_from_file, types::PeerID};
 use tokio::net::UdpSocket;
 use tracker_client::{AnnounceParams, Events, TrackerClient, UdpTrackerClient, Url};
 
