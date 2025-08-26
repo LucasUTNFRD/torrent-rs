@@ -118,28 +118,6 @@ impl StorageManager {
             match msg {
                 AddTorrent { id, meta } => {
                     self.hanlde_add_torrent(id, meta);
-                    // let files = meta.files();
-                    //
-                    // for fi in &files {
-                    //     let full_path = self.download_dir.join(&fi.path);
-                    //     if let Some(parent) = full_path.parent() {
-                    //         if let Err(e) = std::fs::create_dir_all(parent) {
-                    //             eprintln!(
-                    //                 "storage: failed to create directory {:?}: {}",
-                    //                 parent, e
-                    //             );
-                    //         }
-                    //     }
-                    // }
-                    //
-                    // self.torrents.insert(
-                    //     id,
-                    //     Cache {
-                    //         metainfo: meta,
-                    //         files,
-                    //         file_handles: HashMap::new(),
-                    //     },
-                    // );
                 }
                 RemoveTorrent { id } => {
                     self.torrents.remove(&id);
@@ -292,18 +270,6 @@ impl StorageManager {
         Ok(result)
     }
 
-    // // Helper function to get or open a file handle
-    // fn get_or_open_file(&mut self, info_hash: InfoHash, file_path: &Path) -> io::Result<&mut File> {
-    //     let cache = self.torrents.get_mut(&info_hash).unwrap();
-    //
-    //     if !cache.file_handles.contains_key(file_path) {
-    //         let full_path = self.download_dir.join(file_path);
-    //         let file = open_file(&full_path)?;
-    //         cache.file_handles.insert(file_path.to_path_buf(), file);
-    //     }
-    //
-    //     Ok(cache.file_handles.get_mut(file_path).unwrap())
-    // }
     fn get_or_open_file(&mut self, info_hash: InfoHash, file_path: &Path) -> io::Result<&mut File> {
         let cache = self.torrents.get_mut(&info_hash).unwrap();
 
@@ -354,7 +320,6 @@ fn open_file(path: &Path) -> io::Result<File> {
 #[cfg(test)]
 mod test {
     use std::{
-        collections::HashMap,
         env, fs,
         path::PathBuf,
         sync::{Arc, mpsc},
@@ -366,7 +331,7 @@ mod test {
         types::InfoHash,
     };
 
-    use crate::storage::{Cache, StorageManager, StorageMessage};
+    use crate::storage::StorageManager;
 
     // use super::*;
 
