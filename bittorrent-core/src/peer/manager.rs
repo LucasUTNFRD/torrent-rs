@@ -187,6 +187,36 @@ impl PeerManager {
             _ => unimplemented!(),
         }
     }
+
+    async fn handle_interest(&mut self, pid: Id) {
+        let peer = match self.peers.get_mut(&pid) {
+            Some(p) => p,
+            None => return,
+        };
+        if peer.am_interested {
+            return;
+        }
+
+        let should_send_interest = self
+            .picker
+            .send_interest(AvailabilityUpdate::Bitfield(&peer.bitfield));
+
+        if should_send_interest {
+            peer.am_interested = true;
+            let _ = peer
+                .sender
+                .send(PeerCommand::SendMessage(Message::Interested))
+                .await;
+
+            if let Some((idx, piece)) = self.picker.pick_piece(&peer.bitfield) {
+                peer.assigned_piece_idx = Some(idx);
+                let _ = peer.sender.send(PeerCommand::AvailableTask(piece)).await;
+                self.picker.mark_piece_as(idx, PieceState::Requested);
+                tracing::debug!("Assigned piece {} to peer {}", idx, pid.0);
+            }
+        }
+    }
+
     async fn handle_peer_event(&mut self, cmd: PeerEvent) {
         use PeerEvent::*;
         match cmd {
@@ -195,6 +225,7 @@ impl PeerManager {
                     Some(peer) => peer,
                     None => return,
                 };
+
                 if let Err(e) = peer.bitfield.set(piece_idx as usize) {
                     tracing::warn!("set operation failed {e}");
                     return;
@@ -203,25 +234,7 @@ impl PeerManager {
                 self.picker
                     .increment_availability(AvailabilityUpdate::Index(piece_idx));
 
-                if !peer.am_interested
-                    && self
-                        .picker
-                        .send_interest(AvailabilityUpdate::Bitfield(&peer.bitfield))
-                {
-                    let _ = peer
-                        .sender
-                        .send(PeerCommand::SendMessage(Message::Interested))
-                        .await;
-
-                    peer.am_interested = true;
-
-                    if let Some((idx, piece)) = self.picker.pick_piece(&peer.bitfield) {
-                        peer.assigned_piece_idx = Some(idx);
-                        let _ = peer.sender.send(PeerCommand::AvailableTask(piece)).await;
-                        self.picker.mark_piece_as(idx, PieceState::Requested);
-                        //TODO: Add piece request expiration policy
-                    }
-                }
+                self.handle_interest(pid).await;
             }
             Bitfield(pid, payload) => {
                 // A bitfield of the wrong length is considered an error.
@@ -249,39 +262,21 @@ impl PeerManager {
                                 .await;
                         }
 
-                        // determine if we are interested
-                        if dbg!(
-                            self.picker
-                                .send_interest(AvailabilityUpdate::Bitfield(&peer.bitfield))
-                        ) {
-                            let _ = peer
-                                .sender
-                                .send(PeerCommand::SendMessage(Message::Interested))
-                                .await;
-
-                            peer.am_interested = true;
-
-                            if let Some((idx, piece)) = self.picker.pick_piece(&peer.bitfield) {
-                                peer.assigned_piece_idx = Some(idx);
-                                let _ = peer.sender.send(PeerCommand::AvailableTask(piece)).await;
-                                self.picker.mark_piece_as(idx, PieceState::Requested);
-                                //TODO: Add piece request expiration policy
-                            }
-                        }
-                        // and if so set download queue
+                        self.handle_interest(pid).await;
                     }
                     Err(e) => {
                         tracing::warn!("dropping peer connection - reason {e}");
-                        // POTENTIAL BUG: We are dropping connection and remove peer entry in this
-                        // block
-                        let peer = self.peers.remove(&pid).unwrap();
                         let _ = peer.sender.send(PeerCommand::Disconnect).await;
+                        self.clean_up_peer(pid);
                     }
                 };
             }
             AddBlock(id, block) => {
                 // cache the block
                 if let Some(completed_piece) = self.cache.insert_block(&block) {
+                    if let Some(peer) = self.peers.get_mut(&id) {
+                        peer.assigned_piece_idx = None;
+                    }
                     let piece_index = block.index;
                     //
                     let (verification_tx, verification_rx) = oneshot::channel();
@@ -318,7 +313,6 @@ impl PeerManager {
 
     //Removes disconnected peer from the peers HashMap
     // Decrements piece availability for all pieces the peer had
-    // Logs the disconnect reason for debugging
     fn clean_up_peer(&mut self, id: Id) {
         let removed_peer = self
             .peers
