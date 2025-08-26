@@ -13,7 +13,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
     sync::mpsc,
-    time::{interval_at, timeout},
+    time::{Instant, interval_at, timeout},
 };
 use tokio_util::codec::Framed;
 use tracing::instrument;
@@ -101,6 +101,7 @@ pub struct Connected {
     peer_state: PeerState,
     download_queue: Option<Vec<BlockInfo>>,
     outbound_requests: HashSet<BlockInfo>,
+    last_recv_msg: Instant,
     // Track of pieces we requested and we are awaiting
     // outbound_requests:
     // track of pieces peer requested
@@ -118,6 +119,7 @@ impl Connected {
             peer_state: PeerState::default(),
             download_queue: None,
             outbound_requests: HashSet::new(),
+            last_recv_msg: Instant::now(),
         }
     }
 }
@@ -211,6 +213,7 @@ impl Peer<Handshaking> {
 }
 
 impl Peer<Connected> {
+    const CONNECTION_TIMEOUT: Duration = Duration::from_secs(120); // 2 minutes
     #[instrument(
     name = "peer",
     skip_all,
@@ -226,12 +229,17 @@ impl Peer<Connected> {
             Duration::from_secs(60),
         );
 
+        let mut timeout_check = interval_at(
+            Instant::now() + Duration::from_secs(30),
+            Duration::from_secs(30),
+        );
+
         loop {
             tokio::select! {
                 maybe_msg = self.state.stream.next() => {
                     match maybe_msg {
                         Some(Ok(msg)) => {
-                        // last_message_time =
+                            self.state.last_recv_msg = Instant::now();
                             self.handle_msg(msg).await;
                         }
                         Some(Err(e)) => return Err(PeerError::IoError(e)),
@@ -269,6 +277,17 @@ impl Peer<Connected> {
                 _ = heartbeat.tick() => {
                     self.state.sink.send(Message::KeepAlive).await.map_err(PeerError::IoError)?
                 }
+                _ = timeout_check.tick() => {
+                    // Check if we've received any message within the timeout window
+                    if self.state.last_recv_msg.elapsed() > Self::CONNECTION_TIMEOUT {
+                        tracing::warn!(
+                            "Peer {} connection timeout: no message received for {:?}",
+                            self.peer_info.addr(),
+                            self.state.last_recv_msg.elapsed()
+                        );
+                        return Err(PeerError::Timeout);
+                    }
+                }
             }
         }
 
@@ -276,12 +295,12 @@ impl Peer<Connected> {
     }
 
     async fn try_request_blocks(&mut self) -> Result<(), PeerError> {
-        tracing::debug!("triyng to request block to peer {}", self.peer_info.addr);
+        tracing::debug!("trying to request block to peer {}", self.peer_info.addr);
         let am_interested = self.state.peer_state.am_interested;
         let peer_not_choking = !self.state.peer_state.peer_choking;
-        let some_dq = self.state.download_queue.is_some();
-        tracing::debug!(am_interested, peer_not_choking, some_dq);
-        if am_interested && peer_not_choking && some_dq {
+        let has_queue = self.state.download_queue.is_some();
+        tracing::debug!(am_interested, peer_not_choking, has_queue);
+        if am_interested && peer_not_choking && has_queue {
             tracing::debug!("requesting block to peer {}", self.peer_info.addr);
             self.request_blocks().await?
         }
@@ -291,16 +310,19 @@ impl Peer<Connected> {
     // TODO Dynamically adjust pipeline by upload rate of peer
     const MAX_PIPELINE: usize = 5;
     async fn request_blocks(&mut self) -> Result<(), PeerError> {
-        while let Some(block) = self.pop_block() {
-            if self.state.outbound_requests.len() < Self::MAX_PIPELINE {
+        // Only request up to the pipeline limit
+        while self.state.outbound_requests.len() < Self::MAX_PIPELINE {
+            if let Some(block) = self.pop_block() {
                 self.state.outbound_requests.insert(block);
 
+                tracing::debug!("Requesting block: {:?}", block);
                 self.state
                     .sink
                     .send(Message::Request(block))
                     .await
                     .map_err(PeerError::IoError)?;
             } else {
+                tracing::debug!("No more blocks available in queue");
                 break;
             }
         }
@@ -368,7 +390,9 @@ impl Peer<Connected> {
                     }
                 }
             }
-            Cancel(BlockInfo) => todo!(),
+            Cancel(_blockInfo) => {
+                tracing::info!("recv cancel");
+            }
         }
     }
 }
