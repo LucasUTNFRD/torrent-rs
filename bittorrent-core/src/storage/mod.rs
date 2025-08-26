@@ -547,15 +547,7 @@ mod test {
         let mut manager = StorageManager::new(download_dir.clone(), rx);
 
         manager.handle_add_torrent(id, meta);
-        // manager.torrents.insert(
-        //     id,
-        //     Cache {
-        //         metainfo: meta.clone(),
-        //         files: meta.files(),
-        //         file_handles: HashMap::new(),
-        //     },
-        // );
-        //
+
         // Initial state: no file handles cached
         assert_eq!(manager.torrents.get(&id).unwrap().file_handles.len(), 0);
 
