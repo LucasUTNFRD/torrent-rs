@@ -14,7 +14,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("Save directory: {:?}", PATH);
     tracing::info!("Listening on port: {}", DEFAULT_PORT);
 
-    session.add_torrent("sample_torrents/sample.torrent");
+    session.add_torrent("sample_torrents/debian-12.10.0-amd64-netinst.iso.torrent");
 
     tracing::info!("Session running. Press Ctrl+C to shutdown.");
 

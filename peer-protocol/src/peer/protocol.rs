@@ -64,10 +64,13 @@ impl Handshake {
     pub const HANDSHAKE_LEN: usize = 68;
     pub const EXTENSION_PROTOCOL_FLAG: u8 = 0x10; // bit 43 (5th bit of 6th byte)
 
+    // TODO:
     pub fn new(peer_id: PeerID, info_hash: InfoHash) -> Self {
-        let mut reserved = [0u8; 8];
+        let reserved = [0u8; 8];
         // Enable extension protocol support
-        reserved[5] |= Self::EXTENSION_PROTOCOL_FLAG;
+        // reserved[5] |= Self::EXTENSION_PROTOCOL_FLAG; // commented this because we dont support
+        // it yey
+
         Handshake {
             peer_id,
             info_hash,
@@ -215,7 +218,8 @@ impl Decoder for MessageCodec {
                 })
             }
             MessageId::ExtendedHandshake => {
-                todo!("Parse extended handshake")
+                tracing::debug!("extended handhsake not support yet");
+                return Ok(None);
             }
         };
 

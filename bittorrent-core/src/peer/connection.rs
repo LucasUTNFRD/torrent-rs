@@ -193,6 +193,10 @@ impl Peer<Handshaking> {
         let remote_handshake = Handshake::from_bytes(&buf).ok_or(PeerError::InvalidHandshake)?;
         tracing::debug!("Validating remote handshake");
 
+        if remote_handshake.support_extended_message() {
+            tracing::debug!("peer support extended handshake");
+        }
+
         if remote_handshake.info_hash != *self.peer_info.info_hash() {
             tracing::error!("Handshake failed: info hash mismatch");
             return Err(PeerError::InvalidHandshake);
