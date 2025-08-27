@@ -74,9 +74,11 @@ async fn start_torrent_session(
 
     tracing::info!(?announce_resp);
 
+    let interval = announce_resp.interval as u64;
+
     let mut announce_ticker = interval_at(
-        Instant::now() + Duration::from_secs(announce_resp.interval as u64),
-        Duration::from_secs(announce_resp.interval as u64),
+        Instant::now() + Duration::from_secs(interval as u64),
+        Duration::from_secs(interval as u64),
     );
 
     let peer_manager = Arc::new(PeerManagerHandle::new(torrent.clone(), storage.clone()));

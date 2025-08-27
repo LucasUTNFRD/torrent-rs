@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     net::SocketAddr,
     sync::{
         Arc,
@@ -7,15 +7,16 @@ use std::{
     },
 };
 
+use super::piece_picker::{AvailabilityUpdate, Picker, PieceState};
 use bitfield::Bitfield;
 use bittorrent_common::{metainfo::TorrentInfo, types::PeerID};
 use bytes::Bytes;
 use peer_protocol::protocol::{Block, BlockInfo, Message};
-use picker::{AvailabilityUpdate, Picker, PieceState};
 use piece_cache::PieceCache;
 use tokio::{
     sync::{mpsc, oneshot},
     task::JoinHandle,
+    time::Instant,
 };
 
 use crate::{
@@ -41,6 +42,7 @@ pub enum PeerEvent {
     Bitfield(Id, Bytes),
     PeerError(Id, PeerError),
     AddBlock(Id, Block),
+    NeedTask(Id),
 }
 
 #[derive(Debug)]
@@ -97,6 +99,8 @@ struct PeerManager {
     peer_event_tx: mpsc::Sender<PeerEvent>,
     peer_event_rx: mpsc::Receiver<PeerEvent>,
 
+    connected_addrs: HashSet<SocketAddr>,
+
     // Download state
     bitfield: Bitfield,
     // Actor managers
@@ -110,6 +114,7 @@ struct PeerManager {
 #[derive(Debug, Clone)]
 struct PeerState {
     pub pid: Id,
+    pub addr: SocketAddr,
     pub sender: mpsc::Sender<PeerCommand>,
     pub bitfield: Bitfield,
     pub am_interested: bool,
@@ -133,16 +138,20 @@ impl PeerManager {
             picker: Picker::new(torrent.clone()),
             torrent,
             storage,
+            connected_addrs: HashSet::new(),
         }
     }
 
     pub async fn run(mut self) {
         loop {
-            if dbg!(self.bitfield.all_set()) {
+            if self.bitfield.all_set() {
                 tracing::info!(
                     "torrent file {} has been leeched succesfully",
                     self.torrent.info.mode.name()
-                )
+                );
+
+                let (none, requested, writing, finished) = self.picker.summary();
+                dbg!(none, requested, writing, finished);
             }
 
             tokio::select! {
@@ -170,6 +179,13 @@ impl PeerManager {
                 our_client_id,
             } => {
                 // TODO: Check that peer is not already connected
+                if self.connected_addrs.contains(&peer_addr) {
+                    tracing::debug!(?peer_addr, "we are alreay connected to this peer");
+                    return;
+                }
+
+                self.connected_addrs.insert(peer_addr);
+
                 let id = PEER_COUNTER.fetch_add(1, Ordering::Relaxed);
                 let id = Id(id);
 
@@ -183,6 +199,7 @@ impl PeerManager {
                         bitfield: Bitfield::new(self.torrent.num_pieces()),
                         am_interested: false,
                         assigned_piece_idx: None,
+                        addr: peer_addr,
                     },
                 );
             }
@@ -200,6 +217,7 @@ impl PeerManager {
             Some(p) => p,
             None => return,
         };
+
         if peer.am_interested {
             return;
         }
@@ -215,12 +233,7 @@ impl PeerManager {
                 .send(PeerCommand::SendMessage(Message::Interested))
                 .await;
 
-            if let Some((idx, piece)) = self.picker.pick_piece(&peer.bitfield) {
-                peer.assigned_piece_idx = Some(idx);
-                let _ = peer.sender.send(PeerCommand::AvailableTask(piece)).await;
-                self.picker.mark_piece_as(idx, PieceState::Requested);
-                tracing::debug!("Assigned piece {} to peer {}", idx, pid.0);
-            }
+            self.assign_piece(pid).await;
         }
     }
 
@@ -284,10 +297,16 @@ impl PeerManager {
                     if let Some(peer) = self.peers.get_mut(&id) {
                         peer.assigned_piece_idx = None;
                     }
+
                     let piece_index = block.index;
-                    //
-                    let (verification_tx, verification_rx) = oneshot::channel();
                     let torrent_id = self.torrent.info_hash;
+
+                    // Mark the piece as writing
+                    self.picker
+                        .mark_piece_as(piece_index as usize, PieceState::Writing);
+
+                    // let start_timer = Instant::now();
+                    let (verification_tx, verification_rx) = oneshot::channel();
                     self.storage.verify_piece(
                         torrent_id,
                         piece_index,
@@ -295,217 +314,119 @@ impl PeerManager {
                         verification_tx,
                     );
 
+                    // WARN: Verifying a piece is blocking
                     let valid = verification_rx
                         .await
                         .expect("failed to receive piece validation");
 
                     if valid {
-                        self.picker
-                            .mark_piece_as(piece_index as usize, PieceState::Writing);
                         self.storage
                             .write_piece(torrent_id, piece_index, completed_piece.clone());
-                        // mark piece as have
                         self.bitfield.set(piece_index as usize).unwrap();
-                        // broadcast HAVE to all peers
-                        self.broadcast_have(piece_index).await;
+                        self.picker
+                            .mark_piece_as(piece_index as usize, PieceState::Finished);
+                        self.broadcast_have(piece_index);
                     } else {
                         //  marking the piece as none results in downloading from zero the piece
+                        tracing::debug!("piece {} was invalid", piece_index);
                         self.picker
                             .mark_piece_as(piece_index as usize, PieceState::None);
+                        self.cache.drop_piece(piece_index as usize);
                     }
+                    // let handshake_duration = start_timer.elapsed();
+                    // tracing::debug!(duration = ?handshake_duration, "validation and writing completed");
+                }
+            }
+            NeedTask(id) => {
+                let peer_has_assignment = self
+                    .peers
+                    .get(&id)
+                    .map(|p| p.assigned_piece_idx.is_some())
+                    .unwrap_or(false);
+
+                let (none, requested, writing, finished) = self.picker.summary();
+                tracing::debug!(
+                    peer = %id.0,
+                    none = none,
+                    requested = requested,
+                    writing = writing,
+                    finished = finished,
+                    "no pieces available for peer"
+                );
+
+                if !peer_has_assignment {
+                    self.assign_piece(id).await;
                 }
             }
             PeerError(id, err) => {
-                tracing::warn!(?err);
+                tracing::warn!(?err, ?id);
                 self.clean_up_peer(id);
             }
         }
     }
 
-    async fn broadcast_have(&mut self, piece_index: u32) {
-        for (_id, state) in self.peers.iter() {
-            let _ = state
-                .sender
-                .send(PeerCommand::SendMessage(Message::Have { piece_index }))
-                .await;
+    async fn assign_piece(&mut self, id: Id) {
+        let peer = match self.peers.get_mut(&id) {
+            Some(peer) => peer,
+            None => return,
+        };
+
+        // Only assign when we are interested and the peer has no piece assigned
+        if !peer.am_interested {
+            tracing::debug!(?id, "skipping assignment: not interested");
+            return;
+        }
+
+        if peer.assigned_piece_idx.is_some() {
+            tracing::debug!(?id, "skipping assignment: already has an assigned piece");
+            return;
+        }
+
+        if let Some((idx, piece)) = self.picker.pick_piece(&peer.bitfield) {
+            // Verify piece is actually in None state
+            peer.assigned_piece_idx = Some(idx);
+            self.picker.mark_piece_as(idx, PieceState::Requested);
+            let _ = peer.sender.send(PeerCommand::AvailableTask(piece)).await;
+            tracing::debug!("Assigned piece {} to peer {}", idx, id.0);
+        } else {
+            let (none, requested, writing, finished) = self.picker.summary();
+            tracing::debug!(
+                peer = %id.0,
+                none = none,
+                requested = requested,
+                writing = writing,
+                finished = finished,
+                "no pieces available for peer"
+            );
+        }
+    }
+
+    fn broadcast_have(&self, piece_index: u32) {
+        for state in self.peers.values() {
+            let sender = state.sender.clone();
+            tokio::spawn(async move {
+                let _ = sender
+                    .send(PeerCommand::SendMessage(Message::Have { piece_index }))
+                    .await;
+            });
         }
     }
 
     //Removes disconnected peer from the peers HashMap
     // Decrements piece availability for all pieces the peer had
     fn clean_up_peer(&mut self, id: Id) {
-        let removed_peer = self
-            .peers
-            .remove(&id)
-            .expect("remove of a non existent peer");
+        if let Some(removed_peer) = self.peers.remove(&id) {
+            self.picker
+                .decrement_availability(AvailabilityUpdate::Bitfield(&removed_peer.bitfield));
 
-        self.picker
-            .decrement_availability(AvailabilityUpdate::Bitfield(&removed_peer.bitfield));
+            self.connected_addrs.remove(&removed_peer.addr);
 
-        if let Some(piece_idx) = removed_peer.assigned_piece_idx {
-            // Mark pieces as None, so now this is free to be downloaded by other peer
-            self.picker.mark_piece_as(piece_idx, PieceState::None);
-            // If there were blocks in the cache we should drop them.
-            self.cache.drop_piece(piece_idx);
-        }
-    }
-}
-
-mod picker {
-    use std::sync::Arc;
-
-    use bittorrent_common::metainfo::TorrentInfo;
-    use peer_protocol::protocol::BlockInfo;
-
-    use super::bitfield::Bitfield;
-
-    pub const BLOCK_SIZE: u32 = 1 << 14;
-
-    // reference: https://blog.libtorrent.org/2011/11/writing-a-fast-piece-picker/
-    pub struct Picker {
-        torrent: Arc<TorrentInfo>,
-        num_pieces: usize,
-        piece_availability: Vec<PieceIndex>,
-    }
-
-    #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-    struct PieceIndex {
-        availabilty: usize,
-        partial: bool,
-        state: PieceState,
-        size: usize,
-        // blocks: Vec<BlockInfo>,
-    }
-
-    #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-    pub enum PieceState {
-        None,
-        Requested,
-        Writing,
-        Finished,
-    }
-
-    pub enum AvailabilityUpdate<'a> {
-        Bitfield(&'a Bitfield),
-        Index(u32),
-    }
-
-    impl Picker {
-        pub fn new(torrent: Arc<TorrentInfo>) -> Self {
-            let total_pieces = torrent.num_pieces();
-            let pieces = (0..total_pieces)
-                .map(|piece_idx| PieceIndex {
-                    availabilty: 0,
-                    partial: false,
-                    state: PieceState::None,
-                    size: torrent.get_piece_len(piece_idx) as usize,
-                    // blocks:
-                })
-                .collect();
-            Self {
-                torrent,
-                num_pieces: total_pieces,
-                piece_availability: pieces,
-            }
-        }
-
-        pub fn increment_availability(&mut self, update: AvailabilityUpdate) {
-            match update {
-                AvailabilityUpdate::Bitfield(bitfield) => {
-                    if bitfield.all_set() {
-                        self.piece_availability
-                            .iter_mut()
-                            .for_each(|p| p.availabilty += 1);
-                    } else {
-                        for idx in bitfield.iter_set() {
-                            self.piece_availability[idx].availabilty += 1;
-                        }
-                    }
-                }
-                AvailabilityUpdate::Index(idx) => {
-                    if let Some(p) = self.piece_availability.get_mut(idx as usize) {
-                        p.availabilty += 1;
-                    }
-                }
-            }
-        }
-
-        // returns true if peer has a piece we dont
-        // this could be called when the peer sends their bitifled
-        // or the peer sent his bitfield and previously we were not interested
-        // and now he sent a have, and we could be now interested
-        pub fn send_interest(&self, update: AvailabilityUpdate) -> bool {
-            match update {
-                AvailabilityUpdate::Bitfield(bitfield) => {
-                    for idx in bitfield.iter_set() {
-                        if self.piece_availability[idx].state == PieceState::None {
-                            return true;
-                        }
-                    }
-                    false
-                }
-                AvailabilityUpdate::Index(idx) => {
-                    self.piece_availability[idx as usize].state == PieceState::None
-                }
-            }
-        }
-
-        pub fn decrement_availability(&mut self, update: AvailabilityUpdate) {
-            match update {
-                AvailabilityUpdate::Bitfield(bitfield) => {
-                    if bitfield.all_set() {
-                        self.piece_availability
-                            .iter_mut()
-                            .for_each(|p| p.availabilty = p.availabilty.saturating_sub(1));
-                    } else {
-                        for idx in bitfield.iter_set() {
-                            let p = &mut self.piece_availability[idx];
-                            p.availabilty = p.availabilty.saturating_sub(1);
-                        }
-                    }
-                }
-                AvailabilityUpdate::Index(idx) => {
-                    if let Some(p) = self.piece_availability.get_mut(idx as usize) {
-                        p.availabilty = p.availabilty.saturating_sub(1)
-                    }
-                }
-            }
-        }
-
-        fn get_blocks(&self, piece_idx: usize) -> Vec<BlockInfo> {
-            let piece_size = self.piece_availability[piece_idx].size;
-            (0..piece_size)
-                .step_by(BLOCK_SIZE as usize)
-                .map(|offset| BlockInfo {
-                    index: piece_idx as u32,
-                    begin: offset as u32,
-                    length: BLOCK_SIZE.min(piece_size as u32 - offset as u32),
-                })
-                .collect()
-        }
-
-        /// Called of this function, Must call Mark_as_downloading
-        pub fn pick_piece(&self, peer_bitfield: &Bitfield) -> Option<(usize, Vec<BlockInfo>)> {
-            // Rarest-first among pieces we don't have (state == None) and the peer has
-            let piece_idx = peer_bitfield
-                .iter_set()
-                .filter(|&i| self.piece_availability[i].state == PieceState::None)
-                .min_by_key(|&i| self.piece_availability[i].availabilty)?;
-
-            // let piece_idx = candidate.first()?;
-            let blocks = self.get_blocks(piece_idx);
-
-            Some((piece_idx, blocks))
-        }
-
-        pub fn mark_piece_as(&mut self, piece_idx: usize, state: PieceState) {
-            if let Some(piece) = self.piece_availability.get_mut(piece_idx) {
-                piece.state = state;
+            if let Some(piece_idx) = removed_peer.assigned_piece_idx {
+                self.picker.mark_piece_as(piece_idx, PieceState::None);
+                self.cache.drop_piece(piece_idx);
             }
         }
     }
-
-    // TODO: Add unit test for picker
 }
 
 mod piece_cache {
@@ -562,7 +483,7 @@ mod piece_cache {
     }
 }
 
-mod bitfield {
+pub mod bitfield {
     use std::boxed;
 
     use bytes::Bytes;
@@ -706,46 +627,69 @@ mod bitfield {
         pub fn iter_set(&self) -> BitfieldSetIter<'_> {
             BitfieldSetIter {
                 bitfield: self,
-                word_idx: 0,
-                bit_mask: 0x80,
+                byte_idx: 0,
+                bit_in_byte: 0,
             }
         }
     }
 
     pub struct BitfieldSetIter<'a> {
         bitfield: &'a Bitfield,
-        word_idx: usize,
-        bit_mask: u8,
+        byte_idx: usize,
+        bit_in_byte: u8,
     }
 
     impl Iterator for BitfieldSetIter<'_> {
         type Item = usize;
 
-        /// Yields Index of piece marked in bitfield
         fn next(&mut self) -> Option<Self::Item> {
-            while self.word_idx < self.bitfield.bits.len() {
-                let word = self.bitfield.bits[self.word_idx];
-                while self.bit_mask != 0 {
-                    if word & self.bit_mask != 0 {
-                        let idx = self.word_idx * 32 + self.bit_mask.leading_zeros() as usize;
-                        self.bit_mask >>= 1;
-                        if idx < self.bitfield.nbits {
-                            return Some(idx);
-                        }
-                    } else {
-                        self.bit_mask >>= 1;
+            while self.byte_idx < self.bitfield.bits.len() {
+                let byte = self.bitfield.bits[self.byte_idx];
+                while self.bit_in_byte < 8 {
+                    let mask = 1u8 << (7 - self.bit_in_byte);
+                    let idx = self.byte_idx * 8 + self.bit_in_byte as usize;
+                    self.bit_in_byte += 1;
+
+                    // Skip spare bits beyond nbits
+                    if idx >= self.bitfield.nbits {
+                        continue;
+                    }
+
+                    if (byte & mask) != 0 {
+                        return Some(idx);
                     }
                 }
-                self.word_idx += 1;
-                self.bit_mask = 0x80;
+                self.byte_idx += 1;
+                self.bit_in_byte = 0;
             }
             None
         }
+        // /// Yields Index of piece marked in bitfield
+        // fn next(&mut self) -> Option<Self::Item> {
+        //     while self.word_idx < self.bitfield.bits.len() {
+        //         let word = self.bitfield.bits[self.word_idx];
+        //         while self.bit_mask != 0 {
+        //             if word & self.bit_mask != 0 {
+        //                 let idx = self.word_idx * 32 + self.bit_mask.leading_zeros() as usize;
+        //                 self.bit_mask >>= 1;
+        //                 if idx < self.bitfield.nbits {
+        //                     return Some(idx);
+        //                 }
+        //             } else {
+        //                 self.bit_mask >>= 1;
+        //             }
+        //         }
+        //         self.word_idx += 1;
+        //         self.bit_mask = 0x80;
+        //     }
+        //     None
+        // }
     }
 
     #[cfg(test)]
     mod test {
         use super::*;
+
         #[test]
         fn test_all_set() {
             // Empty bitfield
@@ -789,6 +733,7 @@ mod bitfield {
             assert!(!bf.all_set());
         }
 
+        #[test]
         fn test_set_iter() {
             // Create a bitfield with 10 bits
             let mut bf = Bitfield::new(10);

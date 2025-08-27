@@ -2,6 +2,7 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 
 use bittorrent_common::{
@@ -11,6 +12,7 @@ use bittorrent_common::{
 use tokio::{
     sync::mpsc::{self, UnboundedSender},
     task::JoinHandle,
+    time::sleep,
 };
 use tracker_client::TrackerHandler;
 
@@ -83,6 +85,7 @@ impl SessionManager {
                     };
 
                     tracing::info!(%metainfo);
+                    sleep(Duration::from_secs(5)).await;
 
                     let info_hash = metainfo.info_hash;
                     let torrent_session =

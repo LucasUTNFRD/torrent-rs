@@ -315,7 +315,7 @@ impl Peer<Connected> {
     }
 
     // TODO Dynamically adjust pipeline by upload rate of peer
-    const MAX_PIPELINE: usize = 5;
+    const MAX_PIPELINE: usize = 10;
     async fn request_blocks(&mut self) -> Result<(), PeerError> {
         // Only request up to the pipeline limit
         while self.state.outbound_requests.len() < Self::MAX_PIPELINE {
@@ -330,10 +330,23 @@ impl Peer<Connected> {
                     .map_err(PeerError::IoError)?;
             } else {
                 tracing::debug!("No more blocks available in queue");
+                self.refill_download_queue().await;
+                // we need a refill
                 break;
             }
         }
         Ok(())
+    }
+
+    async fn refill_download_queue(&self) {
+        if self.state.outbound_requests.is_empty() {
+            let _ = self
+                .manager_tx
+                .send(PeerEvent::NeedTask(self.peer_info.remote_pid))
+                .await;
+        } else {
+            dbg!(&self.state.outbound_requests);
+        }
     }
 
     fn pop_block(&mut self) -> Option<BlockInfo> {
@@ -346,6 +359,7 @@ impl Peer<Connected> {
         match msg {
             KeepAlive => {
                 tracing::debug!("recv keepalive");
+                tracing::debug!("download_queue = {:?}", self.state.download_queue);
             }
             // Can we request related
             Choke => self.state.peer_state.peer_choking = true,
