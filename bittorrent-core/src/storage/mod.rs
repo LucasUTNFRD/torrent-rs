@@ -153,10 +153,10 @@ impl StorageManager {
         for fi in &files {
             let full_path = self.download_dir.join(&fi.path);
 
-            if let Some(parent) = full_path.parent()
-                && let Err(e) = std::fs::create_dir_all(parent)
-            {
-                eprintln!("storage: failed to create directory {:?}: {}", parent, e);
+            if let Some(parent) = full_path.parent() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    eprintln!("storage: failed to create directory {:?}: {}", parent, e);
+                }
             }
         }
 
