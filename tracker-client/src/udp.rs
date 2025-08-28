@@ -409,6 +409,8 @@ impl UdpTrackerClient {
         println!(" DEBUG: Starting connection process to {}", tracker);
         {
             let guard = self.state.read().unwrap();
+
+            #[allow(clippy::collapsible_if)]
             if let Some(TrackerState::ConnectReceived {
                 connection_id,
                 instant,
