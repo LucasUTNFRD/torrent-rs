@@ -510,7 +510,7 @@ pub mod bitfield {
         type Error = BitfieldError;
 
         fn try_from((bytes, num_pieces): (Bytes, usize)) -> Result<Self, Self::Error> {
-            let expected_bytes = (num_pieces + 7) / 8;
+            let expected_bytes = (num_pieces + 7).div_ceil(8);
 
             if bytes.len() < expected_bytes {
                 return Err(BitfieldError::InvalidLength {
