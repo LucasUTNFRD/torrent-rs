@@ -547,7 +547,7 @@ pub mod bitfield {
 
     impl Bitfield {
         pub fn new(nbits: usize) -> Self {
-            let nbytes = (nbits + 7) / 8;
+            let nbytes = (nbits + 7).div_ceil(8);
             Self {
                 bits: vec![0; nbytes].into_boxed_slice(),
                 nbits,
