@@ -156,6 +156,7 @@ impl StorageManager {
 
         for fi in &files {
             let full_path = self.download_dir.join(&fi.path);
+            #[allow(clippy::collapsible_if)]
             if let Some(parent) = full_path.parent() {
                 if let Err(e) = std::fs::create_dir_all(parent) {
                     eprintln!("storage: failed to create directory {:?}: {}", parent, e);

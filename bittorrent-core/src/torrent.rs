@@ -78,7 +78,7 @@ async fn start_torrent_session(
     let interval = announce_resp.interval as u64;
 
     let mut announce_ticker = interval_at(
-        Instant::now() + Duration::from_secs(interval as u64),
+        Instant::now() + Duration::from_secs(interval),
         Duration::from_secs(interval as u64),
     );
 
