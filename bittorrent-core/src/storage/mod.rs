@@ -16,11 +16,7 @@ use bittorrent_common::{
 };
 use peer_protocol::protocol::BlockInfo;
 use sha1::{Digest, Sha1};
-use thiserror::Error;
 use tokio::sync::oneshot;
-
-#[derive(Error, Debug)]
-pub enum Error {}
 
 struct StorageManager {
     download_dir: PathBuf,
@@ -156,11 +152,11 @@ impl StorageManager {
 
         for fi in &files {
             let full_path = self.download_dir.join(&fi.path);
-            #[allow(clippy::collapsible_if)]
-            if let Some(parent) = full_path.parent() {
-                if let Err(e) = std::fs::create_dir_all(parent) {
-                    eprintln!("storage: failed to create directory {:?}: {}", parent, e);
-                }
+
+            if let Some(parent) = full_path.parent()
+                && let Err(e) = std::fs::create_dir_all(parent)
+            {
+                eprintln!("storage: failed to create directory {:?}: {}", parent, e);
             }
         }
 

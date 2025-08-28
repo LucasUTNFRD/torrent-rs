@@ -250,12 +250,12 @@ mod test {
         rand::rng().fill(&mut peer_id[3..]); // Random bytes
         peer_id.into()
     }
-    //
+
     #[tokio::test]
     async fn http_test_with_real_torrent() {
         // This test requires internet access and a real torrent file
 
-        let file = "../sample_torrents/debian-12.10.0-amd64-netinst.iso.torrent";
+        let file = "../sample_torrents/debian-13.0.0-amd64-netinst.iso.torrent";
 
         let torrent = parse_torrent_from_file(file).expect("Failed to parse torrent");
         let torrent = Arc::new(torrent);
@@ -295,7 +295,7 @@ mod test {
     async fn test_two_torrents_announcing_via_same_handler() {
         // Parse two real torrents (with working trackers)
         let file1 = "../sample_torrents/big-buck-bunny.torrent";
-        let file2 = "../sample_torrents/debian-12.10.0-amd64-netinst.iso.torrent";
+        let file2 = "../sample_torrents/debian-13.0.0-amd64-netinst.iso.torrent";
 
         let torrent1 = parse_torrent_from_file(file1).expect("Failed to parse torrent1");
         let torrent2 = parse_torrent_from_file(file2).expect("Failed to parse torrent2");
