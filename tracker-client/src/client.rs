@@ -151,6 +151,7 @@ impl TrackerManager {
 }
 
 #[derive(Debug, Copy, Clone)]
+#[allow(dead_code)]
 pub struct ClientState {
     downloaded: i64,
     left: i64,
@@ -158,6 +159,7 @@ pub struct ClientState {
     event: Events,
 }
 
+#[allow(dead_code)]
 impl ClientState {
     pub fn new(
         bytes_downloaded: i64,
@@ -222,8 +224,7 @@ impl TrackerHandler {
             })
             .await;
 
-        // FIX: Error mapping
-        orx.await.map_err(|e| TrackerError::Timeout)?
+        orx.await.map_err(|_| TrackerError::UnableToConnect)?
     }
 }
 

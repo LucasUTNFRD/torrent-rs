@@ -1,3 +1,4 @@
+use core::panic;
 use std::{
     collections::HashMap,
     env,
@@ -6,7 +7,7 @@ use std::{
     os::unix::fs::FileExt,
     path::{Path, PathBuf},
     sync::{Arc, mpsc},
-    thread::{self, JoinHandle},
+    thread::{self},
 };
 
 use bittorrent_common::{
@@ -38,9 +39,9 @@ pub enum StorageMessage {
         id: InfoHash,
         meta: Arc<TorrentInfo>,
     },
-    RemoveTorrent {
-        id: InfoHash,
-    },
+    #[allow(dead_code)]
+    RemoveTorrent { id: InfoHash },
+    #[allow(dead_code)]
     Read {
         id: InfoHash,
         piece_index: u32,
@@ -63,19 +64,20 @@ pub enum StorageMessage {
 
 pub struct Storage {
     tx: mpsc::Sender<StorageMessage>,
-    join_handle: JoinHandle<()>,
 }
 
 fn get_donwload_dir() -> PathBuf {
-    let downloads: PathBuf = match env::var_os("HOME") {
+    match env::var_os("HOME") {
         Some(home) => {
             let mut p = PathBuf::from(home);
             p.push("Downloads");
             p.push("Torrents");
-            return p;
+            p
         }
         None => panic!("$HOME not set"),
     };
+
+    panic!("$HOME not set");
 }
 
 impl Storage {
@@ -85,14 +87,11 @@ impl Storage {
 
         let mananger = StorageManager::new(get_donwload_dir(), rx);
         let builder = thread::Builder::new().name("Storage handler".to_string());
-        let handle = builder
+        builder
             .spawn(|| mananger.start())
             .expect("Failed to spawn from thread builder");
 
-        Self {
-            join_handle: handle,
-            tx,
-        }
+        Self { tx }
     }
 
     pub fn add_torrent(&self, torrent: Arc<TorrentInfo>) {
@@ -101,6 +100,8 @@ impl Storage {
             meta: torrent,
         });
     }
+
+    #[allow(dead_code)]
     pub fn remove_torrent(&self, torrent_id: InfoHash) {
         let _ = self
             .tx
@@ -129,6 +130,8 @@ impl Storage {
             data: piece_data,
         });
     }
+
+    #[allow(dead_code)]
     pub fn read_block(&self, torrent_id: InfoHash, block_info: BlockInfo) {
         let _ = self.tx.send(StorageMessage::Read {
             id: torrent_id,

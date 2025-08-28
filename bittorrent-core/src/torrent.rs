@@ -13,13 +13,14 @@ use tracker_client::{TrackerError, TrackerHandler};
 use crate::{peer::manager::PeerManagerHandle, storage::Storage};
 
 // Torrent Leeching abstraction
+#[allow(dead_code)]
 pub struct TorrentSession {
     handle: JoinHandle<Result<(), TorrentError>>,
     tx: UnboundedSender<TorrentMessage>,
 }
 
 enum TorrentMessage {
-    Stats,
+    // Stats,
     Shutdown,
 }
 
@@ -94,9 +95,9 @@ async fn start_torrent_session(
                     Some(TorrentMessage::Shutdown) => {
                         peer_manager.shutdown();
                     }
-                    Some(TorrentMessage::Stats) => {
-                        todo!()
-                    }
+                    // Some(TorrentMessage::Stats) => {
+                    //     todo!()
+                    // }
                     _ => break,
                 }
             }

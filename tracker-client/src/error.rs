@@ -29,4 +29,6 @@ pub enum TrackerError {
     InvalidUrl(String),
     #[error("Packet is too short")]
     TooShort,
+    #[error("could not establish connection to a tracker")]
+    UnableToConnect,
 }

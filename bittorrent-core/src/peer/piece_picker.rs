@@ -8,6 +8,8 @@ use super::manager::bitfield::Bitfield;
 pub const BLOCK_SIZE: u32 = 1 << 14;
 
 // reference: https://blog.libtorrent.org/2011/11/writing-a-fast-piece-picker/
+
+#[allow(dead_code)]
 pub struct Picker {
     torrent: Arc<TorrentInfo>,
     num_pieces: usize,
@@ -149,21 +151,6 @@ impl Picker {
     pub fn mark_piece_as(&mut self, piece_idx: usize, state: PieceState) {
         if let Some(piece) = self.piece_availability.get_mut(piece_idx) {
             piece.state = state;
-        }
-    }
-
-    //  -----  Debug methods -----
-    //
-    pub fn debug_state(&self) {
-        for (idx, piece) in self.piece_availability.iter().enumerate() {
-            tracing::debug!(
-                piece = idx,
-                availability = piece.availabilty,
-                state = ?piece.state,
-                size = piece.size,
-                partial = piece.partial,
-                "piece status"
-            );
         }
     }
 
@@ -552,7 +539,7 @@ mod test {
         // Pick a piece to download
         let result = picker.pick_piece(&peer_bitfield);
         assert!(result.is_some());
-        let (piece_idx, blocks) = result.unwrap();
+        let (piece_idx, _blocks) = result.unwrap();
         assert!(peer_bitfield.has(piece_idx));
 
         // Mark piece as being downloaded

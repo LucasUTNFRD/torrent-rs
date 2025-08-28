@@ -59,6 +59,7 @@ impl PeerInfo {
 
 #[derive(Debug)]
 // TODO: Idk how to rename this, because peer state is an enum, this is also a peer state
+#[allow(dead_code)]
 struct PeerState {
     ///this client is choking the peer
     pub am_choking: bool,

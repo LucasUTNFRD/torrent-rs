@@ -16,7 +16,6 @@ use piece_cache::PieceCache;
 use tokio::{
     sync::{mpsc, oneshot},
     task::JoinHandle,
-    time::Instant,
 };
 
 use crate::{
@@ -32,7 +31,7 @@ pub enum ManagerCommand {
         peer_addr: SocketAddr,
         our_client_id: PeerID,
     },
-    RemovePeer(SocketAddr),
+    // RemovePeer(SocketAddr),
     Shutdown,
 }
 
@@ -56,12 +55,9 @@ pub enum PeerCommand {
 pub struct Id(pub usize);
 static PEER_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-// Peer manager is in charge of choking and unchoking
-
-struct PeerConnectionConfig {}
-
 //  A handle is an object that other pieces of code can use to talk to the actor, and is also what keeps the actor alive.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct PeerManagerHandle {
     manager_tx: mpsc::UnboundedSender<ManagerCommand>,
     pub handle: JoinHandle<()>,
@@ -113,6 +109,7 @@ struct PeerManager {
 
 #[derive(Debug, Clone)]
 struct PeerState {
+    #[allow(dead_code)]
     pub pid: Id,
     pub addr: SocketAddr,
     pub sender: mpsc::Sender<PeerCommand>,
@@ -208,7 +205,6 @@ impl PeerManager {
                     let _ = peer_state.sender.send(PeerCommand::Disconnect).await;
                 }
             }
-            _ => unimplemented!(),
         }
     }
 
@@ -484,7 +480,6 @@ mod piece_cache {
 }
 
 pub mod bitfield {
-    use std::boxed;
 
     use bytes::Bytes;
     use thiserror::Error;

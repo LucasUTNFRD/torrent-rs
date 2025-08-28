@@ -49,6 +49,7 @@ impl Session {
     }
 }
 
+#[allow(dead_code)]
 struct SessionManager {
     port: u16,
     save_path: PathBuf,

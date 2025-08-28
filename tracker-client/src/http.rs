@@ -249,6 +249,8 @@ fn parse_peers(dict: &BTreeMap<Vec<u8>, Bencode>) -> Result<Vec<SocketAddr>, Tra
 }
 
 mod tests {
+    #![allow(unused_imports)]
+    #![allow(dead_code)]
     use std::net::{Ipv4Addr, SocketAddr};
 
     use bittorrent_common::{metainfo::parse_torrent_from_file, types::PeerID};

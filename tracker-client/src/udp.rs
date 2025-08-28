@@ -38,10 +38,10 @@ pub enum TrackerState {
         connection_id: i64, // connection id should have a timestamp
         tx: oneshot::Sender<AnnounceResponse>,
     },
-    AnnounceReceived {
-        re_announce_timestamp: i64,
-        num_peers: i32,
-    },
+    // AnnounceReceived {
+    //     re_announce_timestamp: i64,
+    //     num_peers: i32,
+    // },
 }
 
 // struct ConnectionId((i64, Instant));
