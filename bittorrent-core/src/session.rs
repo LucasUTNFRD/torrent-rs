@@ -79,7 +79,6 @@ impl SessionManager {
                     let metainfo = match parse_torrent_from_file(directory) {
                         Ok(torrent) => torrent,
                         Err(e) => {
-                            // TODO:: Handle error?
                             tracing::warn!(?e);
                             return;
                         }

@@ -3,6 +3,7 @@
 //! This crate provides HTTP and UDP tracker client implementations
 //! for BitTorrent applications.
 
+pub use client::ClientState;
 pub use client::{TrackerHandler, TrackerMessage};
 pub use error::TrackerError;
 

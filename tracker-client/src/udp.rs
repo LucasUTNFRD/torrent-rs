@@ -320,7 +320,7 @@ impl UdpTrackerClient {
         state: Arc<RwLock<HashMap<SocketAddr, TrackerState>>>,
     ) {
         // let mut buf = BytesMut::with_capacity(MAX_UDP_PAYLOAD_SIZE);
-        let mut buf = vec![0u8; MAX_UDP_PAYLOAD_SIZE];
+        let mut buf = BytesMut::zeroed(MAX_UDP_PAYLOAD_SIZE);
 
         loop {
             match socket.recv_from(&mut buf).await {

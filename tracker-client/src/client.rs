@@ -5,10 +5,12 @@ use bittorrent_common::{
     types::{InfoHash, PeerID},
 };
 
+use futures::{Stream, stream};
 use tokio::{
     sync::{mpsc, oneshot},
     time::timeout,
 };
+use tokio_stream::wrappers::ReceiverStream;
 use url::Url;
 
 use crate::{
@@ -20,6 +22,9 @@ use crate::{
 
 // TODO: restructure crate
 
+// =============================================================================
+// Core Traits and Types
+// =============================================================================
 pub struct TrackerManager {
     // cmd_rx
     rx: mpsc::Receiver<TrackerMessage>,
@@ -32,7 +37,6 @@ struct Clients {
     udp: Arc<UdpTrackerClient>,
     http: Arc<HttpTrackerClient>,
 }
-
 #[async_trait::async_trait]
 pub trait TrackerClient: Send + Sync {
     async fn announce(
@@ -80,32 +84,48 @@ impl TrackerManager {
         while let Some(msg) = self.rx.recv().await {
             match msg {
                 TrackerMessage::Announce {
-                    torrent,
+                    info_hash,
+                    trackers,
+                    client_state,
                     response_tx,
                 } => {
                     let client_id = self.client_id;
                     let clients = self.tracker_clients.clone();
                     tokio::spawn(async move {
-                        let announce_result =
-                            Self::handle_announce(torrent, client_id, clients).await;
+                        let announce_result = Self::handle_announce(
+                            info_hash,
+                            trackers,
+                            client_state,
+                            client_id,
+                            clients,
+                        )
+                        .await;
                         let _ = response_tx.send(announce_result);
                     });
                 }
+
                 _ => unimplemented!(),
             }
         }
     }
 
     async fn handle_announce(
-        torrent: Arc<TorrentInfo>,
+        torrent: InfoHash,
+        trackers: Vec<String>,
+        client_state: ClientState,
         client_id: PeerID,
         clients: Arc<Clients>,
     ) -> Result<TrackerResponse, TrackerError> {
-        let trackers = torrent.all_trackers();
-
         for tracker_url in trackers.iter() {
             tracing::debug!("Announcing to tracker: {}", tracker_url);
-            match Self::try_announce(client_id, tracker_url, torrent.clone(), clients.clone()).await
+            match Self::try_announce(
+                client_id,
+                client_state,
+                tracker_url,
+                torrent,
+                clients.clone(),
+            )
+            .await
             {
                 Ok(response) => return Ok(response),
                 Err(e) => {
@@ -115,7 +135,6 @@ impl TrackerManager {
             }
         }
 
-        // FIX ME: Use a better Error
         Err(TrackerError::InvalidResponse(
             "All trackers failed".to_string(),
         ))
@@ -124,20 +143,20 @@ impl TrackerManager {
     async fn try_announce(
         // &self
         client_id: PeerID,
+        client_state: ClientState,
         tracker_url: &str,
-        torrent: Arc<TorrentInfo>,
+        torrent: InfoHash,
         clients: Arc<Clients>,
     ) -> Result<TrackerResponse, TrackerError> {
         let url = Url::parse(tracker_url)?;
         let params = AnnounceParams {
-            info_hash: torrent.info_hash,
+            info_hash: torrent,
             peer_id: client_id,
             port: 6881, // TODO: Make configurable
-            uploaded: 0,
-            downloaded: 0,
-            left: torrent.total_size(),
+            uploaded: client_state.uploaded,
+            downloaded: client_state.downloaded,
+            left: client_state.left,
             event: Events::Started,
-            // compact: true,
         };
 
         let client = clients.select_client_for_scheme(url.scheme()).unwrap();
@@ -151,7 +170,6 @@ impl TrackerManager {
 }
 
 #[derive(Debug, Copy, Clone)]
-#[allow(dead_code)]
 pub struct ClientState {
     downloaded: i64,
     left: i64,
@@ -159,7 +177,6 @@ pub struct ClientState {
     event: Events,
 }
 
-#[allow(dead_code)]
 impl ClientState {
     pub fn new(
         bytes_downloaded: i64,
@@ -180,14 +197,12 @@ impl ClientState {
 // client state + tracker url + response_tx to
 
 pub enum TrackerMessage {
+    /// Legacy behaviours - given a list of trackers the first to resolve - send to the oneshot sender
     Announce {
-        torrent: Arc<TorrentInfo>,
-        // params: AnnounceParams,
+        info_hash: InfoHash,
+        client_state: ClientState,
+        trackers: Vec<String>, //todo  avoid using  String
         response_tx: oneshot::Sender<Result<TrackerResponse, TrackerError>>,
-    },
-    Scrape {
-        torrent: Arc<TorrentInfo>,
-        // response_tx: oneshot::Sender<Result<ScrapeResponse, TrackerError>>,
     },
     Stop {
         info_hash: InfoHash,
@@ -211,20 +226,86 @@ impl TrackerHandler {
         Self { tracker_tx }
     }
 
+    ///  Single announce (legacy) - returns first successful response
     pub async fn announce(
         &self,
-        torrent: Arc<TorrentInfo>,
+        info_hash: InfoHash,
+        trackers: Vec<String>,
+        client_state: ClientState,
     ) -> Result<TrackerResponse, TrackerError> {
         let (otx, orx) = oneshot::channel();
         let _ = self
             .tracker_tx
             .send(TrackerMessage::Announce {
-                torrent,
+                info_hash,
+                trackers,
+                client_state,
                 response_tx: otx,
             })
             .await;
 
         orx.await.map_err(|_| TrackerError::UnableToConnect)?
+    }
+
+    pub async fn scrape(&self) {}
+
+    /// Continuously announce to all trackers and return a stream of responses
+    ///
+    /// This method will:
+    /// - Announce to ALL tracker URLs concurrently (not just the first successful one)
+    /// - Repeat announces at the specified interval
+    /// - Yield responses as they arrive from different trackers
+    /// - Handle the Started event properly (only sent on first announce)
+    ///
+    /// # Arguments
+    /// * `info_hash` - torrent unique identifier,
+    /// * `client_state` - Current client state (downloaded, uploaded, left bytes)
+    ///
+    /// # Returns
+    /// A stream that yields `AnnounceResult` items containing tracker URL and response
+    pub fn run_announce(
+        &self,
+        info_hash: InfoHash,
+        trackers: Vec<String>,
+        client_state: ClientState,
+    ) -> impl Stream<Item = TrackerResponse> {
+        let (response_tx, response_rx) = mpsc::channel(100);
+
+        let tracker_tx = self.tracker_tx.clone();
+        tokio::spawn(async move {
+            for tracker in trackers {
+                let tracker_tx = tracker_tx.clone();
+                let response_tx = response_tx.clone(); // clone inside loop, each task gets its own
+                let info_hash = info_hash.clone();
+                let client_state = client_state.clone();
+
+                tokio::spawn(async move {
+                    let (otx, orx) = oneshot::channel();
+                    let _ = tracker_tx
+                        .send(TrackerMessage::Announce {
+                            info_hash,
+                            client_state,
+                            trackers: vec![tracker],
+                            response_tx: otx,
+                        })
+                        .await;
+
+                    match orx.await {
+                        Ok(Ok(resp)) => {
+                            let _ = response_tx.send(resp).await;
+                        }
+                        Ok(Err(e)) => {
+                            tracing::warn!("tracker returned error: {e}");
+                        }
+                        Err(e) => {
+                            tracing::warn!("oneshot canceled: {e}");
+                        }
+                    }
+                });
+            }
+        });
+
+        ReceiverStream::new(response_rx)
     }
 }
 

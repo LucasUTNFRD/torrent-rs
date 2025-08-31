@@ -16,6 +16,7 @@ reqwest = "0.12.22"
 url = "2.5.4"
 urlencoding = "2.1.3"
 bencode = { path = "../bencode" }
+tokio-stream = "0.1.17"
 
 
 [features]

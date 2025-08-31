@@ -5,10 +5,10 @@ use thiserror::Error;
 use tokio::{
     sync::mpsc::{self, UnboundedSender},
     task::JoinHandle,
-    time::{Instant, interval_at},
+    // time::{Instant, interval_at},
 };
 use tracing::instrument;
-use tracker_client::{TrackerError, TrackerHandler};
+use tracker_client::{ClientState, Events, TrackerError, TrackerHandler};
 
 use crate::{peer::manager::PeerManagerHandle, storage::Storage};
 
@@ -68,19 +68,25 @@ async fn start_torrent_session(
 
     storage.add_torrent(torrent.clone());
 
+    let trackers = torrent.all_trackers();
+    let info_hash = torrent.info_hash;
     let announce_resp = tracker
-        .announce(torrent.clone())
+        .announce(
+            info_hash,
+            trackers,
+            ClientState::new(0, torrent.clone().total_size(), 0, Events::Started),
+        )
         .await
         .map_err(TorrentError::Tracker)?;
 
     tracing::info!(?announce_resp);
 
-    let interval = announce_resp.interval as u64;
+    // let interval = announce_resp.interval as u64;
 
-    let mut announce_ticker = interval_at(
-        Instant::now() + Duration::from_secs(interval),
-        Duration::from_secs(interval),
-    );
+    // let mut announce_ticker = interval_at(
+    //     Instant::now() + Duration::from_secs(interval),
+    //     Duration::from_secs(interval),
+    // );
 
     let peer_manager = Arc::new(PeerManagerHandle::new(torrent.clone(), storage.clone()));
 
@@ -101,25 +107,25 @@ async fn start_torrent_session(
                     _ => break,
                 }
             }
-            _ = announce_ticker.tick() => {
-                let tracker = tracker.clone();
-                let torrent = torrent.clone();
-                let peer_manager = peer_manager.clone();
+            // _ = announce_ticker.tick() => {
+            //     let tracker = tracker.clone();
+            //     let torrent = torrent.clone();
+            //     let peer_manager = peer_manager.clone();
 
-                tokio::spawn(async move {
-                    match tracker.announce(torrent).await {
-                        Ok(resp) => {
-                            tracing::info!(?resp);
-                            for peer_addr in resp.peers {
-                                peer_manager.add_peer(peer_addr, client_id);
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!(?e, "tracker announce failed");
-                        }
-                    }
-                });
-            }
+            //     tokio::spawn(async move {
+            //         match tracker.announce(torrent).await {
+            //             Ok(resp) => {
+            //                 tracing::info!(?resp);
+            //                 for peer_addr in resp.peers {
+            //                     peer_manager.add_peer(peer_addr, client_id);
+            //                 }
+            //             }
+            //             Err(e) => {
+            //                 tracing::warn!(?e, "tracker announce failed");
+            //             }
+            //         }
+            //     });
+            // }
         }
     }
 
