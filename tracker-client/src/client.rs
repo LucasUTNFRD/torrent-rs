@@ -1,11 +1,8 @@
 use std::{sync::Arc, time::Duration};
 
-use bittorrent_common::{
-    metainfo::TorrentInfo,
-    types::{InfoHash, PeerID},
-};
+use bittorrent_common::types::{InfoHash, PeerID};
 
-use futures::{Stream, stream};
+use futures::Stream;
 use tokio::{
     sync::{mpsc, oneshot},
     time::timeout,
@@ -174,6 +171,7 @@ pub struct ClientState {
     downloaded: i64,
     left: i64,
     uploaded: i64,
+    #[allow(dead_code)]
     event: Events,
 }
 
@@ -276,8 +274,8 @@ impl TrackerHandler {
             for tracker in trackers {
                 let tracker_tx = tracker_tx.clone();
                 let response_tx = response_tx.clone(); // clone inside loop, each task gets its own
-                let info_hash = info_hash.clone();
-                let client_state = client_state.clone();
+                let info_hash = info_hash;
+                let client_state = client_state;
 
                 tokio::spawn(async move {
                     let (otx, orx) = oneshot::channel();
