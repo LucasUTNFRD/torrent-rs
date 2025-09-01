@@ -235,13 +235,9 @@ impl TrackerClient for UdpTrackerClient {
             .next()
             .ok_or_else(|| TrackerError::InvalidUrl(tracker_url.to_string()))?;
 
-        println!("tracker socket address {tracker:?}");
-
-        println!("tryng to establish connection to {tracker:?}");
         let connection_id = self.connect(tracker).await?;
         tracing::debug!("established connection to {tracker:?}");
         for n in 0..=MAX_RETRIES {
-            println!("Trying for n = {n}");
             let tx_id = rand::rng().random();
             let announce_req = AnnounceRequest {
                 connection_id,
@@ -325,11 +321,8 @@ impl UdpTrackerClient {
         loop {
             match socket.recv_from(&mut buf).await {
                 Ok((len, addr)) => {
-                    println!("received {:?}", &buf[..len]);
                     let mut guard = state.write().unwrap();
-                    println!("adcquired lock");
                     if let Some(state) = guard.remove(&addr) {
-                        println!("Current state{state:?}");
                         // we need ownership
                         // of state
                         match state {
@@ -394,7 +387,7 @@ impl UdpTrackerClient {
                     }
                 }
                 Err(e) => {
-                    eprintln!("Error receiving UDP packet: {}", e);
+                    tracing::error!(?e)
                 }
             }
         }
@@ -406,35 +399,24 @@ impl UdpTrackerClient {
 
     async fn connect(&self, tracker: SocketAddr) -> Result<i64, TrackerError> {
         // Check if we are already connected to this peer
-        println!(" DEBUG: Starting connection process to {}", tracker);
         {
             let guard = self.state.read().unwrap();
 
-            #[allow(clippy::collapsible_if)]
             if let Some(TrackerState::ConnectReceived {
                 connection_id,
                 instant,
             }) = guard.get(&tracker)
+                && !Self::is_expired(*instant)
             {
-                if !Self::is_expired(*instant) {
-                    println!(" DEBUG: Reusing existing connection_id: {}", connection_id);
-                    return Ok(*connection_id);
-                }
+                return Ok(*connection_id);
             }
         }
         for n in 0..=MAX_RETRIES {
-            println!(
-                " DEBUG: Connection attempt {} of {}",
-                n + 1,
-                MAX_RETRIES + 1
-            );
             let connect_req = ConnectionRequest::new();
-            println!("📤 DEBUG: Sending connection request {connect_req:?}");
-            let sent = self
+            let _sent = self
                 .socket
                 .send_to(&connect_req.to_bytes(), tracker)
                 .await?;
-            println!("📤 DEBUG: Sent {} bytes to tracker", sent);
 
             let (response_tx, response_rx) = oneshot::channel();
 
