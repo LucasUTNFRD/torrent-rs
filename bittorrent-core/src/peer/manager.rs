@@ -15,7 +15,7 @@ use peer_protocol::protocol::{Block, BlockInfo, Message};
 use piece_cache::PieceCache;
 use tokio::{
     sync::{mpsc, oneshot},
-    task::JoinHandle,
+    task::{JoinError, JoinHandle},
 };
 
 use crate::{
@@ -60,18 +60,19 @@ static PEER_COUNTER: AtomicUsize = AtomicUsize::new(0);
 #[allow(dead_code)]
 pub struct PeerManagerHandle {
     manager_tx: mpsc::UnboundedSender<ManagerCommand>,
-    pub handle: JoinHandle<()>,
 }
 
 impl PeerManagerHandle {
     // TODO: Implement a manager builder to pass a config
-    pub fn new(torrent: Arc<TorrentInfo>, storage: Arc<Storage>) -> Self {
+    pub fn new(torrent: Arc<TorrentInfo>, storage: Arc<Storage>) -> (Self, oneshot::Receiver<()>) {
         let (manager_tx, manager_rx) = mpsc::unbounded_channel();
 
-        let manager = PeerManager::new(manager_rx, torrent, storage);
-        let handle = tokio::spawn(async move { manager.run().await });
+        let (completion_tx, completion_rx) = oneshot::channel();
 
-        Self { manager_tx, handle }
+        let manager = PeerManager::new(manager_rx, torrent, storage, completion_tx);
+        tokio::spawn(async move { manager.run().await });
+
+        (Self { manager_tx }, completion_rx)
     }
 
     pub fn add_peer(&self, addr: SocketAddr, client_id: PeerID) {
@@ -85,8 +86,6 @@ impl PeerManagerHandle {
         let _ = self.manager_tx.send(ManagerCommand::Shutdown);
     }
 }
-
-impl PeerManagerHandle {}
 
 struct PeerManager {
     torrent: Arc<TorrentInfo>,
@@ -104,6 +103,8 @@ struct PeerManager {
     picker: Picker,
     cache: PieceCache,
     storage: Arc<Storage>,
+
+    completion_tx: oneshot::Sender<()>,
     //choker
 }
 
@@ -123,6 +124,7 @@ impl PeerManager {
         manager_rx: mpsc::UnboundedReceiver<ManagerCommand>,
         torrent: Arc<TorrentInfo>,
         storage: Arc<Storage>,
+        completion_tx: oneshot::Sender<()>,
     ) -> Self {
         let (peer_event_tx, peer_event_rx) = mpsc::channel(64);
         Self {
@@ -136,6 +138,7 @@ impl PeerManager {
             torrent,
             storage,
             connected_addrs: HashSet::new(),
+            completion_tx,
         }
     }
 
@@ -149,6 +152,9 @@ impl PeerManager {
 
                 let (none, requested, writing, finished) = self.picker.summary();
                 dbg!(none, requested, writing, finished);
+
+                let _ = self.completion_tx.send(());
+                return;
             }
 
             tokio::select! {
@@ -510,7 +516,7 @@ pub mod bitfield {
         type Error = BitfieldError;
 
         fn try_from((bytes, num_pieces): (Bytes, usize)) -> Result<Self, Self::Error> {
-            let expected_bytes = (num_pieces + 7).div_ceil(8);
+            let expected_bytes = num_pieces.div_ceil(8);
 
             if bytes.len() < expected_bytes {
                 return Err(BitfieldError::InvalidLength {

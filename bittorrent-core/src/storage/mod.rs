@@ -24,6 +24,11 @@ struct StorageManager {
     rx: mpsc::Receiver<StorageMessage>,
 }
 
+// TODO: Abstract the File System with a trait
+// this will let us implement for example an TestFileSystem for in memory test
+// or implement FileSystem for WindowsPlatform of MacOS
+// TODO: Implement FileSystem trait for WindowsPlatform and MacOS (low priority)
+
 struct Cache {
     metainfo: Arc<TorrentInfo>,
     files: Vec<FileInfo>,
@@ -68,12 +73,10 @@ fn get_donwload_dir() -> PathBuf {
             let mut p = PathBuf::from(home);
             p.push("Downloads");
             p.push("Torrents");
-            p
+            return p;
         }
         None => panic!("$HOME not set"),
     };
-
-    panic!("$HOME not set");
 }
 
 impl Storage {

@@ -88,7 +88,9 @@ async fn start_torrent_session(
     //     Duration::from_secs(interval),
     // );
 
-    let peer_manager = Arc::new(PeerManagerHandle::new(torrent.clone(), storage.clone()));
+    let (peer_manager, mut completion_rx) =
+        PeerManagerHandle::new(torrent.clone(), storage.clone());
+    let peer_manager = Arc::new(peer_manager);
 
     for peer_addr in announce_resp.peers {
         peer_manager.add_peer(peer_addr, client_id);
@@ -107,6 +109,14 @@ async fn start_torrent_session(
                     _ => break,
                 }
             }
+             _ = &mut completion_rx => {
+                tracing::info!("torrent {} finished downloading", torrent.info.mode.name());
+                break;
+            }
+
+
+
+
             // _ = announce_ticker.tick() => {
             //     let tracker = tracker.clone();
             //     let torrent = torrent.clone();
