@@ -67,7 +67,7 @@ pub struct Storage {
     tx: mpsc::Sender<StorageMessage>,
 }
 
-fn get_donwload_dir() -> PathBuf {
+fn get_download_dir() -> PathBuf {
     match env::var_os("HOME") {
         Some(home) => {
             let mut p = PathBuf::from(home);
@@ -90,7 +90,7 @@ impl Storage {
         let (tx, rx) = mpsc::channel();
         // const BASE_DIR: &str = "$HOME/Downloads/Torrents/";
 
-        let mananger = StorageManager::new(get_donwload_dir(), rx);
+        let mananger = StorageManager::new(get_download_dir(), rx);
         let builder = thread::Builder::new().name("Storage handler".to_string());
         builder
             .spawn(|| mananger.start())
