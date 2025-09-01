@@ -58,8 +58,6 @@ impl PeerInfo {
 }
 
 #[derive(Debug)]
-// TODO: Idk how to rename this, because peer state is an enum, this is also a peer state
-#[allow(dead_code)]
 struct PeerState {
     ///this client is choking the peer
     pub am_choking: bool,
@@ -363,7 +361,9 @@ impl Peer<Connected> {
                 tracing::debug!("download_queue = {:?}", self.state.download_queue);
             }
             // Can we request related
-            Choke => self.state.peer_state.peer_choking = true,
+            Choke => {
+                self.state.peer_state.peer_choking = true;
+            }
             Unchoke => {
                 self.state.peer_state.peer_choking = false;
                 if let Err(e) = self.try_request_blocks().await {

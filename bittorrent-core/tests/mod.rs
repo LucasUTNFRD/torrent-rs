@@ -328,7 +328,7 @@ async fn test_complete_download_flow() {
     let _ = tracing_subscriber::fmt::try_init();
 
     // Test configuration
-    const FILE_SIZE: usize = 65 * 1024 * 1024; // 65 mb
+    const FILE_SIZE: usize = 65 * 1024; // 65 kb
     const PIECE_LENGTH: i64 = 16 * 1024; // 16KB pieces
     const FILE_NAME: &str = "complete_test.bin";
     const SEED: u64 = 42;

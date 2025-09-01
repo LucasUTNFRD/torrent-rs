@@ -81,13 +81,6 @@ async fn start_torrent_session(
 
     tracing::info!(?announce_resp);
 
-    // let interval = announce_resp.interval as u64;
-
-    // let mut announce_ticker = interval_at(
-    //     Instant::now() + Duration::from_secs(interval),
-    //     Duration::from_secs(interval),
-    // );
-
     let (peer_manager, mut completion_rx) =
         PeerManagerHandle::new(torrent.clone(), storage.clone());
     let peer_manager = Arc::new(peer_manager);
@@ -113,29 +106,6 @@ async fn start_torrent_session(
                 tracing::info!("torrent {} finished downloading", torrent.info.mode.name());
                 break;
             }
-
-
-
-
-            // _ = announce_ticker.tick() => {
-            //     let tracker = tracker.clone();
-            //     let torrent = torrent.clone();
-            //     let peer_manager = peer_manager.clone();
-
-            //     tokio::spawn(async move {
-            //         match tracker.announce(torrent).await {
-            //             Ok(resp) => {
-            //                 tracing::info!(?resp);
-            //                 for peer_addr in resp.peers {
-            //                     peer_manager.add_peer(peer_addr, client_id);
-            //                 }
-            //             }
-            //             Err(e) => {
-            //                 tracing::warn!(?e, "tracker announce failed");
-            //             }
-            //         }
-            //     });
-            // }
         }
     }
 
