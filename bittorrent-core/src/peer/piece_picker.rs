@@ -18,7 +18,7 @@ pub struct Picker {
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 struct PieceIndex {
-    availabilty: usize,
+    availability: usize,
     partial: bool,
     state: PieceState,
     size: usize,
@@ -43,7 +43,7 @@ impl Picker {
         let total_pieces = torrent.num_pieces();
         let pieces = (0..total_pieces)
             .map(|piece_idx| PieceIndex {
-                availabilty: 0,
+                availability: 0,
                 partial: false,
                 state: PieceState::None,
                 size: torrent.get_piece_len(piece_idx) as usize,
@@ -63,16 +63,16 @@ impl Picker {
                 if bitfield.all_set() {
                     self.piece_availability
                         .iter_mut()
-                        .for_each(|p| p.availabilty += 1);
+                        .for_each(|p| p.availability += 1);
                 } else {
                     for idx in bitfield.iter_set() {
-                        self.piece_availability[idx].availabilty += 1;
+                        self.piece_availability[idx].availability += 1;
                     }
                 }
             }
             AvailabilityUpdate::Index(idx) => {
                 if let Some(p) = self.piece_availability.get_mut(idx as usize) {
-                    p.availabilty += 1;
+                    p.availability += 1;
                 }
             }
         }
@@ -104,17 +104,17 @@ impl Picker {
                 if bitfield.all_set() {
                     self.piece_availability
                         .iter_mut()
-                        .for_each(|p| p.availabilty = p.availabilty.saturating_sub(1));
+                        .for_each(|p| p.availability = p.availability.saturating_sub(1));
                 } else {
                     for idx in bitfield.iter_set() {
                         let p = &mut self.piece_availability[idx];
-                        p.availabilty = p.availabilty.saturating_sub(1);
+                        p.availability = p.availability.saturating_sub(1);
                     }
                 }
             }
             AvailabilityUpdate::Index(idx) => {
                 if let Some(p) = self.piece_availability.get_mut(idx as usize) {
-                    p.availabilty = p.availabilty.saturating_sub(1)
+                    p.availability = p.availability.saturating_sub(1)
                 }
             }
         }
@@ -138,7 +138,7 @@ impl Picker {
         let piece_idx = peer_bitfield
             .iter_set()
             .filter(|&i| self.piece_availability[i].state == PieceState::None)
-            .min_by_key(|&i| self.piece_availability[i].availabilty)?;
+            .min_by_key(|&i| self.piece_availability[i].availability)?;
 
         // let piece_idx = candidate.first()?;
         let blocks = self.get_blocks(piece_idx);
@@ -231,7 +231,7 @@ mod test {
 
         // All pieces should start with zero availability and None state
         for piece in &picker.piece_availability {
-            assert_eq!(piece.availabilty, 0);
+            assert_eq!(piece.availability, 0);
             assert_eq!(piece.state, PieceState::None);
             assert!(!piece.partial);
         }
@@ -253,11 +253,11 @@ mod test {
         let bitfield = create_bitfield(5, &[0, 2, 4]);
         picker.increment_availability(AvailabilityUpdate::Bitfield(&bitfield));
 
-        assert_eq!(picker.piece_availability[0].availabilty, 1);
-        assert_eq!(picker.piece_availability[1].availabilty, 0);
-        assert_eq!(picker.piece_availability[2].availabilty, 1);
-        assert_eq!(picker.piece_availability[3].availabilty, 0);
-        assert_eq!(picker.piece_availability[4].availabilty, 1);
+        assert_eq!(picker.piece_availability[0].availability, 1);
+        assert_eq!(picker.piece_availability[1].availability, 0);
+        assert_eq!(picker.piece_availability[2].availability, 1);
+        assert_eq!(picker.piece_availability[3].availability, 0);
+        assert_eq!(picker.piece_availability[4].availability, 1);
     }
 
     #[test]
@@ -275,7 +275,7 @@ mod test {
 
         // All pieces should have availability 1
         for piece in &picker.piece_availability {
-            assert_eq!(piece.availabilty, 1);
+            assert_eq!(piece.availability, 1);
         }
     }
 
@@ -288,11 +288,11 @@ mod test {
         picker.increment_availability(AvailabilityUpdate::Index(2));
         picker.increment_availability(AvailabilityUpdate::Index(4));
 
-        assert_eq!(picker.piece_availability[0].availabilty, 0);
-        assert_eq!(picker.piece_availability[1].availabilty, 0);
-        assert_eq!(picker.piece_availability[2].availabilty, 2);
-        assert_eq!(picker.piece_availability[3].availabilty, 0);
-        assert_eq!(picker.piece_availability[4].availabilty, 1);
+        assert_eq!(picker.piece_availability[0].availability, 0);
+        assert_eq!(picker.piece_availability[1].availability, 0);
+        assert_eq!(picker.piece_availability[2].availability, 2);
+        assert_eq!(picker.piece_availability[3].availability, 0);
+        assert_eq!(picker.piece_availability[4].availability, 1);
     }
 
     #[test]
@@ -305,7 +305,7 @@ mod test {
 
         // All pieces should still have zero availability
         for piece in &picker.piece_availability {
-            assert_eq!(piece.availabilty, 0);
+            assert_eq!(piece.availability, 0);
         }
     }
 
@@ -320,18 +320,18 @@ mod test {
         picker.increment_availability(AvailabilityUpdate::Bitfield(&bitfield));
 
         // All set pieces should have availability 2
-        assert_eq!(picker.piece_availability[0].availabilty, 2);
-        assert_eq!(picker.piece_availability[2].availabilty, 2);
-        assert_eq!(picker.piece_availability[4].availabilty, 2);
+        assert_eq!(picker.piece_availability[0].availability, 2);
+        assert_eq!(picker.piece_availability[2].availability, 2);
+        assert_eq!(picker.piece_availability[4].availability, 2);
 
         // Now decrement
         picker.decrement_availability(AvailabilityUpdate::Bitfield(&bitfield));
 
-        assert_eq!(picker.piece_availability[0].availabilty, 1);
-        assert_eq!(picker.piece_availability[1].availabilty, 0);
-        assert_eq!(picker.piece_availability[2].availabilty, 1);
-        assert_eq!(picker.piece_availability[3].availabilty, 0);
-        assert_eq!(picker.piece_availability[4].availabilty, 1);
+        assert_eq!(picker.piece_availability[0].availability, 1);
+        assert_eq!(picker.piece_availability[1].availability, 0);
+        assert_eq!(picker.piece_availability[2].availability, 1);
+        assert_eq!(picker.piece_availability[3].availability, 0);
+        assert_eq!(picker.piece_availability[4].availability, 1);
     }
 
     #[test]
@@ -342,7 +342,7 @@ mod test {
         // Decrement when availability is already 0 (should saturate at 0)
         picker.decrement_availability(AvailabilityUpdate::Index(2));
 
-        assert_eq!(picker.piece_availability[2].availabilty, 0);
+        assert_eq!(picker.piece_availability[2].availability, 0);
     }
 
     #[test]
@@ -564,7 +564,7 @@ mod test {
                 assert_eq!(picker.piece_availability[i].state, PieceState::Finished);
             } else if peer_bitfield.has(i) {
                 // Other pieces from peer should have availability 0 now
-                assert_eq!(picker.piece_availability[i].availabilty, 0);
+                assert_eq!(picker.piece_availability[i].availability, 0);
             }
         }
     }
@@ -582,9 +582,9 @@ mod test {
         picker.increment_availability(AvailabilityUpdate::Bitfield(&peer2_bitfield));
 
         // Piece 1 should have availability 2, others should have availability 1
-        assert_eq!(picker.piece_availability[0].availabilty, 1);
-        assert_eq!(picker.piece_availability[1].availabilty, 2);
-        assert_eq!(picker.piece_availability[2].availabilty, 1);
+        assert_eq!(picker.piece_availability[0].availability, 1);
+        assert_eq!(picker.piece_availability[1].availability, 2);
+        assert_eq!(picker.piece_availability[2].availability, 1);
 
         // When picking from peer1, should prefer piece 0 (rarest)
         let result = picker.pick_piece(&peer1_bitfield);
