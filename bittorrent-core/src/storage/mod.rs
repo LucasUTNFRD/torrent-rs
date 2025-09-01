@@ -73,10 +73,16 @@ fn get_donwload_dir() -> PathBuf {
             let mut p = PathBuf::from(home);
             p.push("Downloads");
             p.push("Torrents");
-            return p;
+            p
         }
         None => panic!("$HOME not set"),
-    };
+    }
+}
+
+impl Default for Storage {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Storage {
