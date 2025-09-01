@@ -90,10 +90,10 @@ impl Storage {
         let (tx, rx) = mpsc::channel();
         // const BASE_DIR: &str = "$HOME/Downloads/Torrents/";
 
-        let mananger = StorageManager::new(get_download_dir(), rx);
+        let manager = StorageManager::new(get_download_dir(), rx);
         let builder = thread::Builder::new().name("Storage handler".to_string());
         builder
-            .spawn(|| mananger.start())
+            .spawn(|| manager.start())
             .expect("Failed to spawn from thread builder");
 
         Self { tx }
