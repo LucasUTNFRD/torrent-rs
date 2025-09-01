@@ -1,4 +1,10 @@
-use std::{collections::BTreeMap, fs::File, io::Read, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    fmt,
+    fs::File,
+    io::Read,
+    path::{Path, PathBuf},
+};
 
 use bencode::bencode::{Bencode, BencodeError, Encode};
 use sha1::{Digest, Sha1};
@@ -65,6 +71,65 @@ pub enum FileMode {
     },
 }
 
+impl fmt::Display for TorrentInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match &self.info.mode {
+            FileMode::SingleFile { name, .. } => name.clone(),
+            FileMode::MultiFile { name, .. } => name.clone(),
+        };
+
+        write!(
+            f,
+            "Torrent[name=\"{}\", announce={}, pieces={}, piece_len={}, info_hash={}]",
+            name,
+            self.announce,
+            self.info.pieces.len(),
+            self.info.piece_length,
+            self.info_hash,
+        )
+    }
+}
+
+impl fmt::Display for Info {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.mode {
+            FileMode::SingleFile { name, length, .. } => {
+                write!(
+                    f,
+                    "SingleFile[name=\"{}\", size={} bytes, piece_len={}, pieces={}]",
+                    name,
+                    length,
+                    self.piece_length,
+                    self.pieces.len()
+                )
+            }
+            FileMode::MultiFile { name, files } => {
+                write!(
+                    f,
+                    "MultiFile[dir=\"{}\", files={}, piece_len={}, pieces={}]",
+                    name,
+                    files.len(),
+                    self.piece_length,
+                    self.pieces.len()
+                )
+            }
+        }
+    }
+}
+
+impl fmt::Display for FileMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FileMode::SingleFile { name, length, .. } => {
+                write!(f, "SingleFile(name=\"{}\", size={})", name, length)
+            }
+            FileMode::MultiFile { name, files } => {
+                write!(f, "MultiFile(dir=\"{}\", files={})", name, files.len())
+            }
+        }
+    }
+}
+
 impl FileMode {
     /// Check if this is a single-file torrent
     pub fn is_single_file(&self) -> bool {
@@ -74,6 +139,26 @@ impl FileMode {
     /// Check if this is a multi-file torrent
     pub fn is_multi_file(&self) -> bool {
         matches!(self, FileMode::MultiFile { .. })
+    }
+
+    /// Return a normalized list of files contained in this torrent.
+    /// - SingleFile: one synthetic FileInfo with `path = name`.
+    /// - MultiFile: the existing list of files.
+    pub fn files(&self) -> Vec<FileInfo> {
+        match self {
+            FileMode::SingleFile {
+                name,
+                length,
+                md5sum,
+            } => {
+                vec![FileInfo {
+                    length: *length,
+                    md5sum: md5sum.clone(),
+                    path: std::path::PathBuf::from(name),
+                }]
+            }
+            FileMode::MultiFile { files, .. } => files.clone(),
+        }
     }
 
     pub fn length(&self) -> i64 {
@@ -106,10 +191,22 @@ pub struct FileInfo {
     pub path: PathBuf,
 }
 
+#[derive(Debug)]
+pub struct TorrentFile {
+    pub path: PathBuf,
+    // TODO: Make it a shared pointer
+    pub md5sum: Option<String>,
+    pub length: u64,
+}
+
 impl TorrentInfo {
     /// Get the total size of all files in the torrent
     pub fn total_size(&self) -> i64 {
         self.info.mode.length()
+    }
+
+    pub fn files(&self) -> Vec<FileInfo> {
+        self.info.mode.files()
     }
 
     /// Get the number of pieces in the torrent
@@ -132,6 +229,19 @@ impl TorrentInfo {
         trackers.retain(|url| seen.insert(url.clone()));
 
         trackers
+    }
+
+    pub fn get_piece_len(&self, piece_idx: usize) -> u32 {
+        if piece_idx == self.num_pieces() - 1 {
+            let last_len = self.total_size() as u32 % self.info.piece_length as u32;
+            if last_len == 0 {
+                self.info.piece_length as u32
+            } else {
+                last_len
+            }
+        } else {
+            self.info.piece_length as u32
+        }
     }
 
     /// Check if this is a private torrent
@@ -203,9 +313,28 @@ pub enum TorrentParseError {
     InvalidUtf8,
 }
 
-pub fn parse_torrent_from_file(path: &str) -> Result<TorrentInfo, TorrentParseError> {
-    let mut file = File::open(path)?;
-    let mut byte_buf: Vec<u8> = Vec::new();
+pub fn parse_torrent_from_file(path: impl AsRef<Path>) -> Result<TorrentInfo, TorrentParseError> {
+    let path_ref = path.as_ref();
+
+    // Optional validation - remove if you prefer to let File::open handle errors
+    if !path_ref.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("File not found: {}", path_ref.display()),
+        )
+        .into());
+    }
+
+    if !path_ref.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("Path is not a file: {}", path_ref.display()),
+        )
+        .into());
+    }
+
+    let mut file = File::open(path_ref)?;
+    let mut byte_buf = Vec::new();
     file.read_to_end(&mut byte_buf)?;
 
     let bencode = Bencode::decode(&byte_buf)?;
@@ -464,6 +593,8 @@ impl Encode for Info {
         Bencode::Dict(dict)
     }
 }
+
+// TODO: Move the BencodeExt from torrent file
 
 // Helper functions for extracting values from bencode dictionaries
 fn get_string_from_dict(

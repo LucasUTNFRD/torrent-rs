@@ -3,7 +3,7 @@ use std::io::{self};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio_util::codec::{Decoder, Encoder};
 
-use crate::types::{InfoHash, PeerID};
+use bittorrent_common::types::{InfoHash, PeerID};
 
 // TODO: Implement Extended Handshake Message code/decode
 
@@ -39,6 +39,7 @@ pub enum Message {
     Request(BlockInfo),
     Piece(Block),
     Cancel(BlockInfo),
+    // Handshake(Handshake)
     // ExtendedHandshake,
 }
 
@@ -46,7 +47,7 @@ pub enum Message {
 pub struct Handshake {
     pub peer_id: PeerID,
     pub info_hash: InfoHash,
-    pub reserved: [u8; 8],
+    reserved: [u8; 8],
 }
 
 // handshake: <pstrlen><pstr><reserved><info_hash><peer_id>
@@ -63,10 +64,13 @@ impl Handshake {
     pub const HANDSHAKE_LEN: usize = 68;
     pub const EXTENSION_PROTOCOL_FLAG: u8 = 0x10; // bit 43 (5th bit of 6th byte)
 
+    // TODO:
     pub fn new(peer_id: PeerID, info_hash: InfoHash) -> Self {
-        let mut reserved = [0u8; 8];
+        let reserved = [0u8; 8];
         // Enable extension protocol support
-        reserved[5] |= Self::EXTENSION_PROTOCOL_FLAG;
+        // reserved[5] |= Self::EXTENSION_PROTOCOL_FLAG; // commented this because we dont support
+        // it yey
+
         Handshake {
             peer_id,
             info_hash,
@@ -89,6 +93,7 @@ impl Handshake {
         bytes.freeze()
     }
 
+    //TODO: impl TryFrom<&[u8]>
     pub fn from_bytes(src: &[u8]) -> Option<Self> {
         if src.len() != Self::HANDSHAKE_LEN || src[0] != Self::PSTRLEN || &src[1..20] != Self::PSTR
         {
@@ -138,9 +143,10 @@ impl From<u8> for MessageId {
 }
 
 #[derive(Debug, Clone)]
-pub struct MessageDecoder {}
+// Rename this PeerCodec
+pub struct MessageCodec {}
 
-impl Decoder for MessageDecoder {
+impl Decoder for MessageCodec {
     type Item = Message;
     type Error = io::Error;
 
@@ -196,8 +202,6 @@ impl Decoder for MessageDecoder {
                 let begin = src.get_u32();
 
                 let data = src.split_to(msg_length as usize - 9).freeze();
-                // let mut block = vec![0; msg_length as usize - 9];
-                // src.copy_to_slice(&mut block);
 
                 Message::Piece(Block { index, begin, data })
             }
@@ -214,7 +218,8 @@ impl Decoder for MessageDecoder {
                 })
             }
             MessageId::ExtendedHandshake => {
-                todo!("Parse extended handshake")
+                tracing::debug!("extended handhsake not support yet");
+                return Ok(None);
             }
         };
 
@@ -222,11 +227,12 @@ impl Decoder for MessageDecoder {
     }
 }
 
-impl Encoder<Message> for MessageDecoder {
+impl Encoder<Message> for MessageCodec {
     type Error = std::io::Error;
 
     /// <length prefix><message ID><payload>. The length prefix is a four byte big-endian value. The message ID is a single decimal byte. The payload is message dependent.
     fn encode(&mut self, item: Message, dst: &mut BytesMut) -> Result<(), Self::Error> {
+        // TODO: Avoid magic numbers use const
         match item {
             Message::KeepAlive => {
                 dst.put_u32(0);

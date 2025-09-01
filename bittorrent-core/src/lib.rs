@@ -1,6 +1,10 @@
-pub mod client;
-mod error;
+mod peer;
 mod session;
-pub mod torrent;
-pub mod types;
-mod util;
+mod storage;
+mod torrent;
+
+pub use peer::connection::{Peer, State};
+pub use peer::manager::PeerManagerHandle;
+pub use peer::manager::bitfield::Bitfield;
+pub use session::Session;
+pub use storage::Storage;

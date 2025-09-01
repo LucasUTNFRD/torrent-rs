@@ -5,7 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use bittorrent_core::types::{InfoHash, PeerID};
+use bittorrent_common::types::{InfoHash, PeerID};
 use bytes::{Bytes, BytesMut};
 // use bytes::{Bytes, BytesMut};
 use rand::Rng;
@@ -38,10 +38,10 @@ pub enum TrackerState {
         connection_id: i64, // connection id should have a timestamp
         tx: oneshot::Sender<AnnounceResponse>,
     },
-    AnnounceReceived {
-        re_announce_timestamp: i64,
-        num_peers: i32,
-    },
+    // AnnounceReceived {
+    //     re_announce_timestamp: i64,
+    //     num_peers: i32,
+    // },
 }
 
 // struct ConnectionId((i64, Instant));
@@ -320,7 +320,7 @@ impl UdpTrackerClient {
         state: Arc<RwLock<HashMap<SocketAddr, TrackerState>>>,
     ) {
         // let mut buf = BytesMut::with_capacity(MAX_UDP_PAYLOAD_SIZE);
-        let mut buf = vec![0u8; MAX_UDP_PAYLOAD_SIZE];
+        let mut buf = BytesMut::zeroed(MAX_UDP_PAYLOAD_SIZE);
 
         loop {
             match socket.recv_from(&mut buf).await {
@@ -409,6 +409,8 @@ impl UdpTrackerClient {
         println!(" DEBUG: Starting connection process to {}", tracker);
         {
             let guard = self.state.read().unwrap();
+
+            #[allow(clippy::collapsible_if)]
             if let Some(TrackerState::ConnectReceived {
                 connection_id,
                 instant,

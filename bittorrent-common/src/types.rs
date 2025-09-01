@@ -1,3 +1,5 @@
+use rand::Rng;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct InfoHash([u8; 20]);
 
@@ -46,6 +48,22 @@ impl InfoHash {
 impl PeerID {
     /// Create a new PeerID from a 20-byte array
     pub fn new(id: [u8; 20]) -> Self {
+        Self(id)
+    }
+
+    pub fn generate() -> Self {
+        let mut rng = rand::rng();
+        let mut id = [0u8; 20];
+
+        id[0] = b'r';
+        id[1] = b's';
+        id[2] = b'-';
+
+        // Fill with random alphanumeric characters for better readability
+        for i in id.iter_mut().skip(3) {
+            // Generate random bytes in a readable ASCII range
+            *i = rng.random_range(48..126); // Numbers, letters, and some symbols
+        }
         Self(id)
     }
 
