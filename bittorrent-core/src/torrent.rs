@@ -110,17 +110,11 @@ async fn start_torrent_session(
                     Some(TorrentMessage::Shutdown) => {
                         peer_manager.shutdown();
                     }
-                    // Some(TorrentMessage::Stats) => {
-                    //     todo!()
-                    // }
                     _ => break,
                 }
             }
              _ = &mut completion_rx => {
                 tracing::info!("torrent {} finished downloading", torrent.info.mode.name());
-                // TODO :Announce to tracker Event Completed
-
-                // TODO we should run as seeder session
 
                 break;
             }

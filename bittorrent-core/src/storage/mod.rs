@@ -207,6 +207,7 @@ impl StorageManager {
                     let _ = block_rx.send(data);
                 }
                 Write { id, piece, data } => {
+                    // TODO: return error to peer
                     if let Err(e) = self.write(id, piece, &data) {
                         tracing::error!(?e);
                     }
@@ -222,17 +223,25 @@ impl StorageManager {
                         .get(&id)
                         .expect("peice verification of a non registered torrent")
                         .metainfo
-                        .info
-                        .pieces[piece as usize];
+                        .get_piece_hash(piece as usize);
 
-                    let mut hasher = Sha1::new();
-                    hasher.update(data);
-                    let piece_hash: [u8; 20] = hasher.finalize().into();
+                    match expected_piece_hash {
+                        Some(expected_piece_hash) => {
+                            let mut hasher = Sha1::new();
+                            hasher.update(data);
+                            let piece_hash: [u8; 20] = hasher.finalize().into();
 
-                    let matches = piece_hash == expected_piece_hash;
-                    if verification_tx.send(matches).is_err() {
-                        tracing::error!("failed to send verification to peer");
-                    };
+                            let matches = piece_hash == *expected_piece_hash;
+                            if verification_tx.send(matches).is_err() {
+                                tracing::error!("failed to send verification to peer");
+                            };
+                        }
+                        None => {
+                            if verification_tx.send(false).is_err() {
+                                tracing::error!("failed to send verification to peer");
+                            };
+                        }
+                    }
                 }
             }
         }

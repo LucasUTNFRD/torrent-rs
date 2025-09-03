@@ -244,6 +244,10 @@ impl TorrentInfo {
         }
     }
 
+    pub fn get_piece_hash(&self, piece_idx: usize) -> Option<&[u8; 20]> {
+        self.info.pieces.get(piece_idx)
+    }
+
     /// Check if this is a private torrent
     pub fn is_private(&self) -> bool {
         self.info.private == Some(1)
