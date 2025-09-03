@@ -70,23 +70,37 @@ async fn start_torrent_session(
 
     let trackers = torrent.all_trackers();
     let info_hash = torrent.info_hash;
-    let announce_resp = tracker
-        .announce(
-            info_hash,
-            trackers,
-            ClientState::new(0, torrent.clone().total_size(), 0, Events::Started),
-        )
-        .await
-        .map_err(TorrentError::Tracker)?;
-
-    tracing::info!(?announce_resp);
 
     let (peer_manager, mut completion_rx) =
         PeerManagerHandle::new(torrent.clone(), storage.clone());
+
     let peer_manager = Arc::new(peer_manager);
 
-    for peer_addr in announce_resp.peers {
-        peer_manager.add_peer(peer_addr, client_id);
+    for t in trackers.into_iter() {
+        let tracker = tracker.clone();
+        let peer_manager = peer_manager.clone();
+        let torrent = torrent.clone();
+        let t = t.clone(); // clone each tracker entry if needed
+        tokio::spawn(async move {
+            let announce_resp = tracker
+                .announce(
+                    info_hash,
+                    vec![t],
+                    ClientState::new(0, torrent.total_size(), 0, Events::Started),
+                )
+                .await
+                .map_err(TorrentError::Tracker);
+
+            if let Err(e) = announce_resp {
+                tracing::error!(?e);
+                return;
+            }
+
+            let resp = announce_resp.unwrap();
+            for addr in resp.peers {
+                peer_manager.add_peer(addr, client_id);
+            }
+        });
     }
 
     loop {
@@ -104,6 +118,10 @@ async fn start_torrent_session(
             }
              _ = &mut completion_rx => {
                 tracing::info!("torrent {} finished downloading", torrent.info.mode.name());
+                // TODO :Announce to tracker Event Completed
+
+                // TODO we should run as seeder session
+
                 break;
             }
         }

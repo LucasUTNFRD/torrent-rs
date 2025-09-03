@@ -100,6 +100,8 @@ pub struct Connected {
     peer_state: PeerState,
     download_queue: Option<Vec<BlockInfo>>,
     outbound_requests: HashSet<BlockInfo>,
+    incoming_request: HashSet<BlockInfo>,
+
     last_recv_msg: Instant,
     // Track of pieces we requested and we are awaiting
     // outbound_requests:
@@ -118,6 +120,7 @@ impl Connected {
             peer_state: PeerState::default(),
             download_queue: None,
             outbound_requests: HashSet::new(),
+            incoming_request: HashSet::new(),
             last_recv_msg: Instant::now(),
         }
     }
@@ -254,17 +257,34 @@ impl Peer<Connected> {
                         Some(PeerCommand::SendMessage(msg)) => {
                             // before sending process state
                             tracing::debug!("Sending {msg:?}");
-                            match msg{
+                            match &msg{
                                 Message::Interested => {
                                     self.state.peer_state.am_interested=true;
                                 }
                                 Message::NotInterested => {
                                     self.state.peer_state.am_interested = false;
                                 }
+                                Message::Choke => {
+                                    self.state.peer_state.am_choking = true;
+                                }
+                                Message::Unchoke => {
+                                    self.state.peer_state.am_choking=false;
+                                }
+                                Message::Piece(block) => {
+                                    let block_info = BlockInfo{
+                                        index:block.index,
+                                        begin:block.begin,
+                                        length:block.data.len() as u32,
+                                    };
+                                    self.state.incoming_request.remove(&block_info);
+                                }
                                 _ => {}
                             };
 
                             self.state.sink.send(msg).await.map_err(PeerError::IoError)?;
+                        }
+                        Some(PeerCommand::RejectRequest(block_info)) => {
+                            self.state.incoming_request.remove(&block_info);
                         }
                         Some(PeerCommand::AvailableTask(tasks)) => {
                             tracing::debug!("rec some download_queue");
@@ -343,8 +363,6 @@ impl Peer<Connected> {
                 .manager_tx
                 .send(PeerEvent::NeedTask(self.peer_info.remote_pid))
                 .await;
-        } else {
-            dbg!(&self.state.outbound_requests);
         }
     }
 
@@ -363,6 +381,7 @@ impl Peer<Connected> {
             // Can we request related
             Choke => {
                 self.state.peer_state.peer_choking = true;
+                tracing::debug!("peer choked us");
             }
             Unchoke => {
                 self.state.peer_state.peer_choking = false;
@@ -373,8 +392,22 @@ impl Peer<Connected> {
             // Choke related
             Interested => {
                 tracing::info!("peer is interested in us");
+                let _ = self
+                    .manager_tx
+                    .send(PeerEvent::Interest(self.peer_info.remote_pid))
+                    .await;
+                self.state.peer_state.peer_interested = true;
             }
             NotInterested => {
+                if self.state.peer_state.peer_interested {
+                    tracing::info!("peer is not interested in us anyomore");
+                    let _ = self
+                        .manager_tx
+                        .send(PeerEvent::NotInterest(self.peer_info.remote_pid))
+                        .await;
+                    self.state.peer_state.peer_interested = false;
+                }
+
                 tracing::info!("peer is not interested in us");
             }
             // Swarm info related
@@ -393,7 +426,21 @@ impl Peer<Connected> {
                 .unwrap(),
             // Piece Related
             Request(block_info) => {
-                tracing::info!("peer request block : {:?}", block_info);
+                if self.state.peer_state.am_choking {
+                    return;
+                }
+                if self.state.incoming_request.contains(&block_info) {
+                    return;
+                }
+
+                self.state.incoming_request.insert(block_info);
+                let _ = self
+                    .manager_tx
+                    .send(PeerEvent::BlockRequest(
+                        self.peer_info.remote_pid,
+                        block_info,
+                    ))
+                    .await;
             }
             Piece(block) => {
                 // check if we requested this block
@@ -421,8 +468,6 @@ impl Peer<Connected> {
         }
     }
 }
-
-// IDEA: Use an Arc<SharedState> wit atomics to share download stats,
 
 pub fn spawn_peer(
     info: PeerInfo,

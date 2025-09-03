@@ -113,7 +113,7 @@ impl BencodeDictExt for BTreeMap<Vec<u8>, Bencode> {
 const KEY_FAILURE_REASON: &[u8] = b"failure reason";
 const KEY_WARNING_MESSAGE: &[u8] = b"warning message";
 const KEY_PORT: &[u8] = b"port";
-const KEY_IP: &[u8] = b"IP";
+const KEY_IP: &[u8] = b"ip";
 const KEY_PEERS: &[u8] = b"peers";
 // const KEY_MIN_INTERVAL: &[u8] = b"min interval";
 // const KEY_TRACKER_ID: &[u8] = b"tracker id";
@@ -347,7 +347,7 @@ mod tests {
             let ip_str = ip.to_string();
             s.push_str(&format!(
                 "d{}{}{}i{}ee",
-                be_string("IP"),
+                be_string("ip"),
                 be_string(&ip_str),
                 be_string("port"),
                 port

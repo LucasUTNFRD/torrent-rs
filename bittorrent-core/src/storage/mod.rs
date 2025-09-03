@@ -14,7 +14,8 @@ use bittorrent_common::{
     metainfo::{FileInfo, TorrentInfo},
     types::InfoHash,
 };
-use peer_protocol::protocol::BlockInfo;
+use bytes::BytesMut;
+use peer_protocol::protocol::{Block, BlockInfo};
 use sha1::{Digest, Sha1};
 use tokio::sync::oneshot;
 
@@ -48,7 +49,7 @@ pub enum StorageMessage {
         piece_index: u32,
         begin: u32,
         length: u32,
-        // peer: Sender<PeerCommand>,
+        block_rx: oneshot::Sender<Result<Block, io::Error>>,
     },
     Write {
         id: InfoHash,
@@ -137,12 +138,18 @@ impl Storage {
     }
 
     #[allow(dead_code)]
-    pub fn read_block(&self, torrent_id: InfoHash, block_info: BlockInfo) {
+    pub fn read_block(
+        &self,
+        torrent_id: InfoHash,
+        block_info: BlockInfo,
+        block_rx: oneshot::Sender<Result<Block, io::Error>>,
+    ) {
         let _ = self.tx.send(StorageMessage::Read {
             id: torrent_id,
             piece_index: block_info.index,
             begin: block_info.begin,
             length: block_info.length,
+            block_rx,
         });
     }
 }
@@ -194,8 +201,10 @@ impl StorageManager {
                     piece_index,
                     begin,
                     length,
+                    block_rx,
                 } => {
-                    let _data = self.read(id, piece_index, begin, length);
+                    let data = self.read(id, piece_index, begin, length);
+                    let _ = block_rx.send(data);
                 }
                 Write { id, piece, data } => {
                     if let Err(e) = self.write(id, piece, &data) {
@@ -291,7 +300,7 @@ impl StorageManager {
         piece_index: u32,
         begin: u32,
         length: u32,
-    ) -> io::Result<Vec<u8>> {
+    ) -> io::Result<Block> {
         // First, collect the file information we need
         let (files, piece_length) = {
             let cache = self.torrents.get(&info_hash).unwrap();
@@ -304,7 +313,7 @@ impl StorageManager {
         // Calculate global byte offset for this read
         let mut global_offset = (piece_index as usize * piece_length) + begin as usize;
 
-        let mut result = vec![0u8; length as usize];
+        let mut data = BytesMut::zeroed(length as usize);
         let mut bytes_read = 0;
 
         // Iterate through files to find where to start reading
@@ -323,12 +332,12 @@ impl StorageManager {
             // Calculate how much we can read from this file
             let start_in_file = global_offset;
             let available_in_file = file_len - start_in_file;
-            let remaining_to_read = result.len() - bytes_read;
+            let remaining_to_read = data.len() - bytes_read;
             let read_len = available_in_file.min(remaining_to_read);
 
             // Read from this file
             file.read_exact_at(
-                &mut result[bytes_read..bytes_read + read_len],
+                &mut data[bytes_read..bytes_read + read_len],
                 start_in_file as u64,
             )?;
 
@@ -337,19 +346,23 @@ impl StorageManager {
             global_offset = 0;
 
             // If we've read all requested data, we're done
-            if bytes_read >= result.len() {
+            if bytes_read >= data.len() {
                 break;
             }
         }
 
-        if bytes_read != result.len() {
+        if bytes_read != data.len() {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 "Could not read all requested bytes",
             ));
         }
 
-        Ok(result)
+        Ok(Block {
+            index: piece_index,
+            begin: begin,
+            data: data.freeze(),
+        })
     }
 
     fn get_or_open_file(&mut self, info_hash: InfoHash, file_path: &Path) -> io::Result<&mut File> {
@@ -486,16 +499,16 @@ mod test {
         let read_piece0 = manager
             .read(id, 0, 0, piece_length as u32)
             .expect("read piece0 failed");
-        assert_eq!(read_piece0, piece0_data);
+        assert_eq!(read_piece0.data, piece0_data);
 
         let read_piece1 = manager
             .read(id, 1, 0, piece_length as u32)
             .expect("read piece1 failed");
-        assert_eq!(read_piece1, piece1_data);
+        assert_eq!(read_piece1.data, piece1_data);
 
         // Test partial reads (blocks)
         let block = manager.read(id, 0, 256, 256).expect("read block failed");
-        assert_eq!(block, &piece0_data[256..512]);
+        assert_eq!(block.data, &piece0_data[256..512]);
 
         // Cleanup
         fs::remove_dir_all(&download_dir).unwrap();
@@ -571,13 +584,13 @@ mod test {
 
         // Read back and verify
         let read_p0 = manager.read(id, 0, 0, 512).expect("read p0 failed");
-        assert_eq!(read_p0, piece0_data);
+        assert_eq!(read_p0.data, piece0_data);
 
         let read_p1 = manager.read(id, 1, 0, 512).expect("read p1 failed");
-        assert_eq!(read_p1, piece1_data);
+        assert_eq!(read_p1.data, piece1_data);
 
         let read_p2 = manager.read(id, 2, 0, 76).expect("read p2 failed");
-        assert_eq!(read_p2, piece2_data);
+        assert_eq!(read_p2.data, piece2_data);
 
         // Test reading a block that spans file boundary
         // Piece 1 starts at global offset 512, so reading from begin=88 with length=100
@@ -588,7 +601,7 @@ mod test {
         // and beginning of file2
         let mut expected = Vec::new();
         expected.extend_from_slice(&piece1_data[88..]); // Rest of piece1 data
-        assert_eq!(spanning_block.len(), 100);
+        assert_eq!(spanning_block.data.len(), 100);
 
         // Cleanup
         fs::remove_dir_all(&download_dir).unwrap();

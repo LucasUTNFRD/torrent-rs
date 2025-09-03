@@ -54,6 +54,7 @@ pub enum PeerEvent {
 #[derive(Debug)]
 pub enum PeerCommand {
     SendMessage(Message),
+    RejectRequest(BlockInfo),
     Disconnect,
     AvailableTask(Vec<BlockInfo>),
 }
@@ -175,8 +176,10 @@ impl PeerManager {
                         None => tracing::warn!("peer_event channel closed"),
                     }
                 },
-                _ = choke_interval.tick() => {
-                    self.run_choke_algorithm().await;
+                _ = choke_interval.tick()  => {
+                    if self.choker.contains_interested_peers() {
+                        self.run_choke_algorithm().await;
+                    }
                 }
             }
         }
@@ -328,7 +331,6 @@ impl PeerManager {
 
                 match bitfield::Bitfield::try_from((payload, self.torrent.num_pieces())) {
                     Ok(bitfield) => {
-                        tracing::debug!("setting bitfield to peer");
                         peer.bitfield = bitfield;
 
                         self.picker
@@ -433,6 +435,13 @@ impl PeerManager {
             BlockRequest(id, block_info) => {
                 if !self.bitfield.has(block_info.index as usize) {
                     tracing::error!("peer request an index which we dont have");
+                    if let Some(peer) = self.peers.get_mut(&id) {
+                        let _ = peer
+                            .sender
+                            .send(PeerCommand::RejectRequest(block_info))
+                            .await;
+                    }
+
                     return;
                 }
 
@@ -440,15 +449,30 @@ impl PeerManager {
                     tracing::error!("peer requested without prior unchoke message");
                     return;
                 }
-                // suppose this return a block
-                let block = self.storage.read_block(self.torrent.info_hash, block_info);
-                let block: Block = todo!();
+
+                //TODO: improve this to avoid blocking the main loop
+                let (block_tx, block_rx) = oneshot::channel();
+                self.storage
+                    .read_block(self.torrent.info_hash, block_info, block_tx);
+
+                let block = match block_rx.await {
+                    Ok(Ok(block)) => block,
+                    Ok(Err(e)) => {
+                        tracing::error!(?e, "storage error");
+                        return;
+                    }
+                    Err(e) => {
+                        tracing::error!(?e, "oneshot dropped");
+                        return;
+                    }
+                };
 
                 if let Some(peer) = self.peers.get_mut(&id) {
-                    peer.sender
+                    peer.stats.downloaded += block.data.len();
+                    let _ = peer
+                        .sender
                         .send(PeerCommand::SendMessage(Message::Piece(block)))
                         .await;
-                    peer.stats.downloaded += block.data.len();
                 }
             }
             Interest(id) => {
@@ -500,6 +524,7 @@ impl PeerManager {
                 finished = finished,
                 "no pieces available for peer"
             );
+            tracing::debug!(?peer.bitfield);
         }
     }
 
@@ -741,6 +766,10 @@ mod choker {
         /// Check if a peer is unchoked
         pub fn is_unchoked(&self, peer_id: &Id) -> bool {
             self.unchoked.contains(peer_id)
+        }
+
+        pub fn contains_interested_peers(&self) -> bool {
+            self.unchoked.is_empty()
         }
 
         /// Remove a peer from all internal state (when peer disconnects)
