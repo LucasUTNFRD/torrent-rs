@@ -20,10 +20,6 @@ struct Args {
     #[arg(short = 'd', long)]
     save_dir: Option<PathBuf>,
 
-    /// Disable progress output
-    #[arg(short = 'q', long)]
-    quiet: bool,
-
     // Set log level (critical, error, warn, info, debug, trace)
     #[arg(long, value_enum, default_value_t = LogLevel::Info)]
     log_level: LogLevel,
@@ -192,11 +188,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Add the torrent
     session.add_torrent(&args.torrent_file);
 
-    if !args.quiet {
-        println!("Starting download...");
-        println!("Press Ctrl+C to stop");
-        println!();
-    }
+    println!("Starting download...");
+    println!("Press Ctrl+C to stop");
+    println!();
 
     loop {
         tokio::select! {
@@ -204,9 +198,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 print_stats(&stats);
             },
             _ = tokio::signal::ctrl_c() => {
-                if !args.quiet {
-                    println!("\n Received shutdown signal, stopping...");
-                }
                 info!(" Received shutdown signal, stopping session...");
                 session.shutdown();
 
