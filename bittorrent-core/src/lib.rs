@@ -6,6 +6,7 @@ mod torrent;
 
 // High-level API - what most users need
 pub use session::Session;
+pub use torrent::TorrentStats;
 
 // Mid-level API
 pub use peer::manager::PeerManagerHandle;

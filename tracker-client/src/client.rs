@@ -23,7 +23,6 @@ use crate::{
 // Core Traits and Types
 // =============================================================================
 pub struct TrackerManager {
-    // cmd_rx
     rx: mpsc::Receiver<TrackerMessage>,
     client_id: PeerID,
     tracker_clients: Arc<Clients>,

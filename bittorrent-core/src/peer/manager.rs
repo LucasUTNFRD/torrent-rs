@@ -29,7 +29,6 @@ use crate::{
 
 use super::error::PeerError;
 
-#[derive(Debug)]
 pub enum ManagerCommand {
     AddPeer {
         peer_addr: SocketAddr,
@@ -37,7 +36,10 @@ pub enum ManagerCommand {
     },
     // RemovePeer(SocketAddr),
     Shutdown,
+    GetStats(StatSender),
 }
+
+type StatSender = oneshot::Sender<Stats>;
 
 #[derive(Debug)]
 pub enum PeerEvent {
@@ -93,6 +95,19 @@ impl PeerManagerHandle {
     pub fn shutdown(&self) {
         let _ = self.manager_tx.send(ManagerCommand::Shutdown);
     }
+
+    pub async fn get_stats(&self) -> Stats {
+        let (stat_tx, stat_rx) = oneshot::channel();
+        let _ = self.manager_tx.send(ManagerCommand::GetStats(stat_tx));
+        stat_rx.await.unwrap()
+    }
+}
+
+pub struct Stats {
+    pub connected_peers: usize,
+    pub downloaded: u64,
+    pub uploaded: u64,
+    pub remaining_pieces: usize,
 }
 
 struct PeerManager {
@@ -107,13 +122,15 @@ struct PeerManager {
     // Download state
     bitfield: Bitfield,
     // Actor managers
-    //disk
     picker: Picker,
     cache: PieceCache,
     storage: Arc<Storage>,
 
     completion_tx: oneshot::Sender<()>,
     choker: Choker,
+
+    total_uploaded: u64,
+    total_downloaded: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -157,6 +174,8 @@ impl PeerManager {
             connected_addrs: HashSet::new(),
             completion_tx,
             choker: Choker::new(),
+            total_uploaded: 0,
+            total_downloaded: 0,
         }
     }
 
@@ -177,9 +196,7 @@ impl PeerManager {
                     }
                 },
                 _ = choke_interval.tick()  => {
-                    if self.choker.contains_interested_peers() {
-                        self.run_choke_algorithm().await;
-                    }
+                    self.run_choke_algorithm().await;
                 }
             }
         }
@@ -197,6 +214,10 @@ impl PeerManager {
 
     // Add this method to run the choke algorithm
     async fn run_choke_algorithm(&mut self) {
+        if !self.choker.contains_interested_peers() {
+            return;
+        }
+
         let peer_stats = self.get_peer_stats();
         let (to_choke, to_unchoke) = self.choker.run_choke_algorithm(&peer_stats);
 
@@ -222,7 +243,7 @@ impl PeerManager {
                     .sender
                     .send(PeerCommand::SendMessage(Message::Unchoke))
                     .await;
-                tracing::debug!("Sent unchoke to peer {}", peer_id.0);
+                tracing::info!("Sent unchoke to peer {}", peer_id.0);
             }
         }
     }
@@ -272,6 +293,15 @@ impl PeerManager {
                 for (_, peer_state) in self.peers.iter() {
                     let _ = peer_state.sender.send(PeerCommand::Disconnect).await;
                 }
+            }
+            GetStats(sender) => {
+                let stats = Stats {
+                    connected_peers: self.connected_addrs.len(),
+                    downloaded: self.total_downloaded,
+                    uploaded: self.total_uploaded,
+                    remaining_pieces: self.picker.remaining(),
+                };
+                let _ = sender.send(stats);
             }
         }
     }
@@ -364,6 +394,7 @@ impl PeerManager {
                 // Peer metrics
                 peer.stats.last_block = Instant::now();
                 peer.stats.downloaded += block.data.len();
+                self.total_downloaded += block.data.len() as u64;
 
                 if let Some(completed_piece) = self.cache.insert_block(&block) {
                     peer.assigned_piece_idx = None;
@@ -398,7 +429,7 @@ impl PeerManager {
                         self.broadcast_have(piece_index);
                     } else {
                         //  marking the piece as none results in downloading from zero the piece
-                        tracing::debug!("piece {} was invalid", piece_index);
+                        tracing::warn!("piece {} was invalid", piece_index);
                         self.picker
                             .mark_piece_as(piece_index as usize, PieceState::None);
                         self.cache.drop_piece(piece_index as usize);
@@ -429,8 +460,6 @@ impl PeerManager {
             PeerError(id, err) => {
                 tracing::warn!(?err, ?id);
                 self.clean_up_peer(id);
-
-                // run choke algorithm
             }
             BlockRequest(id, block_info) => {
                 if !self.bitfield.has(block_info.index as usize) {
@@ -468,7 +497,8 @@ impl PeerManager {
                 };
 
                 if let Some(peer) = self.peers.get_mut(&id) {
-                    peer.stats.downloaded += block.data.len();
+                    peer.stats.uploaded += block.data.len();
+                    self.total_uploaded += block.data.len() as u64;
                     let _ = peer
                         .sender
                         .send(PeerCommand::SendMessage(Message::Piece(block)))
@@ -528,6 +558,7 @@ impl PeerManager {
         }
     }
 
+    // todo: broadcast_have  to peer that only sent pieces recently and are not seeders
     fn broadcast_have(&self, piece_index: u32) {
         for state in self.peers.values() {
             let sender = state.sender.clone();
@@ -626,7 +657,7 @@ mod choker {
                 let mut rng = rand::rng();
                 if let Some(&selected) = choked_interested.choose(&mut rng) {
                     self.planned_optimistic_peer = Some(selected);
-                    tracing::debug!("Selected peer {} for optimistic unchoke", selected.0);
+                    // tracing::debug!("Selected peer {} for optimistic unchoke", selected.0);
                 }
             }
         }
@@ -686,10 +717,10 @@ mod choker {
                         && peers.contains_key(&optimistic_peer)
                     {
                         final_unchoked.insert(optimistic_peer);
-                        tracing::debug!(
-                            "Added planned optimistic peer {} to unchoked set",
-                            optimistic_peer.0
-                        );
+                        // tracing::debug!(
+                        //     "Added planned optimistic peer {} to unchoked set",
+                        //     optimistic_peer.0
+                        // );
                     }
                 }
             }
@@ -722,10 +753,10 @@ mod choker {
                 if let Some(&random_peer) = choked_peers.choose(&mut rng) {
                     if self.interested.contains(&random_peer) {
                         final_unchoked.insert(random_peer);
-                        tracing::debug!(
-                            "Added additional optimistic peer {} to unchoked set",
-                            random_peer.0
-                        );
+                        // tracing::debug!(
+                        //     "Added additional optimistic peer {} to unchoked set",
+                        //     random_peer.0
+                        // );
                         break;
                     } else {
                         // Peer not interested, try again

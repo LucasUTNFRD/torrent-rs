@@ -10,17 +10,21 @@ use bittorrent_common::{
     types::{InfoHash, PeerID},
 };
 use tokio::{
-    sync::mpsc::{self, UnboundedSender},
+    sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
     task::JoinHandle,
     time::sleep,
 };
 use tracker_client::TrackerHandler;
 
-use crate::{storage::Storage, torrent::TorrentSession};
+use crate::{
+    storage::Storage,
+    torrent::{TorrentSession, TorrentStats},
+};
 
 pub struct Session {
     pub handle: JoinHandle<()>,
     tx: UnboundedSender<SessionCommand>,
+    pub stats_receiver: UnboundedReceiver<TorrentStats>,
 }
 
 pub enum SessionCommand {
@@ -31,10 +35,15 @@ pub enum SessionCommand {
 impl Session {
     pub fn new(port: u16, save_path: PathBuf) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
+        let (stats_tx, statx_rx) = mpsc::unbounded_channel();
 
-        let manager = SessionManager::new(port, save_path, rx);
+        let manager = SessionManager::new(port, save_path, rx, stats_tx);
         let handle = tokio::task::spawn(async move { manager.start().await });
-        Self { tx, handle }
+        Self {
+            tx,
+            handle,
+            stats_receiver: statx_rx,
+        }
         // Self { port, save_path }
     }
 
@@ -55,15 +64,22 @@ struct SessionManager {
     save_path: PathBuf,
     rx: mpsc::UnboundedReceiver<SessionCommand>,
     torrents: HashMap<InfoHash, TorrentSession>,
+    stats_tx: mpsc::UnboundedSender<TorrentStats>,
 }
 
 impl SessionManager {
-    pub fn new(port: u16, save_path: PathBuf, rx: mpsc::UnboundedReceiver<SessionCommand>) -> Self {
+    pub fn new(
+        port: u16,
+        save_path: PathBuf,
+        rx: mpsc::UnboundedReceiver<SessionCommand>,
+        stats_tx: UnboundedSender<TorrentStats>,
+    ) -> Self {
         Self {
             port,
             save_path,
             rx,
             torrents: HashMap::new(),
+            stats_tx,
         }
     }
 
@@ -75,7 +91,6 @@ impl SessionManager {
         while let Some(cmd) = self.rx.recv().await {
             match cmd {
                 SessionCommand::AddTorrent { directory } => {
-                    // WARN: This call is blocking
                     let metainfo = match parse_torrent_from_file(directory) {
                         Ok(torrent) => torrent,
                         Err(e) => {
@@ -85,11 +100,15 @@ impl SessionManager {
                     };
 
                     tracing::info!(%metainfo);
-                    sleep(Duration::from_secs(5)).await;
 
                     let info_hash = metainfo.info_hash;
-                    let torrent_session =
-                        TorrentSession::new(metainfo, tracker.clone(), client_id, storage.clone());
+                    let torrent_session = TorrentSession::new(
+                        metainfo,
+                        tracker.clone(),
+                        client_id,
+                        storage.clone(),
+                        self.stats_tx.clone(),
+                    );
 
                     self.torrents.insert(info_hash, torrent_session);
                 }

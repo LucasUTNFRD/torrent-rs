@@ -57,6 +57,20 @@ impl Picker {
         }
     }
 
+    pub fn remaining(&self) -> usize {
+        self.piece_availability
+            .iter()
+            .filter(|p| p.state != PieceState::Finished)
+            .count()
+    }
+
+    pub fn downloaded(&self) -> usize {
+        self.piece_availability
+            .iter()
+            .filter(|p| p.state == PieceState::Finished)
+            .count()
+    }
+
     pub fn increment_availability(&mut self, update: AvailabilityUpdate) {
         match update {
             AvailabilityUpdate::Bitfield(bitfield) => {

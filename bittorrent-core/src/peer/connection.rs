@@ -168,7 +168,7 @@ impl Peer<New> {
 
 impl Peer<Handshaking> {
     pub async fn handshake(mut self) -> Result<Peer<Connected>, PeerError> {
-        tracing::info!(
+        tracing::debug!(
             "Initiating handshake with peer at {}",
             self.peer_info.addr()
         );
@@ -200,11 +200,11 @@ impl Peer<Handshaking> {
         }
 
         if remote_handshake.info_hash != *self.peer_info.info_hash() {
-            tracing::error!("Handshake failed: info hash mismatch");
+            tracing::warn!("Handshake failed: info hash mismatch");
             return Err(PeerError::InvalidHandshake);
         }
 
-        tracing::info!(
+        tracing::debug!(
             "Handshake successful with peer at {}",
             self.peer_info.addr()
         );
@@ -287,7 +287,6 @@ impl Peer<Connected> {
                             self.state.incoming_request.remove(&block_info);
                         }
                         Some(PeerCommand::AvailableTask(tasks)) => {
-                            tracing::debug!("rec some download_queue");
                             self.state.download_queue = Some(tasks);
                             if let Err(e)  = self.try_request_blocks().await{
                                 tracing::warn!(?e);
@@ -318,15 +317,15 @@ impl Peer<Connected> {
     }
 
     async fn try_request_blocks(&mut self) -> Result<(), PeerError> {
-        tracing::debug!("trying to request block to peer {}", self.peer_info.addr);
+        // tracing::debug!("trying to request block to peer {}", self.peer_info.addr);
 
         let am_interested = self.state.peer_state.am_interested;
         let peer_not_choking = !self.state.peer_state.peer_choking;
         let has_queue = self.state.download_queue.is_some();
 
-        tracing::debug!(am_interested, peer_not_choking, has_queue);
+        // tracing::debug!(am_interested, peer_not_choking, has_queue);
         if am_interested && peer_not_choking && has_queue {
-            tracing::debug!("requesting block to peer {}", self.peer_info.addr);
+            // tracing::debug!("requesting block to peer {}", self.peer_info.addr);
             self.request_blocks().await?
         }
 
@@ -460,6 +459,13 @@ impl Peer<Connected> {
                     if let Err(e) = self.try_request_blocks().await {
                         tracing::warn!(?e);
                     }
+                } else {
+                    tracing::warn!(
+                        "got unrequested piece {}:{}->{}",
+                        block_info.index,
+                        block_info.begin,
+                        block_info.length
+                    );
                 }
             }
             Cancel(_block_info) => {
