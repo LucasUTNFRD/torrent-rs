@@ -2,13 +2,11 @@ use bittorrent_core::{Session, TorrentStats};
 use clap::Parser;
 use std::path::PathBuf;
 use std::time::Duration;
-// use tokio::time::interval;
 use tracing::info;
 
 #[derive(Parser)]
 #[command(name = "bittorrent-cli")]
 #[command(about = "A BitTorrent client for leeching torrents")]
-#[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(long_about = "First iteration of the BitTorrent client CLI")]
 struct Args {
     /// Path to the torrent file
@@ -26,10 +24,30 @@ struct Args {
     #[arg(short = 'q', long)]
     quiet: bool,
 
-    /// Verbose logging
-    #[arg(short, long)]
-    verbose: bool,
-    //
+    // Set log level (critical, error, warn, info, debug, trace)
+    #[arg(long, value_enum, default_value_t = LogLevel::Info)]
+    log_level: LogLevel,
+}
+
+#[derive(Copy, Clone, Debug, clap::ValueEnum)]
+enum LogLevel {
+    Error,
+    Warn,
+    Info,
+    Debug,
+    Trace,
+}
+
+impl From<LogLevel> for tracing::Level {
+    fn from(level: LogLevel) -> Self {
+        match level {
+            LogLevel::Error => tracing::Level::ERROR,
+            LogLevel::Warn => tracing::Level::WARN,
+            LogLevel::Info => tracing::Level::INFO,
+            LogLevel::Debug => tracing::Level::DEBUG,
+            LogLevel::Trace => tracing::Level::TRACE,
+        }
+    }
 }
 
 use std::io::{self, Write};
@@ -80,7 +98,7 @@ fn print_stats(stats: &TorrentStats) {
     let download_rate_fmt = format_rate(stats.download_rate);
     let upload_rate_fmt = format_rate(stats.upload_rate);
 
-    println!(
+    print!(
         "Progress: {:.1}%, dl: {} from {} peers ({}), ul: {}  ({}), ETA: {}",
         stats.progress,
         downloaded_fmt,
@@ -122,13 +140,7 @@ fn format_eta(stats: &TorrentStats) -> String {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
-    // Initialize logging based on verbosity
-    let log_level = if args.verbose {
-        tracing::Level::DEBUG
-    } else {
-        tracing::Level::INFO
-    };
-
+    let log_level = tracing::Level::from(args.log_level);
     tracing_subscriber::fmt()
         .with_max_level(log_level)
         .with_target(false)
@@ -170,10 +182,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
-    info!(
-        "Starting BitTorrent client v{}...",
-        env!("CARGO_PKG_VERSION")
-    );
     info!("Torrent file: {}", args.torrent_file.display());
     info!("Save directory: {}", save_dir.display());
     info!("Listening on port: {}", args.port);
@@ -194,7 +202,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::select! {
             Some(stats) = session.stats_receiver.recv()=>{
                 print_stats(&stats);
-
             },
             _ = tokio::signal::ctrl_c() => {
                 if !args.quiet {
@@ -203,7 +210,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 info!(" Received shutdown signal, stopping session...");
                 session.shutdown();
 
-                // Give the session a moment to clean up
                 tokio::time::sleep(Duration::from_millis(500)).await;
                 break;
             }
