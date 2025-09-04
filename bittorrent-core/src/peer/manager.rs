@@ -406,7 +406,6 @@ impl PeerManager {
                     self.picker
                         .mark_piece_as(piece_index as usize, PieceState::Writing);
 
-                    // let start_timer = Instant::now();
                     let (verification_tx, verification_rx) = oneshot::channel();
                     self.storage.verify_piece(
                         torrent_id,
@@ -415,7 +414,6 @@ impl PeerManager {
                         verification_tx,
                     );
 
-                    // WARN: Verifying a piece is blocking
                     let valid = verification_rx
                         .await
                         .expect("failed to receive piece validation");
@@ -442,16 +440,6 @@ impl PeerManager {
                     .get(&id)
                     .map(|p| p.assigned_piece_idx.is_some())
                     .unwrap_or(false);
-
-                let (none, requested, writing, finished) = self.picker.summary();
-                tracing::debug!(
-                    peer = %id.0,
-                    none = none,
-                    requested = requested,
-                    writing = writing,
-                    finished = finished,
-                    "no pieces available for peer"
-                );
 
                 if !peer_has_assignment {
                     self.assign_piece(id).await;

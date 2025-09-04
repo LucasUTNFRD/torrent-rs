@@ -7,7 +7,6 @@ use std::{
 
 use bittorrent_common::types::{InfoHash, PeerID};
 use bytes::{Bytes, BytesMut};
-// use bytes::{Bytes, BytesMut};
 use rand::Rng;
 use tokio::{net::UdpSocket, sync::oneshot, time::timeout};
 use url::Url;
@@ -43,8 +42,6 @@ pub enum TrackerState {
     //     num_peers: i32,
     // },
 }
-
-// struct ConnectionId((i64, Instant));
 
 #[derive(Debug)]
 pub struct AnnounceResponse {
@@ -323,8 +320,6 @@ impl UdpTrackerClient {
                 Ok((len, addr)) => {
                     let mut guard = state.write().unwrap();
                     if let Some(state) = guard.remove(&addr) {
-                        // we need ownership
-                        // of state
                         match state {
                             TrackerState::ConnectSent {
                                 txd_id,

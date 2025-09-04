@@ -249,7 +249,7 @@ async fn run_announce_loop(
         );
 
         match tracker_handler
-            .announce(info_hash, vec![announce_url.clone()], state)
+            .announce(info_hash, announce_url.clone(), state)
             .await
         {
             Ok(response) => {
