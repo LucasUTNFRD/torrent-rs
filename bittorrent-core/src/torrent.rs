@@ -30,13 +30,8 @@ enum TorrentMessage {
 #[derive(Debug, Error)]
 pub enum TorrentError {
     #[error("Failed {0}")]
+    #[allow(dead_code)]
     Tracker(TrackerError),
-}
-
-#[derive(Debug, Clone)]
-pub enum TorrentStatus {
-    Leeching,
-    Seeding,
 }
 
 pub struct TorrentStats {
@@ -158,6 +153,7 @@ async fn start_torrent_session(
     let total_pieces = torrent.num_pieces();
 
     let start_time = Instant::now();
+
     let mut session_duration = Duration::default();
     let mut stats_tracker = StatsTracker::new();
 

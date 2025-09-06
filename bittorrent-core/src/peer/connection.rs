@@ -31,6 +31,10 @@ pub struct PeerInfo {
     addr: SocketAddr,
 }
 
+// TODO:
+// write a flag for running with message level
+// When loggin peer show {ClientID}::{SocketAddr} Message::Type
+
 impl PeerInfo {
     pub fn new(local_pid: PeerID, remote_pid: Id, info_hash: InfoHash, addr: SocketAddr) -> Self {
         Self {
@@ -284,7 +288,12 @@ impl Peer<Connected> {
                             self.state.sink.send(msg).await.map_err(PeerError::IoError)?;
                         }
                         Some(PeerCommand::RejectRequest(block_info)) => {
-                            self.state.incoming_request.remove(&block_info);
+                            if !self.state.incoming_request.is_empty(){
+                                //maybe waiting for this
+                                //response the peer canceled the request resulting in us clearing
+                                //the incoming_request set
+                                self.state.incoming_request.remove(&block_info);
+                            }
                         }
                         Some(PeerCommand::AvailableTask(tasks)) => {
                             self.state.download_queue = Some(tasks);
@@ -369,20 +378,47 @@ impl Peer<Connected> {
         self.state.download_queue.as_mut().and_then(|q| q.pop())
     }
 
+    // Clear the outbound_request, cancels the pending blocks, and notify manager that piece is
+    // canceld, so it is partial now
+    async fn delete_all_requests(&mut self) {
+        if self.state.outbound_requests.is_empty() {
+            return;
+        }
+
+        let pending_requests = self.state.outbound_requests.drain();
+        for req in pending_requests {
+            self.state.sink.send(Message::Cancel(req)).await.unwrap()
+        }
+
+        //  WARN: Right now we dont have a mechanism to update block level state in the piece
+        //  picker, so canceling a piece without make it available to other peer connection to
+        //  request will result in an unifished download
+    }
+
     // helper function to map protocol message recv from remote peer  to PeerEvent so manager reacts to them
     async fn handle_msg(&mut self, msg: protocol::Message) {
         use protocol::Message::*;
         match msg {
             KeepAlive => {
                 tracing::debug!("recv keepalive");
-                tracing::debug!("download_queue = {:?}", self.state.download_queue);
             }
             // Can we request related
             Choke => {
-                self.state.peer_state.peer_choking = true;
                 tracing::debug!("peer choked us");
+                self.delete_all_requests().await;
+                self.state.peer_state.peer_choking = true;
+                // todo:
+                // halt requests
+                // outgoing_request + download_queue = not_received_blocks
+                // update piece status by:
+                //  1. marking that piece as partial
+                //  2. make those block available to other peer
+                //
             }
             Unchoke => {
+                if !self.state.peer_state.peer_choking {
+                    tracing::debug!("received unchoke when already unchoked");
+                }
                 self.state.peer_state.peer_choking = false;
                 if let Err(e) = self.try_request_blocks().await {
                     tracing::warn!(?e);
@@ -419,6 +455,7 @@ impl Peer<Connected> {
                 .await
                 .unwrap(),
             Bitfield(payload) => self
+                // maybe validate this here: so peer only update stats in piece picker
                 .manager_tx
                 .send(PeerEvent::Bitfield(self.peer_info.remote_pid, payload))
                 .await

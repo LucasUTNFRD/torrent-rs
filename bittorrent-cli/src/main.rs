@@ -94,7 +94,7 @@ fn print_stats(stats: &TorrentStats) {
     let download_rate_fmt = format_rate(stats.download_rate);
     let upload_rate_fmt = format_rate(stats.upload_rate);
 
-    print!(
+    let line = format!(
         "Progress: {:.1}%, dl: {} from {} peers ({}), ul: {}  ({}), ETA: {}",
         stats.progress,
         downloaded_fmt,
@@ -104,6 +104,8 @@ fn print_stats(stats: &TorrentStats) {
         upload_rate_fmt,
         format_eta(stats)
     );
+
+    print!("\r{:<80}", line);
     io::stdout().flush().unwrap();
 }
 
@@ -150,7 +152,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "Error: Torrent file does not exist: {}",
             args.torrent_file.display()
         );
-        eprintln!("   Please check the path and try again.");
+        eprintln!("Please check the path and try again.");
         std::process::exit(1);
     }
 

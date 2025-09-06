@@ -2,7 +2,6 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     sync::Arc,
-    time::Duration,
 };
 
 use bittorrent_common::{
@@ -12,7 +11,6 @@ use bittorrent_common::{
 use tokio::{
     sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
     task::JoinHandle,
-    time::sleep,
 };
 use tracker_client::TrackerHandler;
 
