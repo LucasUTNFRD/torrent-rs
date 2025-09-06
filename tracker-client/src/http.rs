@@ -113,7 +113,7 @@ impl BencodeDictExt for BTreeMap<Vec<u8>, Bencode> {
 const KEY_FAILURE_REASON: &[u8] = b"failure reason";
 const KEY_WARNING_MESSAGE: &[u8] = b"warning message";
 const KEY_PORT: &[u8] = b"port";
-const KEY_IP: &[u8] = b"IP";
+const KEY_IP: &[u8] = b"ip";
 const KEY_PEERS: &[u8] = b"peers";
 // const KEY_MIN_INTERVAL: &[u8] = b"min interval";
 // const KEY_TRACKER_ID: &[u8] = b"tracker id";
@@ -249,11 +249,11 @@ fn parse_peers(dict: &BTreeMap<Vec<u8>, Bencode>) -> Result<Vec<SocketAddr>, Tra
 }
 
 mod tests {
+    #![allow(unused_imports)]
+    #![allow(dead_code)]
     use std::net::{Ipv4Addr, SocketAddr};
 
-    use bittorrent_core::{
-        client::PORT, torrent::metainfo::parse_torrent_from_file, types::PeerID,
-    };
+    use bittorrent_common::{metainfo::parse_torrent_from_file, types::PeerID};
     use url::Url;
 
     use crate::{AnnounceParams, Events, HttpTrackerClient, http::QueryParamsBuilder};
@@ -266,7 +266,7 @@ mod tests {
         let params = AnnounceParams {
             info_hash: torrent.info_hash,
             peer_id: PeerID::new([0u8; 20]),
-            port: PORT,
+            port: 6881,
             uploaded: 0,
             downloaded: 0,
             left: torrent.total_size(),
@@ -347,7 +347,7 @@ mod tests {
             let ip_str = ip.to_string();
             s.push_str(&format!(
                 "d{}{}{}i{}ee",
-                be_string("IP"),
+                be_string("ip"),
                 be_string(&ip_str),
                 be_string("port"),
                 port
