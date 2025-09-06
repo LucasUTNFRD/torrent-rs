@@ -1,7 +1,7 @@
 .PHONY: build lint test clean run
 
 build: 
-	cargo build --workspace
+	cargo build --release
 
 lint: 
 	cargo clippy --all-targets  --workspace -- -D warnings
