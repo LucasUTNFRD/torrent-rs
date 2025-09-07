@@ -1,4 +1,4 @@
-use rand::Rng;
+use rand::{Rng, RngCore, distr::Alphanumeric};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct InfoHash([u8; 20]);
@@ -51,19 +51,19 @@ impl PeerID {
         Self(id)
     }
 
+    /// Generate a BEP 20 peer ID
+    /// (BEP 20)-[https://www.bittorrent.org/beps/bep_0020.html]
     pub fn generate() -> Self {
-        let mut rng = rand::rng();
+        const BEP20: &[u8] = b"-RS0000-"; // 8-byte prefix
         let mut id = [0u8; 20];
 
-        id[0] = b'r';
-        id[1] = b's';
-        id[2] = b'-';
+        // Copy prefix into the start of id
+        let o = BEP20.len();
+        id[..o].copy_from_slice(BEP20);
 
-        // Fill with random alphanumeric characters for better readability
-        for i in id.iter_mut().skip(3) {
-            // Generate random bytes in a readable ASCII range
-            *i = rng.random_range(48..126); // Numbers, letters, and some symbols
-        }
+        // Fill remaining bytes with random bytes
+        rand::rng().fill_bytes(&mut id[o..]);
+
         Self(id)
     }
 
