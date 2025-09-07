@@ -5,6 +5,7 @@ use bytes::Bytes;
 // TODO: Implement ExtendedHandshake
 
 /// [docs](https://www.libtorrent.org/extension_protocol.html)
+#[derive(Debug, Clone, PartialEq)]
 pub struct ExtendedHandshake {
     /// Dictionary of supported extension messages which maps names of
     /// extensions to an extended message ID
@@ -39,4 +40,31 @@ pub struct ExtendedHandshake {
     /// the time when this peer last saw a complete copy
     /// of this torrent
     pub complete_ago: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExtendedMessage {
+    /// Extended handshake (ID 0)
+    Handshake(ExtendedHandshake),
+    /// Generic extension message with custom ID and payload
+    Extension { id: u8, payload: Bytes },
+    /// ut_metadata extension messages
+    Metadata(MetadataMessage),
+    /// lt_donthave extension message
+    DontHave { piece_index: u32 },
+}
+
+/// ut_metadata extension message types
+#[derive(Debug, Clone, PartialEq)]
+pub enum MetadataMessage {
+    /// Request metadata piece
+    Request { piece: u32 },
+    /// Metadata piece data
+    Data {
+        piece: u32,
+        total_size: Option<u32>,
+        data: Bytes,
+    },
+    /// Reject metadata request
+    Reject { piece: u32 },
 }

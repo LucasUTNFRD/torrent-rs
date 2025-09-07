@@ -5,6 +5,8 @@ use tokio_util::codec::{Decoder, Encoder};
 
 use bittorrent_common::types::{InfoHash, PeerID};
 
+use crate::peer::extension::ExtendedMessage;
+
 // TODO: Implement Extended Handshake Message code/decode
 
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
@@ -39,8 +41,7 @@ pub enum Message {
     Request(BlockInfo),
     Piece(Block),
     Cancel(BlockInfo),
-    // Handshake(Handshake)
-    // ExtendedHandshake,
+    Extended(ExtendedMessage),
 }
 
 #[derive(Debug)]
@@ -93,7 +94,6 @@ impl Handshake {
         bytes.freeze()
     }
 
-    //TODO: impl TryFrom<&[u8]>
     pub fn from_bytes(src: &[u8]) -> Option<Self> {
         if src.len() != Self::HANDSHAKE_LEN || src[0] != Self::PSTRLEN || &src[1..20] != Self::PSTR
         {
@@ -121,7 +121,7 @@ enum MessageId {
     Request = 6,
     Piece = 7,
     Cancel = 8,
-    ExtendedHandshake = 20,
+    Extended = 20,
 }
 
 impl From<u8> for MessageId {
@@ -136,7 +136,7 @@ impl From<u8> for MessageId {
             k if k == MessageId::Request as u8 => MessageId::Request,
             k if k == MessageId::Piece as u8 => MessageId::Piece,
             k if k == MessageId::Cancel as u8 => Self::Cancel,
-            k if k == MessageId::ExtendedHandshake as u8 => Self::ExtendedHandshake,
+            k if k == MessageId::Extended as u8 => Self::Extended,
             _ => unreachable!(),
         }
     }
@@ -217,9 +217,12 @@ impl Decoder for MessageCodec {
                     length,
                 })
             }
-            MessageId::ExtendedHandshake => {
+            MessageId::Extended => {
                 tracing::debug!("extended handhsake not support yet");
                 return Ok(None);
+
+                // let extended_message_id = src.get_u8();
+                // let extended_payload = src.split_to(msg_length as usize - 1);
             }
         };
 
@@ -295,6 +298,9 @@ impl Encoder<Message> for MessageCodec {
                 dst.put_u32(block.begin);
                 dst.put_u32(block.length);
                 Ok(())
+            }
+            Message::Extended(extended) => {
+                todo!()
             }
         }
     }
