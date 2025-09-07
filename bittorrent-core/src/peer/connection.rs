@@ -152,9 +152,10 @@ impl Peer<New> {
         }
     }
 
+    
     pub async fn connect(self) -> Result<Peer<Handshaking>, PeerError> {
         let stream = timeout(
-            Duration::from_secs(10),
+            Duration::from_secs(15),
             TcpStream::connect(self.peer_info.addr()),
         )
         .await
