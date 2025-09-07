@@ -66,10 +66,10 @@ impl Handshake {
 
     // TODO:
     pub fn new(peer_id: PeerID, info_hash: InfoHash) -> Self {
-        let reserved = [0u8; 8];
+        let mut reserved = [0u8; 8];
+
         // Enable extension protocol support
-        // reserved[5] |= Self::EXTENSION_PROTOCOL_FLAG; // commented this because we dont support
-        // it yey
+        reserved[5] |= Self::EXTENSION_PROTOCOL_FLAG;
 
         Handshake {
             peer_id,
