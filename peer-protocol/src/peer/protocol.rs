@@ -239,6 +239,9 @@ impl Decoder for MessageCodec {
                             }
                         }
                     }
+                    
+                    // 1 => {todo!()}
+                    // 2 => {todo!()}
                     _ => {
                         // Other extension messages - skip payload for now
                         let payload_length = msg_length as usize - 2;
