@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, net::SocketAddr, time::Duration};
 
-use bencode::Bencode;
+use bencode::{Bencode, BencodeDict};
 
 use crate::{
     TrackerError,
@@ -61,52 +61,6 @@ impl<'a> QueryParamsBuilder<'a> {
         // Apply the encoded query string
         self.url.set_query(Some(&query_string));
         self.url
-    }
-}
-
-pub trait BencodeDictExt {
-    fn get_bytes(&self, key: &[u8]) -> Option<&[u8]>;
-    fn get_str(&self, key: &[u8]) -> Option<&str>;
-    fn get_i64(&self, key: &[u8]) -> Option<i64>;
-
-    #[allow(dead_code)]
-    fn get_list(&self, key: &[u8]) -> Option<&[Bencode]>;
-    #[allow(dead_code)]
-    fn get_dict(&self, key: &[u8]) -> Option<&BTreeMap<Vec<u8>, Bencode>>;
-}
-
-impl BencodeDictExt for BTreeMap<Vec<u8>, Bencode> {
-    fn get_bytes(&self, key: &[u8]) -> Option<&[u8]> {
-        match self.get(key) {
-            Some(Bencode::Bytes(b)) => Some(b.as_slice()),
-            _ => None,
-        }
-    }
-
-    fn get_str(&self, key: &[u8]) -> Option<&str> {
-        self.get_bytes(key)
-            .and_then(|b| std::str::from_utf8(b).ok())
-    }
-
-    fn get_i64(&self, key: &[u8]) -> Option<i64> {
-        match self.get(key) {
-            Some(Bencode::Int(i)) => Some(*i),
-            _ => None,
-        }
-    }
-
-    fn get_list(&self, key: &[u8]) -> Option<&[Bencode]> {
-        match self.get(key) {
-            Some(Bencode::List(l)) => Some(l.as_slice()),
-            _ => None,
-        }
-    }
-
-    fn get_dict(&self, key: &[u8]) -> Option<&BTreeMap<Vec<u8>, Bencode>> {
-        match self.get(key) {
-            Some(Bencode::Dict(d)) => Some(d),
-            _ => None,
-        }
     }
 }
 

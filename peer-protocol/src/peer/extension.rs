@@ -1,9 +1,20 @@
 use std::collections::BTreeMap;
 
-use bencode::{Bencode, BencodeBuilder, Encode};
+use bencode::{Bencode, BencodeBuilder, BencodeDict, BencodeError, Encode};
 use bytes::Bytes;
+use thiserror::Error;
 
 // TODO: Implement ExtendedHandshake
+
+#[derive(Debug, Error)]
+pub enum ExtensionError {
+    #[error("Bencode error: {0}")]
+    Bencode(#[from] BencodeError),
+    #[error("Invalid extended handshake format")]
+    InvalidHandshake,
+    #[error("Invalid field type in extended handshake")]
+    InvalidFieldType,
+}
 
 /// [docs](https://www.libtorrent.org/extension_protocol.html)
 #[derive(Debug, Clone, PartialEq)]
@@ -70,6 +81,66 @@ impl ExtendedHandshake {
             ipv6: None,
             metadata_size: None,
         }
+    }
+
+    /// Decode an extended handshake from bencode data
+    pub fn from_bencode(bencode: &Bencode) -> Result<Self, ExtensionError> {
+        let dict = match bencode {
+            Bencode::Dict(dict) => dict,
+            _ => return Err(ExtensionError::InvalidHandshake),
+        };
+
+        let mut handshake = ExtendedHandshake::new();
+
+        // Parse 'm' field - dictionary of extension names to IDs
+        if let Some(m_dict) = dict.get_dict(b"m") {
+            let mut m_map = BTreeMap::new();
+            for (key_bytes, value) in m_dict {
+                let key = String::from_utf8(key_bytes.clone())
+                    .map_err(|_| ExtensionError::InvalidFieldType)?;
+                if let Bencode::Int(id) = value {
+                    m_map.insert(key, *id);
+                } else {
+                    return Err(ExtensionError::InvalidFieldType);
+                }
+            }
+            handshake.m = Some(m_map);
+        }
+
+        // Parse 'v' field - client version string
+        if let Some(v) = dict.get_str(b"v") {
+            handshake.v = Some(v.to_string());
+        }
+
+        // Parse 'reqq' field - request queue size
+        if let Some(reqq) = dict.get_i64(b"reqq") {
+            handshake.reqq = Some(reqq);
+        }
+
+        // Parse 'p' field - port number
+        if let Some(p) = dict.get_i64(b"p") {
+            handshake.p = Some(p);
+        }
+
+        // Parse 'yourip' field - peer's IP address as seen by us
+        if let Some(yourip_bytes) = dict.get_bytes(b"yourip") {
+            handshake.yourip = Some(Bytes::copy_from_slice(yourip_bytes))
+        }
+
+        // Parse 'ipv4' field - peer's IPv4 address
+        if let Some(ipv4_bytes) = dict.get_bytes(b"ipv4") {
+            handshake.ipv4 = Some(Bytes::copy_from_slice(ipv4_bytes));
+        }
+        if let Some(ipv6_bytes) = dict.get_bytes(b"ipv6") {
+            handshake.ipv6 = Some(Bytes::copy_from_slice(ipv6_bytes));
+        }
+
+        // Parse 'metadata_size' field - torrent metadata size
+        if let Some(metadata_size) = dict.get_i64(b"metadata_size") {
+            handshake.metadata_size = Some(metadata_size);
+        }
+
+        Ok(handshake)
     }
 
     /// Builder pattern methods for easy construction

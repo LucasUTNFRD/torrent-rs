@@ -1,11 +1,12 @@
 use std::io::{self};
 
+use bencode::Bencode;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio_util::codec::{Decoder, Encoder};
 
 use bittorrent_common::types::{InfoHash, PeerID};
 
-use crate::peer::extension::ExtendedMessage;
+use crate::peer::extension::{ExtendedHandshake, ExtendedMessage};
 
 // TODO: Implement Extended Handshake Message code/decode
 
@@ -211,11 +212,43 @@ impl Decoder for MessageCodec {
                 })
             }
             MessageId::Extended => {
-                tracing::debug!("extended handhsake not support yet");
-                return Ok(None);
+                let extension_id = src.try_get_u8()?;
 
-                // let extended_message_id = src.get_u8();
-                // let extended_payload = src.split_to(msg_length as usize - 1);
+                match extension_id {
+                    0 => {
+                        let payload_length = msg_length as usize - 2; // subtracts message ID and extension ID
+                        let data = src.split_to(payload_length);
+
+                        match Bencode::decode(&data) {
+                            Ok(bencode) => match ExtendedHandshake::from_bencode(&bencode) {
+                                Ok(handshake) => {
+                                    Message::Extended(ExtendedMessage::Handshake(handshake))
+                                }
+                                Err(e) => {
+                                    return Err(io::Error::new(
+                                        io::ErrorKind::InvalidData,
+                                        format!("Failed to decode extended handshake: {}", e),
+                                    ));
+                                }
+                            },
+                            Err(e) => {
+                                return Err(io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    format!("Failed to decode bencode in extended message: {}", e),
+                                ));
+                            }
+                        }
+                    }
+                    _ => {
+                        // Other extension messages - skip payload for now
+                        let payload_length = msg_length as usize - 2;
+                        src.advance(payload_length);
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("Unsupported extension message ID: {}", extension_id),
+                        ));
+                    }
+                }
             }
         };
 
@@ -292,9 +325,76 @@ impl Encoder<Message> for MessageCodec {
                 dst.put_u32(block.length);
                 Ok(())
             }
-            Message::Extended(extended) => {
-                todo!()
-            }
+            Message::Extended(extended) => match extended {
+                ExtendedMessage::Handshake(handshake) => {
+                    let extended_payload = Bencode::encode(&handshake);
+                    let length = extended_payload.len() + 1 /*msg_id*/ + 1 /*extended msg_id*/;
+                    dst.put_u32(length as u32);
+                    dst.put_u8(MessageId::Extended as u8);
+                    dst.put_u8(0); // msg_id for handshake
+                    dst.put_slice(&extended_payload);
+                    Ok(())
+                }
+            },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::peer::extension::ExtendedHandshake;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn test_extended_handshake_round_trip() {
+        let mut m = BTreeMap::new();
+        m.insert("ut_metadata".to_string(), 1);
+        m.insert("ut_pex".to_string(), 2);
+
+        let original_handshake = ExtendedHandshake {
+            m: Some(m),
+            v: Some("TestClient 1.0".to_string()),
+            reqq: Some(250),
+            p: Some(6881),
+            yourip: None,
+            ipv4: None,
+            ipv6: None,
+            metadata_size: Some(12345),
+        };
+
+        let extended_msg = ExtendedMessage::Handshake(original_handshake.clone());
+        let msg = Message::Extended(extended_msg);
+
+        let mut codec = MessageCodec {};
+        let mut buffer = BytesMut::new();
+
+        // Encode
+        codec.encode(msg, &mut buffer).unwrap();
+
+        // Decode
+        let decoded = codec.decode(&mut buffer).unwrap().unwrap();
+
+        match decoded {
+            Message::Extended(ExtendedMessage::Handshake(decoded_handshake)) => {
+                assert_eq!(original_handshake, decoded_handshake);
+            }
+            _ => panic!("Expected extended handshake message"),
+        }
+    }
+
+    #[test]
+    fn test_handshake_extension_support() {
+        let peer_id = PeerID::from([1u8; 20]);
+        let info_hash = InfoHash::from([2u8; 20]);
+
+        let handshake = Handshake::new(peer_id, info_hash);
+        assert!(handshake.support_extended_message());
+
+        let bytes = handshake.to_bytes();
+        let decoded = Handshake::from_bytes(&bytes).unwrap();
+        assert!(decoded.support_extended_message());
+        assert_eq!(handshake.peer_id, decoded.peer_id);
+        assert_eq!(handshake.info_hash, decoded.info_hash);
     }
 }
