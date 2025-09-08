@@ -334,16 +334,9 @@ impl Peer<Connected> {
     }
 
     async fn send_extended_handshake(&mut self) -> Result<(), PeerError> {
-        // if we send this peers will try to communicate to us with this via extensions msg with
-        // the mapped id
-        // let mut m = BTreeMap::new();
-        // m.insert("ut_metadata".to_string(), 1);
-        // m.insert("ut_pex".to_string(), 2);
-
         let extended_handshake = ExtendedHandshake::default()
-            // .with_extensions(m)
             .with_client_version("rust.torrent dev")
-            .with_yourip(self.peer_info.addr.ip().to_string().into());
+            .with_yourip(self.peer_info.addr.ip());
 
         self.state
             .sink

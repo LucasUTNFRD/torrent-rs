@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, net::IpAddr};
 
 use bencode::{Bencode, BencodeBuilder, BencodeDict, BencodeError, Encode};
 use bytes::Bytes;
@@ -160,8 +160,13 @@ impl ExtendedHandshake {
     }
 
     /// Set the IP address this peer sees you as (compact representation)
-    pub fn with_yourip(mut self, ip: Bytes) -> Self {
-        self.yourip = Some(ip);
+    pub fn with_yourip(mut self, ip: IpAddr) -> Self {
+        let octets = match ip {
+            IpAddr::V4(v4) => v4.octets().to_vec(),
+            IpAddr::V6(v6) => v6.octets().to_vec(),
+        };
+
+        self.yourip = Some(octets.into());
         self
     }
 
