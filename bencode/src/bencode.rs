@@ -35,6 +35,96 @@ impl Encode for String {
     }
 }
 
+impl Encode for i64 {
+    fn to_bencode(&self) -> Bencode {
+        Bencode::Int(*self)
+    }
+}
+
+// Support for Vec<T>
+impl<T: Encode> Encode for Vec<T> {
+    fn to_bencode(&self) -> Bencode {
+        let list = self.iter().map(|item| item.to_bencode()).collect();
+        Bencode::List(list)
+    }
+}
+
+// Support for Option<T> - only encode if Some
+impl<T: Encode> Encode for Option<T> {
+    fn to_bencode(&self) -> Bencode {
+        match self {
+            Some(value) => value.to_bencode(),
+            None => {
+                panic!("Cannot encode None values directly. Handle Options at the container level.")
+            }
+        }
+    }
+}
+
+// Support for bytes::Bytes
+impl Encode for bytes::Bytes {
+    fn to_bencode(&self) -> Bencode {
+        Bencode::Bytes(self.to_vec())
+    }
+}
+impl Encode for &[u8] {
+    fn to_bencode(&self) -> Bencode {
+        Bencode::Bytes(self.to_vec())
+    }
+}
+
+// Support for BTreeMap with String keys
+impl<T: Encode> Encode for BTreeMap<String, T> {
+    fn to_bencode(&self) -> Bencode {
+        let mut dict = BTreeMap::new();
+        for (key, value) in self {
+            dict.insert(key.as_bytes().to_vec(), value.to_bencode());
+        }
+        Bencode::Dict(dict)
+    }
+}
+
+// Support for BTreeMap with &str keys
+impl<T: Encode> Encode for BTreeMap<&str, T> {
+    fn to_bencode(&self) -> Bencode {
+        let mut dict = BTreeMap::new();
+        for (key, value) in self {
+            dict.insert(key.as_bytes().to_vec(), value.to_bencode());
+        }
+        Bencode::Dict(dict)
+    }
+}
+
+// Helper trait for building dictionaries with optional fields
+pub trait BencodeBuilder {
+    fn new() -> Self;
+    fn insert_optional<T: Encode>(&mut self, key: &str, value: &Option<T>) -> &mut Self;
+    fn insert<T: Encode>(&mut self, key: &str, value: &T) -> &mut Self;
+    fn build(self) -> Bencode;
+}
+
+impl BencodeBuilder for BTreeMap<Vec<u8>, Bencode> {
+    fn new() -> Self {
+        BTreeMap::new()
+    }
+
+    fn insert_optional<T: Encode>(&mut self, key: &str, value: &Option<T>) -> &mut Self {
+        if let Some(val) = value {
+            self.insert(key.as_bytes().to_vec(), val.to_bencode());
+        }
+        self
+    }
+
+    fn insert<T: Encode>(&mut self, key: &str, value: &T) -> &mut Self {
+        self.insert(key.as_bytes().to_vec(), value.to_bencode());
+        self
+    }
+
+    fn build(self) -> Bencode {
+        Bencode::Dict(self)
+    }
+}
+
 impl Bencode {
     pub fn decode(data: &[u8]) -> Result<Bencode, BencodeError> {
         let (bencode, _rest) = Bencode::decode_recurisvely(data)?;
