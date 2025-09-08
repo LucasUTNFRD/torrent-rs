@@ -9,12 +9,7 @@ use peer_protocol::{
     peer::extension::{ExtendedHandshake, ExtendedMessage},
     protocol::{self, BlockInfo, Handshake, Message},
 };
-use std::{
-    collections::{BTreeMap, HashMap, HashSet},
-    fmt::Debug,
-    net::SocketAddr,
-    time::Duration,
-};
+use std::{collections::HashSet, fmt::Debug, net::SocketAddr, time::Duration};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
@@ -177,8 +172,6 @@ impl Peer<New> {
         })
     }
 }
-
-const MAX_INCOMING_REQUEST_SUPPORTED: i64 = 250;
 
 impl Peer<Handshaking> {
     pub async fn handshake(mut self) -> Result<Peer<Connected>, PeerError> {
