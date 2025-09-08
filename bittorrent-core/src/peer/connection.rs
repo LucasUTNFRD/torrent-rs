@@ -542,8 +542,8 @@ impl Peer<Connected> {
             Cancel(_block_info) => {
                 tracing::info!("recv cancel");
             }
-            Extended(extension_msg) => {
-                tracing::debug!("not implemented");
+            Extended(ExtendedMessage::Handshake(ext_handshake)) => {
+                tracing::info!(?ext_handshake);
             }
         }
     }

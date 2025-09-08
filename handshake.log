@@ -1,0 +1,62 @@
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.14s
+     Running `target/debug/bittorrent-cli --log-level=info sample_torrents/debian-13.0.0-amd64-netinst.iso.torrent`
+2025-09-08T03:21:42.000131Z  INFO Torrent file: sample_torrents/debian-13.0.0-amd64-netinst.iso.torrent
+2025-09-08T03:21:42.000169Z  INFO Save directory: /home/lucas/Downloads/Torrents
+2025-09-08T03:21:42.000182Z  INFO Listening on port: 6881
+Starting download...
+Press Ctrl+C to stop
+
+2025-09-08T03:21:42.006347Z  INFO metainfo=Torrent[name="debian-13.0.0-amd64-netinst.iso", announce=http://bttracker.debian.org:6969/announce, pieces=3016, piece_len=262144, info_hash=155a51b44b337d3b147c8d93d9764df48705ff89]
+Progress: 0.0%, dl: 0 B from 0 peers (0 B/s), ul: 0 B  (0 B/s), ETA: --:--      Announcing to tracker URL: http://bttracker.debian.org:6969/announce?info_hash=%15%5A%51%B4%4B%33%7D%3B%14%7C%8D%93%D9%76%4D%F4%87%05%FF%89&peer_id=%2D%52%53%30%30%30%30%2D%59%B0%D3%FE%84%0A%0F%49%5F%BC%D8%57&port=6881&uploaded=0&downloaded=0&left=790626304&compact=1&event=started
+2025-09-08T03:21:42.808178Z  INFO recieve 35 peers from : http://bttracker.debian.org:6969/announce
+Progress: 0.0%, dl: 0 B from 35 peers (0 B/s), ul: 0 B  (0 B/s), ETA: --:--     2025-09-08T03:21:43.128401Z  WARN peer task exited with error err=IoError(Os { code: 111, kind: ConnectionRefused, message: "Connection refused" })
+2025-09-08T03:21:43.128571Z  WARN err=IoError(Os { code: 111, kind: ConnectionRefused, message: "Connection refused" }) id=Id(22)
+2025-09-08T03:21:43.141891Z  INFO peer{pid=Id(18) addr=77.81.142.31:51534}: ext_handshake=ExtendedHandshake { m: Some({"lt_donthave": 7, "share_mode": 8, "upload_only": 3, "ut_holepunch": 4, "ut_metadata": 2, "ut_pex": 1}), v: Some("qBittorrent/5.1.2"), reqq: Some(2000), p: None, yourip: Some(b"\xbe3\xbdw"), ipv4: None, ipv6: None, metadata_size: Some(60418) }
+2025-09-08T03:21:43.252996Z  INFO peer{pid=Id(5) addr=195.154.171.88:32181}: ext_handshake=ExtendedHandshake { m: Some({"ut_metadata": 2, "ut_pex": 1}), v: Some("libTorrent 0.14.0"), reqq: Some(2048), p: Some(32181), yourip: None, ipv4: None, ipv6: None, metadata_size: Some(60418) }
+2025-09-08T03:21:43.269390Z  INFO peer{pid=Id(9) addr=141.144.206.186:12345}: ext_handshake=ExtendedHandshake { m: Some({"lt_donthave": 7, "share_mode": 8, "upload_only": 3, "ut_holepunch": 4, "ut_metadata": 2, "ut_pex": 1}), v: Some("qBittorrent/4.3.9"), reqq: Some(500), p: None, yourip: Some(b"\xbe3\xbdw"), ipv4: None, ipv6: None, metadata_size: Some(60418) }
+2025-09-08T03:21:43.274758Z  INFO peer{pid=Id(30) addr=76.147.218.83:51413}: ext_handshake=ExtendedHandshake { m: Some({"lt_donthave": 7, "share_mode": 8, "upload_only": 3, "ut_holepunch": 4, "ut_metadata": 2, "ut_pex": 1}), v: None, reqq: Some(2000), p: None, yourip: Some(b"\xbe3\xbdw"), ipv4: None, ipv6: None, metadata_size: Some(60418) }
+2025-09-08T03:21:43.277138Z  INFO peer{pid=Id(12) addr=178.162.150.5:28963}: ext_handshake=ExtendedHandshake { m: Some({"lt_donthave": 7, "share_mode": 8, "upload_only": 3, "ut_holepunch": 4, "ut_metadata": 2, "ut_pex": 1}), v: Some("qBittorrent/5.0.5"), reqq: Some(5200), p: None, yourip: Some(b"\xbe3\xbdw"), ipv4: None, ipv6: None, metadata_size: Some(60418) }
+2025-09-08T03:21:43.319807Z  WARN peer task exited with error err=IoError(Custom { kind: UnexpectedEof, error: "early eof" })
+2025-09-08T03:21:43.319970Z  WARN err=IoError(Custom { kind: UnexpectedEof, error: "early eof" }) id=Id(29)
+2025-09-08T03:21:43.320730Z  INFO peer{pid=Id(11) addr=213.144.130.148:51413}: ext_handshake=ExtendedHandshake { m: Some({"lt_donthave": 7, "share_mode": 8, "upload_only": 3, "ut_holepunch": 4, "ut_metadata": 2, "ut_pex": 1}), v: Some("qBittorrent/5.1.2"), reqq: Some(2000), p: None, yourip: Some(b"\xbe3\xbdw"), ipv4: None, ipv6: None, metadata_size: Some(60418) }
+2025-09-08T03:21:43.322262Z  INFO peer{pid=Id(16) addr=84.1.190.244:6881}: ext_handshake=ExtendedHandshake { m: Some({"lt_donthave": 7, "share_mode": 8, "upload_only": 3, "ut_holepunch": 4, "ut_metadata": 2, "ut_pex": 1}), v: Some("qBittorrent/5.0.1"), reqq: Some(2000), p: None, yourip: Some(b"\xbe3\xbdw"), ipv4: None, ipv6: None, metadata_size: Some(60418) }
+2025-09-08T03:21:43.322407Z  INFO peer{pid=Id(27) addr=213.152.176.135:20074}: ext_handshake=ExtendedHandshake { m: Some({"lt_donthave": 7, "share_mode": 8, "upload_only": 3, "ut_holepunch": 4, "ut_metadata": 2, "ut_pex": 1}), v: None, reqq: Some(2000), p: None, yourip: Some(b"\xbe3\xbdw"), ipv4: None, ipv6: None, metadata_size: Some(60418) }
+2025-09-08T03:21:43.343643Z  INFO peer{pid=Id(3) addr=185.148.3.184:53945}: ext_handshake=ExtendedHandshake { m: Some({"ut_metadata": 2, "ut_pex": 1}), v: Some("libTorrent 0.13.8"), reqq: Some(2048), p: Some(53945), yourip: None, ipv4: None, ipv6: None, metadata_size: Some(60418) }
+2025-09-08T03:21:43.383199Z  WARN peer task exited with error err=IoError(Custom { kind: UnexpectedEof, error: "early eof" })
+2025-09-08T03:21:43.383347Z  WARN err=IoError(Custom { kind: UnexpectedEof, error: "early eof" }) id=Id(6)
+2025-09-08T03:21:43.409756Z  WARN peer task exited with error err=IoError(Custom { kind: UnexpectedEof, error: "early eof" })
+2025-09-08T03:21:43.409891Z  WARN err=IoError(Custom { kind: UnexpectedEof, error: "early eof" }) id=Id(19)
+2025-09-08T03:21:43.491166Z  WARN peer task exited with error err=IoError(Custom { kind: UnexpectedEof, error: "early eof" })
+2025-09-08T03:21:43.491282Z  WARN err=IoError(Custom { kind: UnexpectedEof, error: "early eof" }) id=Id(14)
+2025-09-08T03:21:43.525506Z  WARN peer task exited with error err=IoError(Custom { kind: InvalidData, error: "Unsupported extension message ID: 2" })
+2025-09-08T03:21:43.525671Z  WARN err=IoError(Custom { kind: InvalidData, error: "Unsupported extension message ID: 2" }) id=Id(18)
+2025-09-08T03:21:43.709192Z  WARN peer task exited with error err=IoError(Custom { kind: UnexpectedEof, error: "early eof" })
+2025-09-08T03:21:43.709344Z  WARN err=IoError(Custom { kind: UnexpectedEof, error: "early eof" }) id=Id(20)
+2025-09-08T03:21:43.743195Z  WARN peer task exited with error err=IoError(Custom { kind: InvalidData, error: "Unsupported extension message ID: 2" })
+2025-09-08T03:21:43.743327Z  WARN err=IoError(Custom { kind: InvalidData, error: "Unsupported extension message ID: 2" }) id=Id(12)
+2025-09-08T03:21:43.852525Z  INFO peer{pid=Id(28) addr=66.114.33.254:50413}: ext_handshake=ExtendedHandshake { m: Some({"ut_metadata": 3, "ut_pex": 1}), v: Some("Transmission 4.0.6"), reqq: Some(512), p: Some(50413), yourip: Some(b"\xbe3\xbdw"), ipv4: None, ipv6: None, metadata_size: Some(60418) }
+2025-09-08T03:21:43.852861Z  WARN peer task exited with error err=IoError(Custom { kind: InvalidData, error: "Unsupported extension message ID: 2" })
+2025-09-08T03:21:43.854342Z  WARN err=IoError(Custom { kind: InvalidData, error: "Unsupported extension message ID: 2" }) id=Id(28)
+2025-09-08T03:21:43.886157Z  INFO peer{pid=Id(31) addr=156.146.62.205:41136}: ext_handshake=ExtendedHandshake { m: Some({"ut_metadata": 3, "ut_pex": 1}), v: Some("Transmission 4.0.6"), reqq: Some(512), p: Some(41136), yourip: Some(b"\xbe3\xbdw"), ipv4: None, ipv6: None, metadata_size: Some(60418) }
+2025-09-08T03:21:43.886464Z  WARN peer task exited with error err=IoError(Custom { kind: InvalidData, error: "Unsupported extension message ID: 2" })
+2025-09-08T03:21:43.888084Z  WARN err=IoError(Custom { kind: InvalidData, error: "Unsupported extension message ID: 2" }) id=Id(31)
+Progress: 0.0%, dl: 32.0 KB from 25 peers (32.0 KB/s), ul: 0 B  (0 B/s), ETA: 5124095576030431:00:152025-09-08T03:21:44.064625Z  WARN peer task exited with error err=IoError(Os { code: 113, kind: HostUnreachable, message: "No route to host" })
+2025-09-08T03:21:44.064810Z  WARN err=IoError(Os { code: 113, kind: HostUnreachable, message: "No route to host" }) id=Id(23)
+2025-09-08T03:21:44.111721Z  WARN peer{pid=Id(16) addr=84.1.190.244:6881}: got unrequested piece 5:245760->16384
+2025-09-08T03:21:44.217247Z  WARN peer task exited with error err=IoError(Custom { kind: InvalidData, error: "Unsupported extension message ID: 2" })
+2025-09-08T03:21:44.217395Z  WARN err=IoError(Custom { kind: InvalidData, error: "Unsupported extension message ID: 2" }) id=Id(9)
+2025-09-08T03:21:44.611999Z  WARN peer task exited with error err=IoError(Custom { kind: InvalidData, error: "Unsupported extension message ID: 2" })
+2025-09-08T03:21:44.612191Z  WARN err=IoError(Custom { kind: InvalidData, error: "Unsupported extension message ID: 2" }) id=Id(16)
+2025-09-08T03:21:44.668358Z  INFO peer{pid=Id(25) addr=159.196.197.204:51413}: ext_handshake=ExtendedHandshake { m: Some({"ut_metadata": 3, "ut_pex": 1}), v: Some("Transmission 4.0.6"), reqq: Some(512), p: Some(51413), yourip: Some(b"\xbe3\xbdw"), ipv4: None, ipv6: None, metadata_size: Some(60418) }
+2025-09-08T03:21:44.762135Z  WARN peer task exited with error err=IoError(Custom { kind: InvalidData, error: "Unsupported extension message ID: 2" })
+2025-09-08T03:21:44.762267Z  WARN err=IoError(Custom { kind: InvalidData, error: "Unsupported extension message ID: 2" }) id=Id(30)
+2025-09-08T03:21:44.871115Z  INFO peer{pid=Id(15) addr=185.70.133.82:51413}: ext_handshake=ExtendedHandshake { m: Some({"ut_metadata": 3, "ut_pex": 1}), v: Some("Transmission 3.00"), reqq: Some(512), p: Some(51413), yourip: None, ipv4: None, ipv6: None, metadata_size: Some(60418) }
+2025-09-08T03:21:44.871424Z  WARN peer task exited with error err=IoError(Custom { kind: InvalidData, error: "Unsupported extension message ID: 2" })
+2025-09-08T03:21:44.872905Z  WARN err=IoError(Custom { kind: InvalidData, error: "Unsupported extension message ID: 2" }) id=Id(15)
+Progress: 0.1%, dl: 1008.0 KB from 20 peers (367.9 KB/s), ul: 0 B  (0 B/s), ETA: 01:08:482025-09-08T03:21:46.299889Z  WARN peer task exited with error err=IoError(Custom { kind: InvalidData, error: "Unsupported extension message ID: 2" })
+2025-09-08T03:21:46.300044Z  WARN err=IoError(Custom { kind: InvalidData, error: "Unsupported extension message ID: 2" }) id=Id(11)
+2025-09-08T03:21:46.658991Z  WARN peer task exited with error err=IoError(Custom { kind: InvalidData, error: "Unsupported extension message ID: 2" })
+2025-09-08T03:21:46.659067Z  WARN err=IoError(Custom { kind: InvalidData, error: "Unsupported extension message ID: 2" }) id=Id(25)
+2025-09-08T03:21:46.867378Z  WARN peer task exited with error err=IoError(Custom { kind: InvalidData, error: "Unsupported extension message ID: 2" })
+2025-09-08T03:21:46.867506Z  WARN err=IoError(Custom { kind: InvalidData, error: "Unsupported extension message ID: 2" }) id=Id(27)
+Progress: 0.1%, dl: 1.2 MB from 17 peers (0 B/s), ul: 0 B  (0 B/s), ETA: --:--  ^C2025-09-08T03:21:54.185981Z  INFO  Received shutdown signal, stopping session...
