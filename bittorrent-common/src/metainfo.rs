@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use bencode::bencode::{Bencode, BencodeError, Encode};
+use bencode::{Bencode, BencodeError, Encode};
 use sha1::{Digest, Sha1};
 
 use crate::types::InfoHash;

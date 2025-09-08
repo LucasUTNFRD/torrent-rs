@@ -6,9 +6,15 @@ use futures::{
 };
 use peer_protocol::{
     MessageCodec,
+    peer::extension::{ExtendedHandshake, ExtendedMessage},
     protocol::{self, BlockInfo, Handshake, Message},
 };
-use std::{collections::HashSet, fmt::Debug, net::SocketAddr, time::Duration};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    fmt::Debug,
+    net::SocketAddr,
+    time::Duration,
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
@@ -107,6 +113,7 @@ pub struct Connected {
     incoming_request: HashSet<BlockInfo>,
 
     last_recv_msg: Instant,
+    supports_extended: bool,
     // Track of pieces we requested and we are awaiting
     // outbound_requests:
     // track of pieces peer requested
@@ -115,7 +122,7 @@ pub struct Connected {
 }
 
 impl Connected {
-    pub fn new(stream: TcpStream) -> Self {
+    pub fn new(stream: TcpStream, supports_extended: bool) -> Self {
         let framed = Framed::new(stream, MessageCodec {});
         let (sink, stream) = framed.split();
         Self {
@@ -126,6 +133,7 @@ impl Connected {
             outbound_requests: HashSet::new(),
             incoming_request: HashSet::new(),
             last_recv_msg: Instant::now(),
+            supports_extended,
         }
     }
 }
@@ -152,7 +160,6 @@ impl Peer<New> {
         }
     }
 
-    
     pub async fn connect(self) -> Result<Peer<Handshaking>, PeerError> {
         let stream = timeout(
             Duration::from_secs(15),
@@ -171,12 +178,15 @@ impl Peer<New> {
     }
 }
 
+const MAX_INCOMING_REQUEST_SUPPORTED: i64 = 250;
+
 impl Peer<Handshaking> {
     pub async fn handshake(mut self) -> Result<Peer<Connected>, PeerError> {
         tracing::debug!(
             "Initiating handshake with peer at {}",
             self.peer_info.addr()
         );
+
         let handshake =
             Handshake::new(*self.peer_info.local_peer_id(), *self.peer_info.info_hash());
 
@@ -200,22 +210,22 @@ impl Peer<Handshaking> {
         let remote_handshake = Handshake::from_bytes(&buf).ok_or(PeerError::InvalidHandshake)?;
         tracing::debug!("Validating remote handshake");
 
-        if remote_handshake.support_extended_message() {
-            tracing::debug!("peer support extended handshake");
-        }
-
         if remote_handshake.info_hash != *self.peer_info.info_hash() {
             tracing::warn!("Handshake failed: info hash mismatch");
             return Err(PeerError::InvalidHandshake);
         }
+
+        // TODO: Register client id
 
         tracing::debug!(
             "Handshake successful with peer at {}",
             self.peer_info.addr()
         );
 
+        let supports_extended = remote_handshake.support_extended_message();
+
         Ok(Peer {
-            state: Connected::new(self.state.stream),
+            state: Connected::new(self.state.stream, supports_extended),
             peer_info: self.peer_info,
             manager_tx: self.manager_tx,
             cmd_rx: self.cmd_rx,
@@ -244,6 +254,10 @@ impl Peer<Connected> {
             Instant::now() + Duration::from_secs(30),
             Duration::from_secs(30),
         );
+
+        if self.state.supports_extended {
+            self.send_extended_handshake().await?;
+        }
 
         loop {
             tokio::select! {
@@ -324,6 +338,25 @@ impl Peer<Connected> {
         }
 
         Ok(())
+    }
+
+    async fn send_extended_handshake(&mut self) -> Result<(), PeerError> {
+        let mut m = BTreeMap::new();
+        m.insert("ut_metadata".to_string(), 1);
+        m.insert("ut_pex".to_string(), 2);
+
+        let extended_handshake = ExtendedHandshake::default()
+            .with_extensions(m)
+            .with_client_version("rust.torrent dev")
+            .with_yourip(self.peer_info.addr.ip().to_string().into());
+
+        self.state
+            .sink
+            .send(Message::Extended(ExtendedMessage::Handshake(
+                extended_handshake,
+            )))
+            .await
+            .map_err(PeerError::IoError)
     }
 
     async fn try_request_blocks(&mut self) -> Result<(), PeerError> {
@@ -508,6 +541,9 @@ impl Peer<Connected> {
             }
             Cancel(_block_info) => {
                 tracing::info!("recv cancel");
+            }
+            Extended(extension_msg) => {
+                tracing::debug!("not implemented");
             }
         }
     }

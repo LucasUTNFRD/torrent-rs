@@ -23,12 +23,6 @@ pub struct Block {
     pub data: Bytes,
 }
 
-// #[derive(Debug)]
-// pub struct BitField {
-//     inner: Box<[u8]>,
-//     total_pieces: usize,
-// }
-
 #[derive(Debug)]
 pub enum Message {
     KeepAlive,
@@ -65,7 +59,6 @@ impl Handshake {
     pub const HANDSHAKE_LEN: usize = 68;
     pub const EXTENSION_PROTOCOL_FLAG: u8 = 0x10; // bit 43 (5th bit of 6th byte)
 
-    // TODO:
     pub fn new(peer_id: PeerID, info_hash: InfoHash) -> Self {
         let mut reserved = [0u8; 8];
 

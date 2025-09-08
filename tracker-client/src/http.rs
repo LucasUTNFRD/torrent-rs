@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, net::SocketAddr, time::Duration};
 
-use bencode::bencode::Bencode;
+use bencode::Bencode;
 
 use crate::{
     TrackerError,
