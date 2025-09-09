@@ -1,0 +1,7 @@
+FROM node:20-slim
+
+RUN npm install -g bittorrent-tracker
+
+EXPOSE 8000
+
+ENTRYPOINT ["bittorrent-tracker", "--http", "0.0.0.0:8000", "--udp", "0.0.0.0:8000"]
