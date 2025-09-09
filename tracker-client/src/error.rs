@@ -1,4 +1,4 @@
-use bencode::bencode::BencodeError;
+use bencode::BencodeError;
 use thiserror::Error;
 
 #[derive(Debug, Error)]

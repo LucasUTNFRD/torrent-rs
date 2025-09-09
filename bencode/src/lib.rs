@@ -1,4 +1,5 @@
-pub mod bencode;
+pub use bencode::{Bencode, BencodeBuilder, BencodeDict, BencodeError, Encode};
+mod bencode;
 
 #[cfg(test)]
 mod tests {
