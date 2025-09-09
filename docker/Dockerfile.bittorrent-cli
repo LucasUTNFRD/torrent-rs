@@ -1,0 +1,25 @@
+FROM rust:1.85 as builder
+
+WORKDIR /app
+COPY . .
+
+RUN cargo build --release --bin bittorrent-cli
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    curl \
+    netcat-openbsd \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN useradd -m -u 1000 appuser
+
+COPY --from=builder /app/target/release/bittorrent-cli /usr/local/bin/bittorrent-cli
+
+RUN mkdir -p /home/appuser/Downloads/Torrents && chown -R appuser:appuser /home/appuser/Downloads
+
+USER appuser
+WORKDIR /home/appuser
+
+ENTRYPOINT ["bittorrent-cli"]

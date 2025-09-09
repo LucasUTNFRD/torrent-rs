@@ -1,0 +1,53 @@
+services:
+  tracker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.tracker
+    ports:
+      - "8000:8000"
+    networks:
+      - torrent-net
+
+  transmission-seeder:
+    image: linuxserver/transmission:latest
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=UTC
+      - TRANSMISSION_WEB_HOME=/transmission-web-control/
+    volumes:
+      - ./seeder_data:/data
+      - ./transmission_config:/config
+      - ./scripts/start_transmission_seeding.sh:/start_transmission_seeding.sh:ro
+    ports:
+      - "9091:9091" # Web UI
+      - "51413:51413" # BitTorrent port
+    networks:
+      - torrent-net
+    depends_on:
+      - tracker
+    command : ["/start_transmission_seeding.sh"]
+
+  leecher:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.bittorrent-cli
+    volumes:
+      - ./downloads:/home/appuser/Downloads/Torrents
+      - ./seeder_data:/torrents:ro #read-only
+    environment:
+      - HOME=/home/appuser
+    networks:
+      - torrent-net
+    depends_on:
+      - tracker
+      - transmission-seeder
+    command: ["--log-level=debug", "/torrents/test.torrent"]
+
+networks:
+  torrent-net:
+    driver: bridge
+
+volumes:
+  downloads:
+  transmission_config:
