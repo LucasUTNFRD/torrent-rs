@@ -92,10 +92,11 @@ The following options are available for the CLI:
 | 2   | User Interface (TUI/CLI)               | ✅       | N/A                                                      |
 | 3   | Comprehensive Testing & Benchmarking   | ❌ To Do | N/A                                                      |
 | 4   | UDP Tracker Protocol                   | ✅       | [BEP 0015](http://www.bittorrent.org/beps/bep_0015.html) |
-| 5   | DHT Protocol                           | ❌ To Do | [BEP 0005](https://bittorrent.org/beps/bep_0005.html)    |
-| 6   | Magnet URI Scheme                      | ❌ To Do | [BEP 0009](http://www.bittorrent.org/beps/bep_0009.html) |
-| 7   | Fast Extension                         | ❌ To Do | [BEP 0006](http://www.bittorrent.org/beps/bep_0006.html) |
-| 8   | Performance Optimizations & Refinement | ❌ To Do | N/A                                                      |
+| 5   | Peer Extension                         | ✅       | [BEP 0010](http://www.bittorrent.org/beps/bep_0010.html) |
+| 6   | DHT Protocol                           | ❌ To Do | [BEP 0005](https://bittorrent.org/beps/bep_0005.html)    |
+| 7   | Magnet URI Scheme                      | ❌ To Do | [BEP 0009](http://www.bittorrent.org/beps/bep_0009.html) |
+| 8   | Fast Extension                         | ❌ To Do | [BEP 0006](http://www.bittorrent.org/beps/bep_0006.html) |
+| 9   | Performance Optimizations & Refinement | ❌ To Do | N/A                                                      |
 ---
 
 *(Status Icons: ✅ Done, 🏗️ WIP / In Progress, ❌ To Do)*
