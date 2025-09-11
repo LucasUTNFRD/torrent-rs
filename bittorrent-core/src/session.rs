@@ -181,20 +181,3 @@ impl SessionManager {
         }
     }
 }
-
-mod incoming_peer {
-    use tokio::net::TcpStream;
-
-    use crate::peer::connection::State;
-
-    #[derive(Debug)]
-
-    pub struct NewIncoming {}
-    impl State for NewIncoming {}
-
-    #[derive(Debug)]
-    pub struct IncomingHandshake {
-        stream: TcpStream,
-    }
-    impl State for IncomingHandshake {}
-}
