@@ -1,0 +1,20 @@
+FROM node:20-alpine AS builder
+
+WORKDIR /app
+
+RUN npm install -g bittorrent-tracker@11.2.2 \
+    && npm cache clean --force
+
+FROM node:20-alpine
+
+COPY --from=builder /usr/local/lib/node_modules /usr/local/lib/node_modules
+COPY --from=builder /usr/local/bin /usr/local/bin
+
+# Create a non-root user (optional but recommended)
+RUN addgroup -S tracker && adduser -S tracker -G tracker
+USER tracker
+
+
+EXPOSE 8000
+
+ENTRYPOINT ["bittorrent-tracker", "--http", "0.0.0.0:8000", "--udp", "0.0.0.0:8000"]

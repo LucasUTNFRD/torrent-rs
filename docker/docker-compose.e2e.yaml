@@ -1,0 +1,57 @@
+services:
+  tracker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.tracker
+    ports:
+      - "8000:8000"
+    networks:
+      - torrent-net
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8000"]
+      interval: 5s
+      timeout: 2s
+      retries: 5
+
+  transmission-seeder:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.seeder
+    volumes:
+      - ./seeder_data:/data
+    networks:
+      - torrent-net
+    depends_on:
+      tracker:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "pgrep", "transmission-cli"]
+      interval: 5s
+      timeout: 2s
+      retries: 5
+
+  leecher:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.bittorrent-cli
+    volumes:
+      - ./downloads:/home/appuser/Downloads/Torrents
+      - ./seeder_data:/torrents:ro #read-only
+    environment:
+      - HOME=/home/appuser
+    networks:
+      - torrent-net
+    depends_on:
+      tracker:
+        condition: service_healthy
+      transmission-seeder:
+        condition: service_healthy
+    command: ["--log-level=info", "/torrents/test.torrent"]
+
+networks:
+  torrent-net:
+    driver: bridge
+
+volumes:
+  downloads:
+  transmission_config:
