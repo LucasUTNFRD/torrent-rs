@@ -110,9 +110,9 @@ impl SessionManager {
                     stream.read_exact(&mut buf).await.unwrap();
 
                     let remote_handshake = match Handshake::from_bytes(&buf) {
-                        Ok(hs) => hs,
-                        Err(e) => {
-                            tracing::error!("Failed to parse handshake from {:?}: {:?}", remote_addr, e);
+                        Some(hs) => hs,
+                        None => {
+                            tracing::error!("Failed to parse handshake from {:?} ", remote_addr,);
                             return;
                         }
                     };
