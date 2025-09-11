@@ -84,12 +84,10 @@ impl Default for PeerState {
 pub trait State: Debug {}
 
 #[derive(Debug)]
-// TODO: rename as NewOutgoing
 pub struct New {}
 impl State for New {}
 
 #[derive(Debug)]
-// TODO: rename as OutgoingHandshake
 pub struct Handshaking {
     stream: TcpStream,
 }
@@ -106,11 +104,6 @@ pub struct Connected {
 
     last_recv_msg: Instant,
     supports_extended: bool,
-    // Track of pieces we requested and we are awaiting
-    // outbound_requests:
-    // track of pieces peer requested
-    // inbound_requests
-    // inflight_blocks:
 }
 
 impl Connected {

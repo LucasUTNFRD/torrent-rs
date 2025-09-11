@@ -598,8 +598,6 @@ impl Encode for Info {
     }
 }
 
-// TODO: Move the BencodeExt from torrent file
-
 // Helper functions for extracting values from bencode dictionaries
 fn get_string_from_dict(
     dict: &std::collections::BTreeMap<Vec<u8>, Bencode>,
