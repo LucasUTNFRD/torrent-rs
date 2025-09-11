@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use bittorrent_common::{
     metainfo::TorrentInfo,
@@ -6,10 +6,10 @@ use bittorrent_common::{
 };
 use thiserror::Error;
 use tokio::{
+    net::TcpStream,
     sync::mpsc::{self, UnboundedSender},
     task::JoinHandle,
-    time::{Instant, interval, sleep},
-    // time::{Instant, interval_at},
+    time::{Instant, interval, sleep}, // time::{Instant, interval_at},
 };
 use tracing::instrument;
 use tracker_client::{ClientState, Events, TrackerError, TrackerHandler};
@@ -23,8 +23,31 @@ pub struct TorrentSession {
     tx: UnboundedSender<TorrentMessage>,
 }
 
-enum TorrentMessage {
+pub enum TorrentMessage {
     Shutdown,
+    AddPeer(Peer),
+}
+
+pub enum Peer {
+    Inbound {
+        stream: TcpStream,
+        remote_addr: SocketAddr,
+        supports_ext: bool,
+    },
+    Outbound(SocketAddr, PeerID), // Socket to connect + Our peer id
+}
+
+impl Peer {
+    pub fn get_addr(&self) -> SocketAddr {
+        match self {
+            Self::Inbound {
+                stream: _,
+                remote_addr,
+                supports_ext: _,
+            } => *remote_addr,
+            Self::Outbound(remote_addr, _) => *remote_addr,
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -110,6 +133,12 @@ impl TorrentSession {
     pub fn shutdown(&self) {
         let _ = self.tx.send(TorrentMessage::Shutdown);
     }
+
+    pub fn add_peer(&self, peer: Peer) {
+        // let _ = self
+        //     .tx
+        //     .send(TorrentMessage::AddPeer(remote_addr, client_id));
+    }
 }
 
 #[instrument(
@@ -163,6 +192,9 @@ async fn start_torrent_session(
                 match maybe_msg{
                     Some(TorrentMessage::Shutdown) => {
                         peer_manager.shutdown();
+                    }
+                    Some(TorrentMessage::AddPeer(peer)) => {
+                        peer_manager.add_peer(peer);
                     }
                     _ => break,
                 }
@@ -256,7 +288,7 @@ async fn run_announce_loop(
                 retry_count = 0;
                 first_announce = false;
                 for addr in response.peers {
-                    peer_manager.add_peer(addr, client_id);
+                    peer_manager.add_peer(Peer::Outbound(addr, client_id));
                 }
                 interval_duration = Duration::from_secs(response.interval as u64);
             }

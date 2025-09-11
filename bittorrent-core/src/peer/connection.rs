@@ -89,10 +89,12 @@ impl Default for PeerState {
 pub trait State: Debug {}
 
 #[derive(Debug)]
+// TODO: rename as NewOutgoing
 pub struct New {}
 impl State for New {}
 
 #[derive(Debug)]
+// TODO: rename as OutgoingHandshake
 pub struct Handshaking {
     stream: TcpStream,
 }
@@ -227,7 +229,23 @@ impl Peer<Handshaking> {
 }
 
 impl Peer<Connected> {
+    pub fn from_incoming(
+        stream: TcpStream,
+        supports_extended: bool,
+        peer_info: PeerInfo,
+        manager_tx: mpsc::Sender<PeerEvent>,
+        cmd_rx: mpsc::Receiver<PeerCommand>,
+    ) -> Self {
+        Self {
+            state: Connected::new(stream, supports_extended),
+            peer_info,
+            manager_tx,
+            cmd_rx,
+        }
+    }
+
     const CONNECTION_TIMEOUT: Duration = Duration::from_secs(120); // 2 minutes
+
     #[instrument(
     name = "peer",
     skip_all,
@@ -537,7 +555,7 @@ impl Peer<Connected> {
     }
 }
 
-pub fn spawn_peer(
+pub fn spawn_outgoing_peer(
     info: PeerInfo,
     manager_tx: mpsc::Sender<PeerEvent>,
 ) -> mpsc::Sender<PeerCommand> {
@@ -553,6 +571,35 @@ pub fn spawn_peer(
             // Handshake remote peer
             let p2 = p1.handshake().await?;
             p2.run().await
+        }
+        .await;
+
+        if let Err(err) = result {
+            tracing::warn!(?err, "peer task exited with error");
+            let _ = manager_tx
+                .send(PeerEvent::PeerError(info.remote_pid, err))
+                .await;
+        }
+    });
+
+    cmd_tx
+}
+
+pub fn spawn_incoming_peer(
+    info: PeerInfo,
+    manager_tx: mpsc::Sender<PeerEvent>,
+    stream: TcpStream,
+    supports_extended: bool,
+) -> mpsc::Sender<PeerCommand> {
+    let (cmd_tx, cmd_rx) = mpsc::channel(64);
+
+    tokio::spawn(async move {
+        // attach context to all logs from this task
+
+        let result = async {
+            let peer_conn =
+                Peer::from_incoming(stream, supports_extended, info, manager_tx.clone(), cmd_rx);
+            peer_conn.run().await
         }
         .await;
 

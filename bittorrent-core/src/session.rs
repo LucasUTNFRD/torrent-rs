@@ -1,14 +1,18 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, RwLock},
 };
 
 use bittorrent_common::{
     metainfo::parse_torrent_from_file,
     types::{InfoHash, PeerID},
 };
+use bytes::BytesMut;
+use peer_protocol::protocol::Handshake;
 use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpListener,
     sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
     task::JoinHandle,
 };
@@ -16,7 +20,7 @@ use tracker_client::TrackerHandler;
 
 use crate::{
     storage::Storage,
-    torrent::{TorrentSession, TorrentStats},
+    torrent::{self, TorrentSession, TorrentStats},
 };
 
 pub struct Session {
@@ -42,7 +46,6 @@ impl Session {
             handle,
             stats_receiver: statx_rx,
         }
-        // Self { port, save_path }
     }
 
     pub fn add_torrent(&self, dir: impl AsRef<Path>) {
@@ -56,12 +59,11 @@ impl Session {
     }
 }
 
-#[allow(dead_code)]
 struct SessionManager {
     port: u16,
     save_path: PathBuf,
     rx: mpsc::UnboundedReceiver<SessionCommand>,
-    torrents: HashMap<InfoHash, TorrentSession>,
+    torrents: Arc<RwLock<HashMap<InfoHash, TorrentSession>>>,
     stats_tx: mpsc::UnboundedSender<TorrentStats>,
 }
 
@@ -76,15 +78,72 @@ impl SessionManager {
             port,
             save_path,
             rx,
-            torrents: HashMap::new(),
+            torrents: Arc::new(RwLock::new(HashMap::new())),
             stats_tx,
         }
     }
 
+    /// Main entry point
     pub async fn start(mut self) {
         let client_id = PeerID::generate();
         let tracker = Arc::new(TrackerHandler::new(client_id));
         let storage = Arc::new(Storage::new());
+
+        let port = self.port;
+
+        let torrent = self.torrents.clone();
+        tokio::spawn(async move {
+            let listener = TcpListener::bind(format!("127.0.0.1:{port}"))
+                .await
+                .expect("failed to bind tcp listener");
+
+            let torrent = torrent.clone();
+
+            while let Ok((mut stream, remote_addr)) = listener.accept().await {
+                tracing::info!("accepted connection from {:?}", remote_addr);
+                let torrent = torrent.clone();
+                tokio::spawn(async move {
+                    let mut buf = BytesMut::zeroed(Handshake::HANDSHAKE_LEN);
+
+                    stream.read_exact(&mut buf).await.unwrap();
+
+                    let remote_handshake = Handshake::from_bytes(&buf).unwrap();
+
+                    let have_torrent = {
+                        torrent
+                            .read()
+                            .unwrap()
+                            .contains_key(&remote_handshake.info_hash)
+                    };
+
+                    if !have_torrent {
+                        return;
+                    }
+
+                    let handshake = Handshake::new(client_id, remote_handshake.info_hash);
+                    stream.write_all(&handshake.to_bytes()).await.unwrap();
+
+                    let supports_ext = remote_handshake.support_extended_message();
+
+                    tracing::info!(
+                        "add connection from {:?} for info_hash :{:?}",
+                        remote_addr,
+                        remote_handshake.info_hash
+                    );
+
+                    torrent
+                        .read()
+                        .unwrap()
+                        .get(&remote_handshake.info_hash)
+                        .unwrap()
+                        .add_peer(torrent::Peer::Inbound {
+                            stream,
+                            remote_addr,
+                            supports_ext,
+                        });
+                });
+            }
+        });
 
         while let Some(cmd) = self.rx.recv().await {
             match cmd {
@@ -108,10 +167,12 @@ impl SessionManager {
                         self.stats_tx.clone(),
                     );
 
-                    self.torrents.insert(info_hash, torrent_session);
+                    let mut torrent_guard = self.torrents.write().unwrap();
+                    torrent_guard.insert(info_hash, torrent_session);
                 }
                 SessionCommand::Shutdown => {
-                    for (info, torrent_session) in self.torrents.iter() {
+                    let torrent_guard = self.torrents.read().unwrap();
+                    for (info, torrent_session) in torrent_guard.iter() {
                         tracing::debug!(%info,"Shutdown ");
                         torrent_session.shutdown();
                     }
@@ -119,4 +180,21 @@ impl SessionManager {
             }
         }
     }
+}
+
+mod incoming_peer {
+    use tokio::net::TcpStream;
+
+    use crate::peer::connection::State;
+
+    #[derive(Debug)]
+
+    pub struct NewIncoming {}
+    impl State for NewIncoming {}
+
+    #[derive(Debug)]
+    pub struct IncomingHandshake {
+        stream: TcpStream,
+    }
+    impl State for IncomingHandshake {}
 }
