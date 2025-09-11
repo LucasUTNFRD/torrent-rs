@@ -259,8 +259,7 @@ impl PeerManager {
                 supports_ext,
             } => {
                 // TODO: Use once_cell for static peer id
-                let peer_info =
-                    PeerInfo::new(PeerID::generate(), id, self.torrent.info_hash, remote_addr);
+                let peer_info = PeerInfo::new(id, self.torrent.info_hash, remote_addr);
                 spawn_incoming_peer(peer_info, self.peer_event_tx.clone(), stream, supports_ext)
             }
             PeerType::Outbound(remote_addr) => {
