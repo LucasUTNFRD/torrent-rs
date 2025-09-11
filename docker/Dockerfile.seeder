@@ -1,0 +1,8 @@
+FROM alpine:3.20
+RUN apk add --no-cache transmission-cli netcat-openbsd
+RUN adduser -D seeder
+USER seeder
+VOLUME ["/data"]
+WORKDIR /data
+CMD ["transmission-cli", "-w", "/data", "test.torrent"]
+

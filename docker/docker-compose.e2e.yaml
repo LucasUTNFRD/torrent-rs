@@ -7,21 +7,43 @@ services:
       - "8000:8000"
     networks:
       - torrent-net
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8000"]
+      interval: 5s
+      timeout: 2s
+      retries: 5
+
+  # transmission-seeder:
+  #   image: alpine:latest
+  #   volumes:
+  #     - ./seeder_data:/data
+  #     - ./scripts/start_transmission_seeding.sh:/start_transmission_seeding.sh:ro
+  #   ports:
+  #     - "51413:51413" # BitTorrent port
+  #   networks:
+  #     - torrent-net
+  #   depends_on:
+  #     - tracker
+  #   command: ["sh", "/start_transmission_seeding.sh"]
+  #   tty: true
+  #   stdin_open: true
 
   transmission-seeder:
-    image: alpine:latest
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.seeder
     volumes:
       - ./seeder_data:/data
-      - ./scripts/start_transmission_seeding.sh:/start_transmission_seeding.sh:ro
-    ports:
-      - "51413:51413" # BitTorrent port
     networks:
       - torrent-net
     depends_on:
-      - tracker
-    command: ["sh", "/start_transmission_seeding.sh"]
-    tty: true
-    stdin_open: true
+      tracker:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "pgrep", "transmission-cli"]
+      interval: 5s
+      timeout: 2s
+      retries: 5
 
   leecher:
     build:
@@ -35,8 +57,10 @@ services:
     networks:
       - torrent-net
     depends_on:
-      - tracker
-      - transmission-seeder
+      tracker:
+        condition: service_healthy
+      transmission-seeder:
+        condition: service_healthy
     command: ["--log-level=info", "/torrents/test.torrent"]
 
 networks:
