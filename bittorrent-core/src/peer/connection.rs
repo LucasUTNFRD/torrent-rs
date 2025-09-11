@@ -19,6 +19,8 @@ use tokio::{
 use tokio_util::codec::Framed;
 use tracing::instrument;
 
+use crate::session::CLIENT_ID;
+
 use super::{
     error::PeerError,
     manager::{Id, PeerCommand, PeerEvent},
@@ -26,7 +28,6 @@ use super::{
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub struct PeerInfo {
-    local_pid: PeerID,
     remote_pid: Id,
     info_hash: InfoHash,
     addr: SocketAddr,
@@ -37,9 +38,8 @@ pub struct PeerInfo {
 // When loggin peer show {ClientID}::{SocketAddr} Message::Type
 
 impl PeerInfo {
-    pub fn new(local_pid: PeerID, remote_pid: Id, info_hash: InfoHash, addr: SocketAddr) -> Self {
+    pub fn new(remote_pid: Id, info_hash: InfoHash, addr: SocketAddr) -> Self {
         Self {
-            local_pid,
             info_hash,
             addr,
             remote_pid,
@@ -49,11 +49,6 @@ impl PeerInfo {
     /// Retrieve the peer address.
     pub fn addr(&self) -> &SocketAddr {
         &self.addr
-    }
-
-    /// Retrieve the peer id.
-    pub fn local_peer_id(&self) -> &PeerID {
-        &self.local_pid
     }
 
     /// Retrieve the peer info hash.
@@ -182,8 +177,7 @@ impl Peer<Handshaking> {
             self.peer_info.addr()
         );
 
-        let handshake =
-            Handshake::new(*self.peer_info.local_peer_id(), *self.peer_info.info_hash());
+        let handshake = Handshake::new(*CLIENT_ID, *self.peer_info.info_hash());
 
         tracing::debug!("Sending handshake message to peer");
         self.state

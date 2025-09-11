@@ -263,9 +263,8 @@ impl PeerManager {
                     PeerInfo::new(PeerID::generate(), id, self.torrent.info_hash, remote_addr);
                 spawn_incoming_peer(peer_info, self.peer_event_tx.clone(), stream, supports_ext)
             }
-            PeerType::Outbound(remote_addr, our_client_id) => {
-                let peer_info =
-                    PeerInfo::new(our_client_id, id, self.torrent.info_hash, remote_addr);
+            PeerType::Outbound(remote_addr) => {
+                let peer_info = PeerInfo::new(id, self.torrent.info_hash, remote_addr);
                 spawn_outgoing_peer(peer_info, self.peer_event_tx.clone())
             }
         };

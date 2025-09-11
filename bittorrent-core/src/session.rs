@@ -9,6 +9,7 @@ use bittorrent_common::{
     types::{InfoHash, PeerID},
 };
 use bytes::BytesMut;
+use once_cell::sync::Lazy;
 use peer_protocol::protocol::Handshake;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -17,6 +18,8 @@ use tokio::{
     task::JoinHandle,
 };
 use tracker_client::TrackerHandler;
+
+pub static CLIENT_ID: Lazy<PeerID> = Lazy::new(|| PeerID::generate());
 
 use crate::{
     storage::Storage,
@@ -85,8 +88,7 @@ impl SessionManager {
 
     /// Main entry point
     pub async fn start(mut self) {
-        let client_id = PeerID::generate();
-        let tracker = Arc::new(TrackerHandler::new(client_id));
+        let tracker = Arc::new(TrackerHandler::new(*CLIENT_ID));
         let storage = Arc::new(Storage::new());
 
         let port = self.port;
@@ -120,7 +122,7 @@ impl SessionManager {
                         return;
                     }
 
-                    let handshake = Handshake::new(client_id, remote_handshake.info_hash);
+                    let handshake = Handshake::new(*CLIENT_ID, remote_handshake.info_hash);
                     stream.write_all(&handshake.to_bytes()).await.unwrap();
 
                     let supports_ext = remote_handshake.support_extended_message();
@@ -162,7 +164,6 @@ impl SessionManager {
                     let torrent_session = TorrentSession::new(
                         metainfo,
                         tracker.clone(),
-                        client_id,
                         storage.clone(),
                         self.stats_tx.clone(),
                     );

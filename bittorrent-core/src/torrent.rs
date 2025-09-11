@@ -14,7 +14,7 @@ use tokio::{
 use tracing::instrument;
 use tracker_client::{ClientState, Events, TrackerError, TrackerHandler};
 
-use crate::{peer::manager::PeerManagerHandle, storage::Storage};
+use crate::{peer::manager::PeerManagerHandle, session::CLIENT_ID, storage::Storage};
 
 // Torrent Leeching abstraction
 #[allow(dead_code)]
@@ -34,7 +34,7 @@ pub enum Peer {
         remote_addr: SocketAddr,
         supports_ext: bool,
     },
-    Outbound(SocketAddr, PeerID), // Socket to connect + Our peer id
+    Outbound(SocketAddr), // Socket to connect + Our peer id
 }
 
 impl Peer {
@@ -45,7 +45,7 @@ impl Peer {
                 remote_addr,
                 supports_ext: _,
             } => *remote_addr,
-            Self::Outbound(remote_addr, _) => *remote_addr,
+            Self::Outbound(remote_addr) => *remote_addr,
         }
     }
 }
@@ -117,14 +117,13 @@ impl TorrentSession {
     pub fn new(
         metainfo: TorrentInfo,
         tracker: Arc<TrackerHandler>,
-        client_id: PeerID,
         storage: Arc<Storage>,
         stats_tx: mpsc::UnboundedSender<TorrentStats>,
     ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
 
         let handle = tokio::task::spawn(async move {
-            start_torrent_session(metainfo, tracker, client_id, storage, rx, stats_tx).await
+            start_torrent_session(metainfo, tracker, storage, rx, stats_tx).await
         });
 
         Self { handle, tx }
@@ -140,7 +139,7 @@ impl TorrentSession {
 }
 
 #[instrument(
-    skip(tracker, manager_rx,client_id,metainfo,storage,stats_tx),
+    skip(tracker, manager_rx,metainfo,storage,stats_tx),
     fields(
         torrent.info_hash = %metainfo.info_hash,
         torrent.info.name = %metainfo.info.mode.name(),
@@ -149,7 +148,6 @@ impl TorrentSession {
 async fn start_torrent_session(
     metainfo: TorrentInfo,
     tracker: Arc<TrackerHandler>,
-    client_id: PeerID,
     storage: Arc<Storage>,
     mut manager_rx: mpsc::UnboundedReceiver<TorrentMessage>,
     stats_tx: mpsc::UnboundedSender<TorrentStats>,
@@ -172,7 +170,7 @@ async fn start_torrent_session(
         let peer_manager = peer_manager.clone();
         let t = t.clone(); // clone each tracker entry if needed
         tokio::spawn(async move {
-            run_announce_loop(tracker, info_hash, t, peer_manager, client_id, torrent_size).await
+            run_announce_loop(tracker, info_hash, t, peer_manager, torrent_size).await
         });
     }
 
@@ -236,7 +234,6 @@ async fn run_announce_loop(
     info_hash: InfoHash,
     announce_url: String,
     peer_manager: Arc<PeerManagerHandle>,
-    client_id: PeerID,
     torrent_size: i64,
 ) {
     let mut first_announce = true;
@@ -286,7 +283,7 @@ async fn run_announce_loop(
                 retry_count = 0;
                 first_announce = false;
                 for addr in response.peers {
-                    peer_manager.add_peer(Peer::Outbound(addr, client_id));
+                    peer_manager.add_peer(Peer::Outbound(addr));
                 }
                 interval_duration = Duration::from_secs(response.interval as u64);
             }
