@@ -9,24 +9,19 @@ services:
       - torrent-net
 
   transmission-seeder:
-    image: linuxserver/transmission:latest
-    environment:
-      - PUID=1000
-      - PGID=1000
-      - TZ=UTC
-      - TRANSMISSION_WEB_HOME=/transmission-web-control/
+    image: alpine:latest
     volumes:
       - ./seeder_data:/data
-      - ./transmission_config:/config
       - ./scripts/start_transmission_seeding.sh:/start_transmission_seeding.sh:ro
     ports:
-      - "9091:9091" # Web UI
       - "51413:51413" # BitTorrent port
     networks:
       - torrent-net
     depends_on:
       - tracker
-    command : ["/start_transmission_seeding.sh"]
+    command: ["sh", "/start_transmission_seeding.sh"]
+    tty: true
+    stdin_open: true
 
   leecher:
     build:
@@ -42,7 +37,7 @@ services:
     depends_on:
       - tracker
       - transmission-seeder
-    command: ["--log-level=debug", "/torrents/test.torrent"]
+    command: ["--log-level=info", "/torrents/test.torrent"]
 
 networks:
   torrent-net:
