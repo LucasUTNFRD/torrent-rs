@@ -10,7 +10,7 @@ use std::{
 
 use super::piece_picker::{AvailabilityUpdate, Picker, PieceState};
 use bitfield::Bitfield;
-use bittorrent_common::{metainfo::TorrentInfo, types::PeerID};
+use bittorrent_common::metainfo::TorrentInfo;
 use bytes::Bytes;
 use peer_protocol::protocol::{Block, BlockInfo, Message};
 use piece_cache::PieceCache;
@@ -258,7 +258,6 @@ impl PeerManager {
                 remote_addr,
                 supports_ext,
             } => {
-                // TODO: Use once_cell for static peer id
                 let peer_info = PeerInfo::new(id, self.torrent.info_hash, remote_addr);
                 spawn_incoming_peer(peer_info, self.peer_event_tx.clone(), stream, supports_ext)
             }
