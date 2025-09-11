@@ -129,7 +129,10 @@ impl SessionManager {
                     }
 
                     let handshake = Handshake::new(*CLIENT_ID, remote_handshake.info_hash);
-                    stream.write_all(&handshake.to_bytes()).await.unwrap();
+                    if let Err(e) = stream.write_all(&handshake.to_bytes()).await {
+                        tracing::error!(error = ?e, "Failed to send handshake to {:?}", remote_addr);
+                        return;
+                    }
 
                     let supports_ext = remote_handshake.support_extended_message();
 
