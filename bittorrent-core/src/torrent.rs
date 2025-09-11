@@ -135,9 +135,7 @@ impl TorrentSession {
     }
 
     pub fn add_peer(&self, peer: Peer) {
-        // let _ = self
-        //     .tx
-        //     .send(TorrentMessage::AddPeer(remote_addr, client_id));
+        let _ = self.tx.send(TorrentMessage::AddPeer(peer));
     }
 }
 
