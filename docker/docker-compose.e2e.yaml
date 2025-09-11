@@ -13,21 +13,6 @@ services:
       timeout: 2s
       retries: 5
 
-  # transmission-seeder:
-  #   image: alpine:latest
-  #   volumes:
-  #     - ./seeder_data:/data
-  #     - ./scripts/start_transmission_seeding.sh:/start_transmission_seeding.sh:ro
-  #   ports:
-  #     - "51413:51413" # BitTorrent port
-  #   networks:
-  #     - torrent-net
-  #   depends_on:
-  #     - tracker
-  #   command: ["sh", "/start_transmission_seeding.sh"]
-  #   tty: true
-  #   stdin_open: true
-
   transmission-seeder:
     build:
       context: ..
