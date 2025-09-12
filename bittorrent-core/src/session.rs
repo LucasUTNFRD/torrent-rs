@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    net::SocketAddr,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
 };
@@ -19,7 +20,7 @@ use tokio::{
 };
 use tracker_client::TrackerHandler;
 
-pub static CLIENT_ID: Lazy<PeerID> = Lazy::new(|| PeerID::generate());
+pub static CLIENT_ID: Lazy<PeerID> = Lazy::new(PeerID::generate);
 
 use crate::{
     storage::Storage,
@@ -91,15 +92,54 @@ impl SessionManager {
         let tracker = Arc::new(TrackerHandler::new(*CLIENT_ID));
         let storage = Arc::new(Storage::new());
 
-        let port = self.port;
+        self.spawn_tcp_listener();
 
+        while let Some(cmd) = self.rx.recv().await {
+            match cmd {
+                SessionCommand::AddTorrent { directory } => {
+                    let metainfo = match parse_torrent_from_file(directory) {
+                        Ok(torrent) => torrent,
+                        Err(e) => {
+                            tracing::warn!(?e);
+                            return;
+                        }
+                    };
+
+                    tracing::info!(%metainfo);
+
+                    let info_hash = metainfo.info_hash;
+                    let torrent_session = TorrentSession::new(
+                        metainfo,
+                        tracker.clone(),
+                        storage.clone(),
+                        self.stats_tx.clone(),
+                    );
+
+                    let mut torrent_guard = self.torrents.write().unwrap();
+                    torrent_guard.insert(info_hash, torrent_session);
+                }
+                SessionCommand::Shutdown => {
+                    let torrent_guard = self.torrents.read().unwrap();
+                    for (info, torrent_session) in torrent_guard.iter() {
+                        tracing::debug!(%info,"Shutdown ");
+                        torrent_session.shutdown();
+                    }
+                }
+            }
+        }
+    }
+
+    // TODO: Gracefully stop tcp_listener
+    fn spawn_tcp_listener(&self) {
+        tracing::info!("started connection listener");
+        let port = self.port;
         let torrent = self.torrents.clone();
+
         tokio::spawn(async move {
-            let listener = TcpListener::bind(format!("127.0.0.1:{port}"))
+            let listener = TcpListener::bind(format!("0.0.0.0:{port}"))
                 .await
                 .expect("failed to bind tcp listener");
-
-            let torrent = torrent.clone();
+            tracing::info!("{:?}", listener.local_addr());
 
             while let Ok((mut stream, remote_addr)) = listener.accept().await {
                 tracing::info!("accepted connection from {:?}", remote_addr);
@@ -107,7 +147,10 @@ impl SessionManager {
                 tokio::spawn(async move {
                     let mut buf = BytesMut::zeroed(Handshake::HANDSHAKE_LEN);
 
-                    stream.read_exact(&mut buf).await.unwrap();
+                    if let Err(e) = stream.read_exact(&mut buf).await {
+                        tracing::error!(error = ?e,"Failed to read handshake from {:?} ", remote_addr,);
+                        return;
+                    }
 
                     let remote_handshake = match Handshake::from_bytes(&buf) {
                         Some(hs) => hs,
@@ -155,39 +198,5 @@ impl SessionManager {
                 });
             }
         });
-
-        while let Some(cmd) = self.rx.recv().await {
-            match cmd {
-                SessionCommand::AddTorrent { directory } => {
-                    let metainfo = match parse_torrent_from_file(directory) {
-                        Ok(torrent) => torrent,
-                        Err(e) => {
-                            tracing::warn!(?e);
-                            return;
-                        }
-                    };
-
-                    tracing::info!(%metainfo);
-
-                    let info_hash = metainfo.info_hash;
-                    let torrent_session = TorrentSession::new(
-                        metainfo,
-                        tracker.clone(),
-                        storage.clone(),
-                        self.stats_tx.clone(),
-                    );
-
-                    let mut torrent_guard = self.torrents.write().unwrap();
-                    torrent_guard.insert(info_hash, torrent_session);
-                }
-                SessionCommand::Shutdown => {
-                    let torrent_guard = self.torrents.read().unwrap();
-                    for (info, torrent_session) in torrent_guard.iter() {
-                        tracing::debug!(%info,"Shutdown ");
-                        torrent_session.shutdown();
-                    }
-                }
-            }
-        }
     }
 }
