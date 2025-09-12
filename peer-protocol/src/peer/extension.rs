@@ -4,8 +4,6 @@ use bencode::{Bencode, BencodeBuilder, BencodeDict, BencodeError, Encode};
 use bytes::Bytes;
 use thiserror::Error;
 
-// TODO: Implement ExtendedHandshake
-
 #[derive(Debug, Error)]
 pub enum ExtensionError {
     #[error("Bencode error: {0}")]

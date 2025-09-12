@@ -1,15 +1,12 @@
-use std::{sync::Arc, time::Duration};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
-use bittorrent_common::{
-    metainfo::TorrentInfo,
-    types::{InfoHash, PeerID},
-};
+use bittorrent_common::{metainfo::TorrentInfo, types::InfoHash};
 use thiserror::Error;
 use tokio::{
+    net::TcpStream,
     sync::mpsc::{self, UnboundedSender},
     task::JoinHandle,
-    time::{Instant, interval, sleep},
-    // time::{Instant, interval_at},
+    time::{Instant, interval, sleep}, // time::{Instant, interval_at},
 };
 use tracing::instrument;
 use tracker_client::{ClientState, Events, TrackerError, TrackerHandler};
@@ -23,8 +20,31 @@ pub struct TorrentSession {
     tx: UnboundedSender<TorrentMessage>,
 }
 
-enum TorrentMessage {
+pub enum TorrentMessage {
     Shutdown,
+    AddPeer(Peer),
+}
+
+pub enum Peer {
+    Inbound {
+        stream: TcpStream,
+        remote_addr: SocketAddr,
+        supports_ext: bool,
+    },
+    Outbound(SocketAddr), // Socket to connect + Our peer id
+}
+
+impl Peer {
+    pub fn get_addr(&self) -> SocketAddr {
+        match self {
+            Self::Inbound {
+                stream: _,
+                remote_addr,
+                supports_ext: _,
+            } => *remote_addr,
+            Self::Outbound(remote_addr) => *remote_addr,
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -94,14 +114,13 @@ impl TorrentSession {
     pub fn new(
         metainfo: TorrentInfo,
         tracker: Arc<TrackerHandler>,
-        client_id: PeerID,
         storage: Arc<Storage>,
         stats_tx: mpsc::UnboundedSender<TorrentStats>,
     ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
 
         let handle = tokio::task::spawn(async move {
-            start_torrent_session(metainfo, tracker, client_id, storage, rx, stats_tx).await
+            start_torrent_session(metainfo, tracker, storage, rx, stats_tx).await
         });
 
         Self { handle, tx }
@@ -110,10 +129,14 @@ impl TorrentSession {
     pub fn shutdown(&self) {
         let _ = self.tx.send(TorrentMessage::Shutdown);
     }
+
+    pub fn add_peer(&self, peer: Peer) {
+        let _ = self.tx.send(TorrentMessage::AddPeer(peer));
+    }
 }
 
 #[instrument(
-    skip(tracker, manager_rx,client_id,metainfo,storage,stats_tx),
+    skip(tracker, manager_rx,metainfo,storage,stats_tx),
     fields(
         torrent.info_hash = %metainfo.info_hash,
         torrent.info.name = %metainfo.info.mode.name(),
@@ -122,7 +145,6 @@ impl TorrentSession {
 async fn start_torrent_session(
     metainfo: TorrentInfo,
     tracker: Arc<TrackerHandler>,
-    client_id: PeerID,
     storage: Arc<Storage>,
     mut manager_rx: mpsc::UnboundedReceiver<TorrentMessage>,
     stats_tx: mpsc::UnboundedSender<TorrentStats>,
@@ -145,7 +167,7 @@ async fn start_torrent_session(
         let peer_manager = peer_manager.clone();
         let t = t.clone(); // clone each tracker entry if needed
         tokio::spawn(async move {
-            run_announce_loop(tracker, info_hash, t, peer_manager, client_id, torrent_size).await
+            run_announce_loop(tracker, info_hash, t, peer_manager, torrent_size).await
         });
     }
 
@@ -163,6 +185,9 @@ async fn start_torrent_session(
                 match maybe_msg{
                     Some(TorrentMessage::Shutdown) => {
                         peer_manager.shutdown();
+                    }
+                    Some(TorrentMessage::AddPeer(peer)) => {
+                        peer_manager.add_peer(peer);
                     }
                     _ => break,
                 }
@@ -206,7 +231,6 @@ async fn run_announce_loop(
     info_hash: InfoHash,
     announce_url: String,
     peer_manager: Arc<PeerManagerHandle>,
-    client_id: PeerID,
     torrent_size: i64,
 ) {
     let mut first_announce = true;
@@ -256,7 +280,7 @@ async fn run_announce_loop(
                 retry_count = 0;
                 first_announce = false;
                 for addr in response.peers {
-                    peer_manager.add_peer(addr, client_id);
+                    peer_manager.add_peer(Peer::Outbound(addr));
                 }
                 interval_duration = Duration::from_secs(response.interval as u64);
             }

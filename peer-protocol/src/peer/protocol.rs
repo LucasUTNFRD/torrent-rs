@@ -88,6 +88,7 @@ impl Handshake {
         bytes.freeze()
     }
 
+    // TODO: Refactor this to use Result<Self> which is more clear
     pub fn from_bytes(src: &[u8]) -> Option<Self> {
         if src.len() != Self::HANDSHAKE_LEN || src[0] != Self::PSTRLEN || &src[1..20] != Self::PSTR
         {

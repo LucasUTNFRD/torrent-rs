@@ -6,7 +6,7 @@ build:
 lint: 
 	cargo clippy --all-targets  --workspace -- -D warnings
 
-test: 
+test:  # run unit test
 	cargo test --workspace
 
 

@@ -10,7 +10,7 @@ use std::{
 
 use super::piece_picker::{AvailabilityUpdate, Picker, PieceState};
 use bitfield::Bitfield;
-use bittorrent_common::{metainfo::TorrentInfo, types::PeerID};
+use bittorrent_common::metainfo::TorrentInfo;
 use bytes::Bytes;
 use peer_protocol::protocol::{Block, BlockInfo, Message};
 use piece_cache::PieceCache;
@@ -21,20 +21,17 @@ use tokio::{
 
 use crate::{
     peer::{
-        connection::{PeerInfo, spawn_peer},
+        connection::{PeerInfo, spawn_incoming_peer, spawn_outgoing_peer},
         manager::choker::Choker,
     },
     storage::Storage,
+    torrent,
 };
 
 use super::error::PeerError;
 
 pub enum ManagerCommand {
-    AddPeer {
-        peer_addr: SocketAddr,
-        our_client_id: PeerID,
-    },
-    // RemovePeer(SocketAddr),
+    AddPeer(torrent::Peer),
     Shutdown,
     GetStats(StatSender),
 }
@@ -85,11 +82,8 @@ impl PeerManagerHandle {
         (Self { manager_tx }, completion_rx)
     }
 
-    pub fn add_peer(&self, addr: SocketAddr, client_id: PeerID) {
-        let _ = self.manager_tx.send(ManagerCommand::AddPeer {
-            peer_addr: addr,
-            our_client_id: client_id,
-        });
+    pub fn add_peer(&self, peer: torrent::Peer) {
+        let _ = self.manager_tx.send(ManagerCommand::AddPeer(peer));
     }
 
     pub fn shutdown(&self) {
@@ -248,20 +242,33 @@ impl PeerManager {
         }
     }
 
-    fn add_peer(&mut self, peer_addr: SocketAddr, our_client_id: PeerID) {
-        // TODO: Check that peer is not already connected
-        if self.connected_addrs.contains(&peer_addr) {
-            tracing::debug!(?peer_addr, "we are alreay connected to this peer");
+    fn add_peer(&mut self, peer: torrent::Peer) {
+        let addr = peer.get_addr();
+        if self.connected_addrs.contains(&addr) {
             return;
         }
-
-        self.connected_addrs.insert(peer_addr);
 
         let id = PEER_COUNTER.fetch_add(1, Ordering::Relaxed);
         let id = Id(id);
 
-        let peer_info = PeerInfo::new(our_client_id, id, self.torrent.info_hash, peer_addr);
-        let peer_tx = spawn_peer(peer_info, self.peer_event_tx.clone());
+        use torrent::Peer as PeerType;
+        let peer_tx = match peer {
+            PeerType::Inbound {
+                stream,
+                remote_addr,
+                supports_ext,
+            } => {
+                let peer_info = PeerInfo::new(id, self.torrent.info_hash, remote_addr);
+                spawn_incoming_peer(peer_info, self.peer_event_tx.clone(), stream, supports_ext)
+            }
+            PeerType::Outbound(remote_addr) => {
+                let peer_info = PeerInfo::new(id, self.torrent.info_hash, remote_addr);
+                spawn_outgoing_peer(peer_info, self.peer_event_tx.clone())
+            }
+        };
+
+        self.connected_addrs.insert(addr);
+
         self.peers.insert(
             id,
             PeerState {
@@ -270,7 +277,7 @@ impl PeerManager {
                 bitfield: Bitfield::new(self.torrent.num_pieces()),
                 am_interested: false,
                 assigned_piece_idx: None,
-                addr: peer_addr,
+                addr,
                 stats: PeerStats {
                     uploaded: 0,
                     downloaded: 0,
@@ -283,11 +290,8 @@ impl PeerManager {
     async fn handle_cmd(&mut self, cmd: ManagerCommand) {
         use ManagerCommand::*;
         match cmd {
-            AddPeer {
-                peer_addr,
-                our_client_id,
-            } => {
-                self.add_peer(peer_addr, our_client_id);
+            AddPeer(peer) => {
+                self.add_peer(peer);
             }
             Shutdown => {
                 for (_, peer_state) in self.peers.iter() {

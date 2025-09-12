@@ -1,4 +1,5 @@
-use bittorrent_common::types::{InfoHash, PeerID};
+use crate::session::CLIENT_ID;
+use bittorrent_common::types::InfoHash;
 use bytes::BytesMut;
 use futures::{
     SinkExt, StreamExt,
@@ -26,7 +27,6 @@ use super::{
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub struct PeerInfo {
-    local_pid: PeerID,
     remote_pid: Id,
     info_hash: InfoHash,
     addr: SocketAddr,
@@ -37,9 +37,8 @@ pub struct PeerInfo {
 // When loggin peer show {ClientID}::{SocketAddr} Message::Type
 
 impl PeerInfo {
-    pub fn new(local_pid: PeerID, remote_pid: Id, info_hash: InfoHash, addr: SocketAddr) -> Self {
+    pub fn new(remote_pid: Id, info_hash: InfoHash, addr: SocketAddr) -> Self {
         Self {
-            local_pid,
             info_hash,
             addr,
             remote_pid,
@@ -49,11 +48,6 @@ impl PeerInfo {
     /// Retrieve the peer address.
     pub fn addr(&self) -> &SocketAddr {
         &self.addr
-    }
-
-    /// Retrieve the peer id.
-    pub fn local_peer_id(&self) -> &PeerID {
-        &self.local_pid
     }
 
     /// Retrieve the peer info hash.
@@ -109,11 +103,6 @@ pub struct Connected {
 
     last_recv_msg: Instant,
     supports_extended: bool,
-    // Track of pieces we requested and we are awaiting
-    // outbound_requests:
-    // track of pieces peer requested
-    // inbound_requests
-    // inflight_blocks:
 }
 
 impl Connected {
@@ -180,8 +169,7 @@ impl Peer<Handshaking> {
             self.peer_info.addr()
         );
 
-        let handshake =
-            Handshake::new(*self.peer_info.local_peer_id(), *self.peer_info.info_hash());
+        let handshake = Handshake::new(*CLIENT_ID, *self.peer_info.info_hash());
 
         tracing::debug!("Sending handshake message to peer");
         self.state
@@ -227,7 +215,23 @@ impl Peer<Handshaking> {
 }
 
 impl Peer<Connected> {
+    pub fn from_incoming(
+        stream: TcpStream,
+        supports_extended: bool,
+        peer_info: PeerInfo,
+        manager_tx: mpsc::Sender<PeerEvent>,
+        cmd_rx: mpsc::Receiver<PeerCommand>,
+    ) -> Self {
+        Self {
+            state: Connected::new(stream, supports_extended),
+            peer_info,
+            manager_tx,
+            cmd_rx,
+        }
+    }
+
     const CONNECTION_TIMEOUT: Duration = Duration::from_secs(120); // 2 minutes
+
     #[instrument(
     name = "peer",
     skip_all,
@@ -537,7 +541,7 @@ impl Peer<Connected> {
     }
 }
 
-pub fn spawn_peer(
+pub fn spawn_outgoing_peer(
     info: PeerInfo,
     manager_tx: mpsc::Sender<PeerEvent>,
 ) -> mpsc::Sender<PeerCommand> {
@@ -553,6 +557,35 @@ pub fn spawn_peer(
             // Handshake remote peer
             let p2 = p1.handshake().await?;
             p2.run().await
+        }
+        .await;
+
+        if let Err(err) = result {
+            tracing::warn!(?err, "peer task exited with error");
+            let _ = manager_tx
+                .send(PeerEvent::PeerError(info.remote_pid, err))
+                .await;
+        }
+    });
+
+    cmd_tx
+}
+
+pub fn spawn_incoming_peer(
+    info: PeerInfo,
+    manager_tx: mpsc::Sender<PeerEvent>,
+    stream: TcpStream,
+    supports_extended: bool,
+) -> mpsc::Sender<PeerCommand> {
+    let (cmd_tx, cmd_rx) = mpsc::channel(64);
+
+    tokio::spawn(async move {
+        // attach context to all logs from this task
+
+        let result = async {
+            let peer_conn =
+                Peer::from_incoming(stream, supports_extended, info, manager_tx.clone(), cmd_rx);
+            peer_conn.run().await
         }
         .await;
 
