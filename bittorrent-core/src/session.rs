@@ -1,6 +1,5 @@
 use std::{
     collections::HashMap,
-    net::SocketAddr,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
 };

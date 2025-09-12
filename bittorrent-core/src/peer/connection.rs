@@ -1,4 +1,5 @@
-use bittorrent_common::types::{InfoHash, PeerID};
+use crate::session::CLIENT_ID;
+use bittorrent_common::types::InfoHash;
 use bytes::BytesMut;
 use futures::{
     SinkExt, StreamExt,
@@ -18,8 +19,6 @@ use tokio::{
 };
 use tokio_util::codec::Framed;
 use tracing::instrument;
-
-use crate::session::CLIENT_ID;
 
 use super::{
     error::PeerError,

@@ -1,9 +1,6 @@
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
-use bittorrent_common::{
-    metainfo::TorrentInfo,
-    types::{InfoHash, PeerID},
-};
+use bittorrent_common::{metainfo::TorrentInfo, types::InfoHash};
 use thiserror::Error;
 use tokio::{
     net::TcpStream,
@@ -14,7 +11,7 @@ use tokio::{
 use tracing::instrument;
 use tracker_client::{ClientState, Events, TrackerError, TrackerHandler};
 
-use crate::{peer::manager::PeerManagerHandle, session::CLIENT_ID, storage::Storage};
+use crate::{peer::manager::PeerManagerHandle, storage::Storage};
 
 // Torrent Leeching abstraction
 #[allow(dead_code)]
