@@ -348,7 +348,7 @@ impl Magnet {
     ///
     /// let uri = "magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10";
     /// let magnet = Magnet::from_str(uri).unwrap();
-    /// let infohash = magnet.infohash().unwrap();
+    /// let infohash = magnet.info_hash().unwrap();
     /// ```
     pub fn info_hash(&self) -> Option<InfoHash> {
         match self.hash_type {
