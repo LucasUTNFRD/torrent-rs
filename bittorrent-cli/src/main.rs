@@ -25,6 +25,11 @@ struct Args {
     log_level: LogLevel,
 }
 
+// enum Torrent {
+//     MetainfoFile(PathBuf),
+//     Magnet(MagnetUri),
+// }
+
 #[derive(Copy, Clone, Debug, clap::ValueEnum)]
 enum LogLevel {
     Error,
@@ -144,7 +149,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_target(false)
         .with_thread_ids(false)
         .with_file(false)
-        .with_line_number(false)
+        .with_line_number(true)
         .init();
 
     if !args.torrent_file.exists() {

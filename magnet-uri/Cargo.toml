@@ -1,0 +1,13 @@
+[package]
+name = "magnet-uri"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bittorrent-common = { path = "../bittorrent-common/" }
+url = "2.5.4"
+thiserror.workspace = true
+
+[dev-dependencies]
+base32 = "0.5.1"
+hex = "0.4.3"

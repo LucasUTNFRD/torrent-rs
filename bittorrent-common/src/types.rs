@@ -43,6 +43,12 @@ impl InfoHash {
         let bytes = hex::decode(hex_str)?;
         Self::from_slice(&bytes).ok_or(hex::FromHexError::InvalidStringLength)
     }
+
+    /// Create from Base32 string (RFC 4648, standard alphabet, no padding)
+    pub fn from_base32(base32_str: &str) -> Option<Self> {
+        let bytes = base32::decode(base32::Alphabet::Rfc4648 { padding: false }, base32_str)?;
+        Self::from_slice(&bytes)
+    }
 }
 
 impl PeerID {
