@@ -2,11 +2,16 @@
 name = "magnet-uri"
 version = "0.1.0"
 edition = "2024"
+description = "A library for parsing and working with BitTorrent Magnet URIs"
 
 [dependencies]
 bittorrent-common = { path = "../bittorrent-common/" }
 url = "2.5.4"
 thiserror.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [dev-dependencies]
 base32 = "0.5.1"
