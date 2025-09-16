@@ -2,7 +2,7 @@
 members = [
   "bencode", "bittorrent-cli",
   "bittorrent-common",
-  "bittorrent-core",
+  "bittorrent-core", "magnet-uri",
   "peer-protocol",
   "tracker-client",
 ]
