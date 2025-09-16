@@ -32,10 +32,6 @@ pub struct PeerInfo {
     addr: SocketAddr,
 }
 
-// TODO:
-// write a flag for running with message level
-// When loggin peer show {ClientID}::{SocketAddr} Message::Type
-
 impl PeerInfo {
     pub fn new(remote_pid: Id, info_hash: InfoHash, addr: SocketAddr) -> Self {
         Self {
@@ -97,13 +93,18 @@ pub struct Connected {
     sink: SplitSink<Framed<TcpStream, MessageCodec>, Message>,
     stream: SplitStream<Framed<TcpStream, MessageCodec>>,
     peer_state: PeerState,
+
     download_queue: Option<Vec<BlockInfo>>,
     outbound_requests: HashSet<BlockInfo>,
     incoming_request: HashSet<BlockInfo>,
 
     last_recv_msg: Instant,
     supports_extended: bool,
+
+    max_reqq_size: usize,
 }
+
+const DEFAULT_REQQ_SIZE: usize = 250; // The default in in libtorrent is 250.
 
 impl Connected {
     pub fn new(stream: TcpStream, supports_extended: bool) -> Self {
@@ -118,6 +119,7 @@ impl Connected {
             incoming_request: HashSet::new(),
             last_recv_msg: Instant::now(),
             supports_extended,
+            max_reqq_size: DEFAULT_REQQ_SIZE,
         }
     }
 }
@@ -367,11 +369,9 @@ impl Peer<Connected> {
         Ok(())
     }
 
-    // TODO Dynamically adjust pipeline by upload rate of peer
-    const MAX_PIPELINE: usize = 10;
     async fn request_blocks(&mut self) -> Result<(), PeerError> {
         // Only request up to the pipeline limit
-        while self.state.outbound_requests.len() < Self::MAX_PIPELINE {
+        while self.state.outbound_requests.len() < self.state.max_reqq_size {
             if let Some(block) = self.pop_block() {
                 self.state.outbound_requests.insert(block);
 
@@ -536,6 +536,10 @@ impl Peer<Connected> {
             }
             Extended(ExtendedMessage::Handshake(ext_handshake)) => {
                 tracing::info!(?ext_handshake);
+
+                if let Some(reqq) = ext_handshake.reqq {
+                    self.state.max_reqq_size = (reqq as usize).max(self.state.max_reqq_size);
+                }
             }
         }
     }
