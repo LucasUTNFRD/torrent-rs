@@ -174,7 +174,6 @@ pub enum MagnetError {
 const HEX_ENCODED_LEN: usize = 40;
 const BASE32_ENCODED_LEN: usize = 32;
 
-
 impl Magnet {
     /// Creates a new `Magnet` with the specified infohash.
     ///
@@ -414,9 +413,7 @@ impl Magnet {
 
 #[cfg(test)]
 mod test {
-    use std::{
-        net::{Ipv4Addr, SocketAddr},
-    };
+    use std::net::{Ipv4Addr, SocketAddr};
 
     use bittorrent_common::types::InfoHash;
     use url::Url;
