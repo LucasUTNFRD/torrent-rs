@@ -110,6 +110,9 @@ impl StatsTracker {
     }
 }
 
+// session could be started from a magnet link
+// maybe use option (?)
+
 impl TorrentSession {
     pub fn new(
         metainfo: TorrentInfo,

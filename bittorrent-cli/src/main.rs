@@ -9,8 +9,8 @@ use tracing::info;
 #[command(about = "A BitTorrent client for leeching torrents")]
 #[command(long_about = "First iteration of the BitTorrent client CLI")]
 struct Args {
-    /// Path to the torrent file
-    torrent_file: PathBuf,
+    /// Path to the torrent file or magnet URI
+    torrent: String,
 
     /// Listening port for incoming peer connections
     #[arg(short, long, default_value_t = 6881)]
@@ -24,11 +24,6 @@ struct Args {
     #[arg(long, value_enum, default_value_t = LogLevel::Info)]
     log_level: LogLevel,
 }
-
-// enum Torrent {
-//     MetainfoFile(PathBuf),
-//     Magnet(MagnetUri),
-// }
 
 #[derive(Copy, Clone, Debug, clap::ValueEnum)]
 enum LogLevel {
@@ -152,20 +147,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_line_number(true)
         .init();
 
-    if !args.torrent_file.exists() {
-        eprintln!(
-            "Error: Torrent file does not exist: {}",
-            args.torrent_file.display()
-        );
-        eprintln!("Please check the path and try again.");
-        std::process::exit(1);
-    }
+    let is_magnet = args.torrent.starts_with("magnet:");
 
-    if let Some(ext) = args.torrent_file.extension()
-        && ext != "torrent"
-    {
-        eprintln!("Error: File doesn't have .torrent extension");
-        std::process::exit(1);
+    if !is_magnet {
+        // Validate torrent file
+        let torrent_path = PathBuf::from(&args.torrent);
+        if !torrent_path.exists() {
+            eprintln!(
+                "Error: Torrent file does not exist: {}",
+                torrent_path.display()
+            );
+            eprintln!("Please check the path and try again.");
+            std::process::exit(1);
+        }
+
+        if let Some(ext) = torrent_path.extension()
+            && ext != "torrent"
+        {
+            eprintln!("Error: File doesn't have .torrent extension");
+            std::process::exit(1);
+        }
     }
 
     // Default to $HOME/Downloads/Torrents/
@@ -185,15 +186,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
-    info!("Torrent file: {}", args.torrent_file.display());
+    info!("Torrent: {}", args.torrent);
     info!("Save directory: {}", save_dir.display());
     info!("Listening on port: {}", args.port);
 
     // Create session
     let mut session = Session::new(args.port, save_dir);
 
-    // Add the torrent
-    session.add_torrent(&args.torrent_file);
+    // Add the torrent or magnet
+    if is_magnet {
+        if let Err(e) = session.add_magnet(&args.torrent) {
+            eprintln!("Error adding magnet URI: {}", e);
+            std::process::exit(1);
+        }
+    } else {
+        if let Err(e) = session.add_torrent(&args.torrent) {
+            eprintln!("Error adding torrent file: {}", e);
+            std::process::exit(1);
+        }
+    }
 
     println!("Starting download...");
     println!("Press Ctrl+C to stop");

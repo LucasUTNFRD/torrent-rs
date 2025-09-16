@@ -5,10 +5,11 @@ use std::{
 };
 
 use bittorrent_common::{
-    metainfo::parse_torrent_from_file,
+    metainfo::{TorrentInfo, TorrentParseError, parse_torrent_from_file},
     types::{InfoHash, PeerID},
 };
 use bytes::BytesMut;
+use magnet_uri::{HashType, Magnet, MagnetError};
 use once_cell::sync::Lazy;
 use peer_protocol::protocol::Handshake;
 use tokio::{
@@ -33,8 +34,18 @@ pub struct Session {
 }
 
 pub enum SessionCommand {
-    AddTorrent { directory: PathBuf },
+    AddTorrent(TorrentInfo),
+    AddMagnet(Magnet),
     Shutdown,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SessionError {
+    #[error("Magnet URI error: {0}")]
+    Magnet(MagnetError),
+
+    #[error("Torrent parsing error: {0}")]
+    TorrentParse(#[from] TorrentParseError),
 }
 
 impl Session {
@@ -51,10 +62,16 @@ impl Session {
         }
     }
 
-    pub fn add_torrent(&self, dir: impl AsRef<Path>) {
-        let _ = self.tx.send(SessionCommand::AddTorrent {
-            directory: dir.as_ref().to_path_buf(),
-        });
+    pub fn add_torrent(&self, dir: impl AsRef<Path>) -> Result<(), SessionError> {
+        let metainfo = parse_torrent_from_file(dir.as_ref())?;
+        let _ = self.tx.send(SessionCommand::AddTorrent(metainfo));
+        Ok(())
+    }
+
+    pub fn add_magnet(&self, uri: impl AsRef<str>) -> Result<(), SessionError> {
+        let magnet = Magnet::parse(uri).map_err(SessionError::Magnet)?;
+        let _ = self.tx.send(SessionCommand::AddMagnet(magnet));
+        Ok(())
     }
 
     pub fn shutdown(&self) {
@@ -95,15 +112,7 @@ impl SessionManager {
 
         while let Some(cmd) = self.rx.recv().await {
             match cmd {
-                SessionCommand::AddTorrent { directory } => {
-                    let metainfo = match parse_torrent_from_file(directory) {
-                        Ok(torrent) => torrent,
-                        Err(e) => {
-                            tracing::warn!(?e);
-                            return;
-                        }
-                    };
-
+                SessionCommand::AddTorrent(metainfo) => {
                     tracing::info!(%metainfo);
 
                     let info_hash = metainfo.info_hash;
@@ -116,6 +125,32 @@ impl SessionManager {
 
                     let mut torrent_guard = self.torrents.write().unwrap();
                     torrent_guard.insert(info_hash, torrent_session);
+                }
+                SessionCommand::AddMagnet(magnet) => {
+                    let info_hash = match magnet.info_hash() {
+                        Some(ih) => ih,
+                        None => {
+                            tracing::error!("Magnet URI does not contain a valid info hash");
+                            continue;
+                        }
+                    };
+
+                    println!("{magnet}");
+                    println!("Info Hash: {info_hash}");
+                    if let Some(name) = &magnet.display_name {
+                        println!("Display Name: {name}");
+                    }
+                    println!("Trackers: {:?}", magnet.trackers);
+                    println!("Peers: {:?}", magnet.peers);
+
+                    // let torrent_session = TorrentSession::new(
+                    //     metainfo,
+                    //     tracker.clone(),
+                    //     storage.clone(),
+                    //     self.stats_tx.clone(),
+                    // );
+
+                    todo!("Add magnet support")
                 }
                 SessionCommand::Shutdown => {
                     let torrent_guard = self.torrents.read().unwrap();
