@@ -23,12 +23,11 @@
 //! ## Examples
 //!
 //! ```
-//! use std::str::FromStr;
 //! use magnet_uri::Magnet;
 //!
 //! // Parse a magnet URI
 //! let uri = "magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10&dn=Example";
-//! let magnet = Magnet::from_str(uri).expect("Failed to parse magnet URI");
+//! let magnet = Magnet::parse(uri).expect("Failed to parse magnet URI");
 //!
 //! println!("Display name: {}", magnet.display_name.unwrap_or_default());
 //! println!("Number of trackers: {}", magnet.trackers.len());
@@ -99,7 +98,7 @@ impl FromStr for PeerAddr {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Magnet {
     /// The hash type contained in the magnet URI
-    pub hash_type: HashType,
+    pub info_hash: HashType,
 
     /// Optional display name of the torrent
     pub display_name: Option<String>,
@@ -175,8 +174,27 @@ pub enum MagnetError {
 const HEX_ENCODED_LEN: usize = 40;
 const BASE32_ENCODED_LEN: usize = 32;
 
-impl FromStr for Magnet {
-    type Err = MagnetError;
+
+impl Magnet {
+    /// Creates a new `Magnet` with the specified infohash.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bittorrent_common::types::InfoHash;
+    /// use magnet_uri::{Magnet, HashType};
+    ///
+    /// let infohash = InfoHash::from_hex("08ada5a7a6183aae1e09d831df6748d566095a10").unwrap();
+    /// let magnet = Magnet::new(infohash);
+    /// ```
+    pub fn new(infohash: InfoHash) -> Self {
+        Self {
+            info_hash: HashType::InfoHash(infohash),
+            display_name: None,
+            trackers: Vec::new(),
+            peers: Vec::new(),
+        }
+    }
 
     /// Parses a string into a `Magnet`.
     ///
@@ -185,11 +203,10 @@ impl FromStr for Magnet {
     /// # Examples
     ///
     /// ```
-    /// use std::str::FromStr;
     /// use magnet_uri::Magnet;
     ///
     /// let uri = "magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10&dn=Example";
-    /// let magnet = Magnet::from_str(uri).expect("Failed to parse magnet URI");
+    /// let magnet = Magnet::parse(uri).expect("Failed to parse magnet URI");
     /// ```
     ///
     /// # Errors
@@ -201,7 +218,8 @@ impl FromStr for Magnet {
     /// - The infohash format is invalid
     /// - Any tracker URLs are invalid
     /// - Any peer addresses are invalid
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
+    pub fn parse(uri: impl AsRef<str>) -> Result<Self, MagnetError> {
+        let s = uri.as_ref();
         let url = Url::parse(s)?;
 
         if url.scheme() != "magnet" {
@@ -257,33 +275,11 @@ impl FromStr for Magnet {
         let hash_type = hash_type.unwrap();
 
         Ok(Magnet {
-            hash_type,
+            info_hash: hash_type,
             display_name,
             trackers,
             peers,
         })
-    }
-}
-
-impl Magnet {
-    /// Creates a new `Magnet` with the specified infohash.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use bittorrent_common::types::InfoHash;
-    /// use magnet_uri::{Magnet, HashType};
-    ///
-    /// let infohash = InfoHash::from_hex("08ada5a7a6183aae1e09d831df6748d566095a10").unwrap();
-    /// let magnet = Magnet::new(infohash);
-    /// ```
-    pub fn new(infohash: InfoHash) -> Self {
-        Self {
-            hash_type: HashType::InfoHash(infohash),
-            display_name: None,
-            trackers: Vec::new(),
-            peers: Vec::new(),
-        }
     }
 
     /// Sets the display name for this magnet URI.
@@ -343,15 +339,14 @@ impl Magnet {
     /// # Examples
     ///
     /// ```
-    /// use std::str::FromStr;
     /// use magnet_uri::Magnet;
     ///
     /// let uri = "magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10";
-    /// let magnet = Magnet::from_str(uri).unwrap();
+    /// let magnet = Magnet::parse(uri).unwrap();
     /// let infohash = magnet.info_hash().unwrap();
     /// ```
     pub fn info_hash(&self) -> Option<InfoHash> {
-        match self.hash_type {
+        match self.info_hash {
             HashType::InfoHash(hash) => Some(hash),
             _ => None,
         }
@@ -364,18 +359,17 @@ impl Magnet {
     /// # Examples
     ///
     /// ```
-    /// use std::str::FromStr;
     /// use magnet_uri::Magnet;
     ///
     /// let uri = "magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10&dn=Example";
-    /// let magnet = Magnet::from_str(uri).unwrap();
+    /// let magnet = Magnet::parse(uri).unwrap();
     /// let uri_string = magnet.to_uri();
     /// ```
     pub fn to_uri(&self) -> String {
         let mut uri = String::from("magnet:?");
 
         // Add the infohash
-        match self.hash_type {
+        match self.info_hash {
             HashType::InfoHash(hash) => {
                 uri.push_str("xt=urn:btih:");
                 uri.push_str(&hash.to_hex());
@@ -422,7 +416,6 @@ impl Magnet {
 mod test {
     use std::{
         net::{Ipv4Addr, SocketAddr},
-        str::FromStr,
     };
 
     use bittorrent_common::types::InfoHash;
@@ -433,13 +426,13 @@ mod test {
     #[test]
     fn parse_magnet_uri() {
         const MAGNET_STR: &str = "magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10&dn=Sintel&tr=udp%3A%2F%2Fexplodie.org%3A6969&tr=udp%3A%2F%2Ftracker.coppersurfer.tk%3A6969&tr=udp%3A%2F%2Ftracker.empire-js.us%3A1337&tr=udp%3A%2F%2Ftracker.leechers-paradise.org%3A6969&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337&tr=wss%3A%2F%2Ftracker.btorrent.xyz&tr=wss%3A%2F%2Ftracker.fastcast.nz&tr=wss%3A%2F%2Ftracker.openwebtorrent.com&ws=https%3A%2F%2Fwebtorrent.io%2Ftorrents%2F&xs=https%3A%2F%2Fwebtorrent.io%2Ftorrents%2Fsintel.torrent";
-        let magnet_link: Magnet = MAGNET_STR.parse().unwrap();
+        let magnet_link = Magnet::parse(MAGNET_STR).unwrap();
 
         assert_eq!(magnet_link.display_name, Some("Sintel".to_string()));
-        assert!(matches!(magnet_link.hash_type, HashType::InfoHash(_)));
+        assert!(matches!(magnet_link.info_hash, HashType::InfoHash(_)));
 
         assert_eq!(
-            magnet_link.hash_type,
+            magnet_link.info_hash,
             HashType::InfoHash(
                 InfoHash::from_hex("08ada5a7a6183aae1e09d831df6748d566095a10").unwrap()
             )
@@ -469,7 +462,7 @@ mod test {
     fn parse_magnet_peers() {
         const MAGNET_STR: &str = "magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10&x.pe=127.0.0.1:6881&x.pe=myhomepc.local:1337";
 
-        let magnet = MAGNET_STR.parse::<Magnet>().unwrap();
+        let magnet = Magnet::parse(MAGNET_STR).unwrap();
 
         let expected_peers = vec![
             PeerAddr::Socket(SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 6881)),
@@ -501,11 +494,11 @@ mod test {
 
         // Create magnet URI with base32 infohash
         let magnet_str = format!("magnet:?xt=urn:btih:{}&dn=TestFile", base32_hash);
-        let magnet = magnet_str.parse::<Magnet>().unwrap();
+        let magnet = Magnet::parse(&magnet_str).unwrap();
 
         // Verify the parsed magnet has the correct infohash
         assert_eq!(magnet.display_name, Some("TestFile".to_string()));
-        assert_eq!(magnet.hash_type, HashType::InfoHash(expected_infohash));
+        assert_eq!(magnet.info_hash, HashType::InfoHash(expected_infohash));
     }
 
     #[test]
@@ -546,10 +539,10 @@ mod test {
         let uri = magnet.to_uri();
 
         // Parse the URI back to verify it roundtrips correctly
-        let parsed_magnet = Magnet::from_str(&uri).unwrap();
+        let parsed_magnet = Magnet::parse(&uri).unwrap();
 
         assert_eq!(parsed_magnet.display_name, Some("Test File".to_string()));
-        assert_eq!(parsed_magnet.hash_type, HashType::InfoHash(infohash));
+        assert_eq!(parsed_magnet.info_hash, HashType::InfoHash(infohash));
 
         // Test with trackers and peers
         let tracker = Url::parse("udp://tracker.example.com:6969").unwrap();
@@ -561,7 +554,7 @@ mod test {
             .add_peer(peer.clone());
 
         let uri_with_extras = magnet_with_extras.to_uri();
-        let parsed_with_extras = Magnet::from_str(&uri_with_extras).unwrap();
+        let parsed_with_extras = Magnet::parse(&uri_with_extras).unwrap();
 
         assert_eq!(
             parsed_with_extras.display_name,
