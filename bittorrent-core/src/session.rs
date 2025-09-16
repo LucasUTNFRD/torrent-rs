@@ -24,13 +24,12 @@ pub static CLIENT_ID: Lazy<PeerID> = Lazy::new(PeerID::generate);
 
 use crate::{
     storage::Storage,
-    torrent::{self, TorrentSession, TorrentStats},
+    torrent::{self, TorrentSession},
 };
 
 pub struct Session {
     pub handle: JoinHandle<()>,
     tx: UnboundedSender<SessionCommand>,
-    pub stats_receiver: UnboundedReceiver<TorrentStats>,
 }
 
 pub enum SessionCommand {
@@ -51,15 +50,10 @@ pub enum SessionError {
 impl Session {
     pub fn new(port: u16, save_path: PathBuf) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
-        let (stats_tx, statx_rx) = mpsc::unbounded_channel();
 
-        let manager = SessionManager::new(port, save_path, rx, stats_tx);
+        let manager = SessionManager::new(port, save_path, rx);
         let handle = tokio::task::spawn(async move { manager.start().await });
-        Self {
-            tx,
-            handle,
-            stats_receiver: statx_rx,
-        }
+        Self { tx, handle }
     }
 
     pub fn add_torrent(&self, dir: impl AsRef<Path>) -> Result<(), SessionError> {
@@ -84,22 +78,15 @@ struct SessionManager {
     save_path: PathBuf,
     rx: mpsc::UnboundedReceiver<SessionCommand>,
     torrents: Arc<RwLock<HashMap<InfoHash, TorrentSession>>>,
-    stats_tx: mpsc::UnboundedSender<TorrentStats>,
 }
 
 impl SessionManager {
-    pub fn new(
-        port: u16,
-        save_path: PathBuf,
-        rx: mpsc::UnboundedReceiver<SessionCommand>,
-        stats_tx: UnboundedSender<TorrentStats>,
-    ) -> Self {
+    pub fn new(port: u16, save_path: PathBuf, rx: mpsc::UnboundedReceiver<SessionCommand>) -> Self {
         Self {
             port,
             save_path,
             rx,
             torrents: Arc::new(RwLock::new(HashMap::new())),
-            stats_tx,
         }
     }
 
@@ -116,12 +103,8 @@ impl SessionManager {
                     tracing::info!(%metainfo);
 
                     let info_hash = metainfo.info_hash;
-                    let torrent_session = TorrentSession::new(
-                        metainfo,
-                        tracker.clone(),
-                        storage.clone(),
-                        self.stats_tx.clone(),
-                    );
+                    let torrent_session =
+                        TorrentSession::new(metainfo, tracker.clone(), storage.clone());
 
                     let mut torrent_guard = self.torrents.write().unwrap();
                     torrent_guard.insert(info_hash, torrent_session);
@@ -140,8 +123,20 @@ impl SessionManager {
                     if let Some(name) = &magnet.display_name {
                         println!("Display Name: {name}");
                     }
+                    if magnet.trackers.is_empty() {
+                        tracing::warn!(
+                            "No tracker is specfied, client SHOULD use DHT to acquire peers",
+                        );
+                        tracing::warn!("Torrent-RS doest not implement DHT,yet");
+                        continue;
+                    }
+
                     println!("Trackers: {:?}", magnet.trackers);
+
                     println!("Peers: {:?}", magnet.peers);
+
+                    // TODO:  Torrent session should support creating one that does not have
+                    // metainfo yet
 
                     // let torrent_session = TorrentSession::new(
                     //     metainfo,

@@ -10,7 +10,12 @@ use peer_protocol::{
     peer::extension::{ExtendedHandshake, ExtendedMessage},
     protocol::{self, BlockInfo, Handshake, Message},
 };
-use std::{collections::HashSet, fmt::Debug, net::SocketAddr, time::Duration};
+use std::{
+    collections::{BTreeMap, HashSet},
+    fmt::Debug,
+    net::SocketAddr,
+    time::Duration,
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
@@ -340,9 +345,17 @@ impl Peer<Connected> {
     }
 
     async fn send_extended_handshake(&mut self) -> Result<(), PeerError> {
-        let extended_handshake = ExtendedHandshake::default()
+        let mut extensions = BTreeMap::new();
+        extensions.insert("ut_metadata".to_string(), 1);
+        extensions.insert("ut_pex".to_string(), 2);
+
+        let extended_handshake = ExtendedHandshake::new()
             .with_client_version("rust.torrent dev")
-            .with_yourip(self.peer_info.addr.ip());
+            .with_yourip(self.peer_info.addr.ip())
+            .with_extensions(extensions)
+            .with_request_queue_size(1);
+
+        tracing::debug!(ext = ?extended_handshake,"sending: ");
 
         self.state
             .sink

@@ -1,13 +1,27 @@
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    net::SocketAddr,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, AtomicUsize},
+    },
+    time::Duration,
+};
 
-use bittorrent_common::{metainfo::TorrentInfo, types::InfoHash};
+use bittorrent_common::{
+    metainfo::{Info, TorrentInfo},
+    types::InfoHash,
+};
 use thiserror::Error;
 use tokio::{
     net::TcpStream,
-    sync::mpsc::{self, UnboundedSender},
+    sync::{
+        mpsc::{self, UnboundedSender},
+        watch,
+    },
     task::JoinHandle,
-    time::{Instant, interval, sleep}, // time::{Instant, interval_at},
+    time::sleep,
 };
+
 use tracing::instrument;
 use tracker_client::{ClientState, Events, TrackerError, TrackerHandler};
 
@@ -25,6 +39,7 @@ pub enum TorrentMessage {
     AddPeer(Peer),
 }
 
+// Move this to peer module?
 pub enum Peer {
     Inbound {
         stream: TcpStream,
@@ -54,76 +69,12 @@ pub enum TorrentError {
     Tracker(TrackerError),
 }
 
-pub struct TorrentStats {
-    /// When the torrent was _first_ started.
-    pub start_time: Instant,
-
-    /// How long the torrent has been running.
-    pub run_duration: Duration,
-
-    /// Aggregate statistics about a torrent's pieces.
-    pub remaining_pieces: usize,
-
-    /// The peers of the torrent.
-    pub connected_peers: usize,
-
-    pub downloaded: u64,
-    pub uploaded: u64,
-
-    pub session_duration: Duration,
-    pub progress: f64,
-
-    pub download_rate: f64,
-    pub upload_rate: f64,
-}
-
-pub struct StatsTracker {
-    last_downloaded: u64,
-    last_uploaded: u64,
-    last_instant: Instant,
-}
-
-impl StatsTracker {
-    pub fn new() -> Self {
-        Self {
-            last_downloaded: 0,
-            last_uploaded: 0,
-            last_instant: Instant::now(),
-        }
-    }
-
-    pub fn update(&mut self, mut stats: TorrentStats) -> TorrentStats {
-        let now = Instant::now();
-        let elapsed = now.duration_since(self.last_instant).as_secs_f64();
-
-        let dl_delta = stats.downloaded.saturating_sub(self.last_downloaded);
-        let ul_delta = stats.uploaded.saturating_sub(self.last_uploaded);
-
-        stats.download_rate = dl_delta as f64 / elapsed;
-        stats.upload_rate = ul_delta as f64 / elapsed;
-
-        self.last_downloaded = stats.downloaded;
-        self.last_uploaded = stats.uploaded;
-        self.last_instant = now;
-
-        stats
-    }
-}
-
-// session could be started from a magnet link
-// maybe use option (?)
-
 impl TorrentSession {
-    pub fn new(
-        metainfo: TorrentInfo,
-        tracker: Arc<TrackerHandler>,
-        storage: Arc<Storage>,
-        stats_tx: mpsc::UnboundedSender<TorrentStats>,
-    ) -> Self {
+    pub fn new(metainfo: TorrentInfo, tracker: Arc<TrackerHandler>, storage: Arc<Storage>) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
 
         let handle = tokio::task::spawn(async move {
-            start_torrent_session(metainfo, tracker, storage, rx, stats_tx).await
+            start_torrent_session(metainfo, tracker, storage, rx).await
         });
 
         Self { handle, tx }
@@ -139,7 +90,7 @@ impl TorrentSession {
 }
 
 #[instrument(
-    skip(tracker, manager_rx,metainfo,storage,stats_tx),
+    skip(tracker, manager_rx,metainfo,storage),
     fields(
         torrent.info_hash = %metainfo.info_hash,
         torrent.info.name = %metainfo.info.mode.name(),
@@ -150,7 +101,6 @@ async fn start_torrent_session(
     tracker: Arc<TrackerHandler>,
     storage: Arc<Storage>,
     mut manager_rx: mpsc::UnboundedReceiver<TorrentMessage>,
-    stats_tx: mpsc::UnboundedSender<TorrentStats>,
 ) -> Result<(), TorrentError> {
     let torrent = Arc::new(metainfo);
     storage.add_torrent(torrent.clone());
@@ -174,54 +124,23 @@ async fn start_torrent_session(
         });
     }
 
-    let mut stat_sender_interval = interval(Duration::from_secs(1));
-    let total_pieces = torrent.num_pieces();
-
-    let start_time = Instant::now();
-
-    let mut session_duration = Duration::default();
-    let mut stats_tracker = StatsTracker::new();
-
     loop {
         tokio::select! {
-            maybe_msg = manager_rx.recv() => {
-                match maybe_msg{
-                    Some(TorrentMessage::Shutdown) => {
-                        peer_manager.shutdown();
-                    }
-                    Some(TorrentMessage::AddPeer(peer)) => {
-                        peer_manager.add_peer(peer);
-                    }
-                    _ => break,
+        maybe_msg = manager_rx.recv() => {
+            match maybe_msg{
+                Some(TorrentMessage::Shutdown) => {
+                    peer_manager.shutdown();
                 }
+                Some(TorrentMessage::AddPeer(peer)) => {
+                    peer_manager.add_peer(peer);
+                }
+                _ => break,
             }
-            _ = &mut completion_rx => {
-                tracing::info!("finished downloading");
-                break;
-            }
-            _ = stat_sender_interval.tick() => {
-                let peer_stats = peer_manager.get_stats().await;
-                session_duration = Instant::now() - start_time;
-
-                let progress = 100.0 * (total_pieces.saturating_sub(peer_stats.remaining_pieces) as f64)
-                    / (total_pieces as f64);
-
-                let raw_stats = TorrentStats {
-                    start_time,
-                    run_duration: session_duration,
-                    remaining_pieces: peer_stats.remaining_pieces,
-                    connected_peers: peer_stats.connected_peers,
-                    downloaded: peer_stats.downloaded,
-                    uploaded: peer_stats.uploaded,
-                    session_duration,
-                    progress,
-                    download_rate: 0.0,
-                    upload_rate: 0.0,
-                };
-
-                let stats = stats_tracker.update(raw_stats);
-                let _ = stats_tx.send(stats);
-            }
+        }
+        _ = &mut completion_rx => {
+            tracing::info!("finished downloading");
+            break;
+        }
         }
     }
 

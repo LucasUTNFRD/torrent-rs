@@ -384,6 +384,7 @@ fn parse_torrent_from_bencode(bencode: &Bencode) -> Result<TorrentInfo, TorrentP
     })
 }
 
+// This is what we need for parsing ut_metadata
 fn parse_info_dict(info_bencode: &Bencode) -> Result<Info, TorrentParseError> {
     let dict = match info_bencode {
         Bencode::Dict(dict) => dict,
