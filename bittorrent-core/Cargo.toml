@@ -24,3 +24,4 @@ peer-protocol = { path = "../peer-protocol/" }
 futures = "0.3.31"
 console-subscriber.workspace = true
 once_cell = "1.21.3"
+magnet-uri = { path = "../magnet-uri/" }
