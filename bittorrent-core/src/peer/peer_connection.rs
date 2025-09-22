@@ -214,9 +214,22 @@ impl Peer<Connected> {
                         None => break,
                     }
                 }
+                maybe_cmd = self.cmd_rx.recv() => {
+                    match maybe_cmd{
+                        Some(cmd) => {self.handle_peer_cmd(cmd).await?},
+                        None => break,
+                    }
+                }
             }
         }
 
+        Ok(())
+    }
+
+    async fn handle_peer_cmd(&mut self, peer_cmd: PeerMessage) -> Result<(), ConnectionError> {
+        // match peer_cmd {
+        //     // PeerMessage::CompleteMetadata() {}
+        // }
         Ok(())
     }
 

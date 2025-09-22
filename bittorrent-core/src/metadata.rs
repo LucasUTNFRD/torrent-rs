@@ -79,84 +79,156 @@ impl Metadata {
         piece_idx: u32,
     ) -> Result<(), String> {
         match self {
-            Metadata::MagnetUri {
-                magnet,
-                metadata_state,
-            } => match metadata_state {
+            Metadata::MagnetUri { metadata_state, .. } => match metadata_state {
                 MetadataState::Fetching {
-                    pieces_received,
                     total_pieces,
                     metadata_size,
                     buf,
                     metadata_pieces,
+                    ..
                 } => {
-                    let piece_len = metadata_pieces.len();
-                    let offset = piece_idx as usize * 16 * 1024; // 16KiB blocks
+                    let piece_idx = piece_idx as usize;
 
-                    buf[offset..offset + piece_len].copy_from_slice(&metadata_piece);
-                    return Ok(());
+                    // Validate piece index
+                    if piece_idx >= *total_pieces {
+                        return Err(format!(
+                            "Piece index {} out of bounds (total pieces: {})",
+                            piece_idx, total_pieces
+                        ));
+                    }
+
+                    // Check if we already have this piece
+                    if metadata_pieces[piece_idx].have {
+                        return Ok(()); // Already have this piece, ignore duplicate
+                    }
+
+                    const PIECE_SIZE: usize = 16 * 1024; // 16KiB
+                    let offset = piece_idx * PIECE_SIZE;
+
+                    // Calculate the actual piece size for this piece
+                    let remaining_bytes = *metadata_size - offset;
+                    let expected_piece_size = std::cmp::min(PIECE_SIZE, remaining_bytes);
+
+                    // Validate piece size
+                    if metadata_piece.len() != expected_piece_size {
+                        return Err(format!(
+                            "Invalid piece size: expected {}, got {}",
+                            expected_piece_size,
+                            metadata_piece.len()
+                        ));
+                    }
+
+                    // Validate buffer bounds
+                    if offset + metadata_piece.len() > buf.len() {
+                        return Err(format!(
+                            "Piece data would overflow buffer: offset {} + size {} > buffer size {}",
+                            offset,
+                            metadata_piece.len(),
+                            buf.len()
+                        ));
+                    }
+
+                    // Copy the piece data into the buffer
+                    buf[offset..offset + metadata_piece.len()].copy_from_slice(&metadata_piece);
+
+                    Ok(())
                 }
-                _ => panic!(),
+                _ => Err("Cannot put metadata piece when not in Fetching state".to_string()),
             },
-            _ => panic!(),
+            Metadata::TorrentFile(_) => {
+                Err("Cannot put metadata piece for torrent file".to_string())
+            }
         }
-        Ok(())
     }
 
     pub fn mark_metadata_piece(&mut self, piece_idx: u32) -> Result<bool, String> {
         match self {
-            Metadata::MagnetUri {
-                magnet,
-                metadata_state,
-            } => match metadata_state {
+            Metadata::MagnetUri { metadata_state, .. } => match metadata_state {
                 MetadataState::Fetching {
                     pieces_received,
                     total_pieces,
-                    metadata_size,
-                    buf,
                     metadata_pieces,
+                    ..
                 } => {
-                    metadata_pieces[piece_idx as usize].have = true;
+                    let piece_idx = piece_idx as usize;
 
-                    if buf.len() == *metadata_size {
-                        let have_all = metadata_pieces.iter().all(|p| p.have);
-                        debug_assert!(have_all);
-                        return Ok(true); // mean that we should perform validation
+                    // Validate piece index
+                    if piece_idx >= *total_pieces {
+                        return Err(format!(
+                            "Piece index {} out of bounds (total pieces: {})",
+                            piece_idx, total_pieces
+                        ));
                     }
-                }
-                _ => panic!(),
-            },
-            _ => panic!(),
-        }
 
-        Ok(false)
+                    // Check if we already had this piece
+                    if metadata_pieces[piece_idx].have {
+                        return Ok(false); // Already had this piece, no change
+                    }
+
+                    // Mark the piece as received
+                    metadata_pieces[piece_idx].have = true;
+                    *pieces_received += 1;
+
+                    // Check if we have all pieces
+                    let all_pieces_received = *pieces_received == *total_pieces;
+
+                    Ok(all_pieces_received)
+                }
+                _ => Err("Cannot mark metadata piece when not in Fetching state".to_string()),
+            },
+            Metadata::TorrentFile(_) => {
+                Err("Cannot mark metadata piece for torrent file".to_string())
+            }
+        }
     }
 
     pub fn is_valid(&self) -> bool {
         match self {
+            Metadata::TorrentFile(_) => true, // Torrent files are always valid
             Metadata::MagnetUri {
                 magnet,
                 metadata_state,
             } => match metadata_state {
                 MetadataState::Fetching {
+                    buf,
+                    metadata_size,
                     pieces_received,
                     total_pieces,
-                    metadata_size,
-                    buf,
-                    metadata_pieces,
+                    ..
                 } => {
-                    let expected_info_hash = self.info_hash();
+                    // Only validate if we have all pieces
+                    if *pieces_received != *total_pieces {
+                        return false;
+                    }
+
+                    // Validate that buffer has correct size
+                    if buf.len() != *metadata_size {
+                        return false;
+                    }
+
+                    // Calculate hash of the complete metadata
+                    let expected_info_hash = magnet.info_hash().expect("info_hash is mandatory");
                     let mut hasher = Sha1::new();
                     hasher.update(buf);
-                    let piece_hash: [u8; 20] = hasher.finalize().into();
-                    let info_hash = InfoHash::new(piece_hash);
+                    let calculated_hash: [u8; 20] = hasher.finalize().into();
+                    let info_hash = InfoHash::new(calculated_hash);
 
                     expected_info_hash == info_hash
                 }
-                _ => panic!(),
+                MetadataState::Complete(_) => true,
+                MetadataState::Pending => false,
             },
-            _ => panic!(),
         }
+    }
+
+    /// Validate metadata hash without borrowing self
+    fn validate_metadata_hash(magnet: &Magnet, buf: &[u8]) -> bool {
+        let expected_info_hash = magnet.info_hash().expect("info_hash is mandatory");
+        let mut hasher = Sha1::new();
+        hasher.update(buf);
+        let calculated_hash: [u8; 20] = hasher.finalize().into();
+        let info_hash = InfoHash::new(calculated_hash);
+        expected_info_hash == info_hash
     }
 
     pub fn construct_info(&mut self) -> Result<(), String> {
@@ -166,23 +238,87 @@ impl Metadata {
                 metadata_state,
             } => match metadata_state {
                 MetadataState::Fetching {
+                    buf,
                     pieces_received,
                     total_pieces,
-                    metadata_size,
-                    buf,
-                    metadata_pieces,
+                    ..
                 } => {
-                    todo!()
+                    // Ensure we have all pieces
+                    if *pieces_received != *total_pieces {
+                        return Err("Cannot construct info: not all pieces received".to_string());
+                    }
+
+                    // Validate metadata hash
+                    if !Self::validate_metadata_hash(magnet, buf) {
+                        return Err("Cannot construct info: metadata validation failed".to_string());
+                    }
+
+                    // Parse the bencode data to construct Info
+                    let info_bencode = bencode::Bencode::decode(buf)
+                        .map_err(|e| format!("Failed to decode metadata bencode: {}", e))?;
+
+                    // Use the parse_info_dict function from metainfo module
+                    let info_struct =
+                        bittorrent_common::metainfo::parse_info_dict(&info_bencode)
+                            .map_err(|e| format!("Failed to parse Info from bencode: {}", e))?;
+
+                    // Transition to Complete state
+                    *metadata_state = MetadataState::Complete(info_struct);
+
+                    Ok(())
                 }
-                _ => panic!(),
+                MetadataState::Complete(_) => {
+                    Ok(()) // Already complete
+                }
+                MetadataState::Pending => {
+                    Err("Cannot construct info: metadata is still pending".to_string())
+                }
             },
-            _ => panic!(),
+            Metadata::TorrentFile(_) => {
+                Err("Cannot construct info for torrent file (already has info)".to_string())
+            }
         }
     }
 
-    // pub fn set_metadata_size(&self, metadata_size: u32) -> Result<(), String> {
-    //     todo!()
-    // }
+    /// Initialize metadata fetching with the given size
+    pub fn set_metadata_size(&mut self, metadata_size: usize) -> Result<(), String> {
+        match self {
+            Metadata::MagnetUri { metadata_state, .. } => {
+                if !matches!(metadata_state, MetadataState::Pending) {
+                    return Err("Can only set metadata size when in Pending state".to_string());
+                }
+
+                if metadata_size == 0 {
+                    return Err("Metadata size cannot be zero".to_string());
+                }
+
+                // Calculate number of 16KiB pieces needed
+                const PIECE_SIZE: usize = 16 * 1024; // 16KiB
+                let total_pieces = metadata_size.div_ceil(PIECE_SIZE);
+
+                let metadata_pieces = (0..total_pieces)
+                    .map(|_| MetadataPiece {
+                        num_req: 0,
+                        time_metadata_request: Instant::now(),
+                        have: false,
+                    })
+                    .collect();
+
+                *metadata_state = MetadataState::Fetching {
+                    pieces_received: 0,
+                    total_pieces,
+                    metadata_size,
+                    buf: BytesMut::zeroed(metadata_size),
+                    metadata_pieces,
+                };
+
+                Ok(())
+            }
+            Metadata::TorrentFile(_) => {
+                Err("Cannot set metadata size for torrent file".to_string())
+            }
+        }
+    }
 
     /// Get the Info struct if available
     pub fn info(&self) -> Option<&Info> {

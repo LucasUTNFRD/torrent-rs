@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+
 use std::{
     collections::HashMap,
     net::SocketAddr,
@@ -17,7 +18,7 @@ use thiserror::Error;
 use tokio::{
     net::TcpStream,
     sync::{mpsc, oneshot, watch},
-    time::{Instant, sleep},
+    time::sleep,
 };
 use tracing::{debug, field::debug, info};
 use tracker_client::{ClientState, Events, TrackerError, TrackerHandler, TrackerResponse};
@@ -25,8 +26,7 @@ use url::Url;
 
 use crate::{
     Storage,
-    bitfield::Bitfield,
-    metadata::{Metadata, MetadataPiece, MetadataState},
+    metadata::{Metadata, MetadataState},
     peer::peer_connection::{ConnectionError, spawn_outgoing_peer},
 };
 
@@ -380,31 +380,15 @@ impl Torrent {
                 let _ = resp.send(self.metadata.has_metadata());
                 debug_assert!(!self.metadata.has_metadata());
             }
-            PeerWithMetadata { pid, metadata_size } => {
-                tracing::debug!("recv metadata size");
-                if let Metadata::MagnetUri { metadata_state, .. } = &mut self.metadata {
-                    match metadata_state {
-                        MetadataState::Pending => {
-                            let total_pieces = metadata_size.div_ceil(1 << 14);
-                            tracing::debug!(total_pieces);
+            PeerWithMetadata {
+                pid: _,
+                metadata_size,
+            } => {
+                tracing::debug!("Received metadata size: {} bytes", metadata_size);
 
-                            *metadata_state = MetadataState::Fetching {
-                                pieces_received: 0,
-                                total_pieces,
-                                metadata_size,
-                                buf: bytes::BytesMut::with_capacity(metadata_size),
-                                metadata_pieces: (0..total_pieces)
-                                    .map(|_| MetadataPiece {
-                                        num_req: 0,
-                                        time_metadata_request: Instant::now(),
-                                        have: false,
-                                    })
-                                    .collect(),
-                            };
-                        }
-                        MetadataState::Fetching { .. } => {} // Already fetching
-                        MetadataState::Complete(_) => return Ok(()), // Already complete
-                    }
+                // Use the new set_metadata_size method to properly initialize fetching state
+                if let Err(e) = self.metadata.set_metadata_size(metadata_size) {
+                    tracing::warn!("Failed to set metadata size: {}", e);
                 }
             }
             FillMetadataRequest {
@@ -419,26 +403,50 @@ impl Torrent {
                 }
             }
             ReceiveMetadata {
-                pid,
+                pid: _,
                 metadata,
                 piece_idx,
             } => {
-                if let Metadata::MagnetUri {
-                    magnet,
-                    metadata_state,
-                } = &mut self.metadata
-                    && let MetadataState::Fetching {
-                        pieces_received,
-                        total_pieces,
-                        metadata_size,
-                        buf,
-                        metadata_pieces,
-                    } = metadata_state
-                {
-                    self.metadata
-                        .put_metadata_piece(metadata, piece_idx)
-                        .unwrap();
-                    // if Ok(())
+                tracing::debug!(
+                    "Received metadata piece {} ({} bytes)",
+                    piece_idx,
+                    metadata.len()
+                );
+
+                // Put the metadata piece into the buffer
+                if let Err(e) = self.metadata.put_metadata_piece(metadata, piece_idx) {
+                    tracing::warn!("Failed to put metadata piece {}: {}", piece_idx, e);
+                    return Ok(());
+                }
+
+                // Mark the piece as received and check if we have all pieces
+                match self.metadata.mark_metadata_piece(piece_idx) {
+                    Ok(true) => {
+                        // We have all pieces! Try to construct the info and validate
+                        tracing::info!("All metadata pieces received, constructing info...");
+
+                        if let Err(e) = self.metadata.construct_info() {
+                            tracing::error!("Failed to construct info from metadata: {}", e);
+                        } else {
+                            tracing::info!("Successfully constructed metadata info!");
+                            // print the metadata info
+                            if let Some(info) = self.metadata.info() {
+                                tracing::info!("Metadata Info: {:#?}", info);
+                            }
+                            // Now we have complete metadata and can start downloading the actual torrent
+                            // we have to notify peers that we now have metadata
+                        }
+                    }
+                    Ok(false) => {
+                        // Still need more pieces, continue requesting
+                        tracing::debug!(
+                            "Metadata piece {} marked, still need more pieces",
+                            piece_idx
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to mark metadata piece {}: {}", piece_idx, e);
+                    }
                 }
             }
         }
