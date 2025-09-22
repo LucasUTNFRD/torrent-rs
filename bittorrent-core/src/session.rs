@@ -15,16 +15,20 @@ use peer_protocol::protocol::Handshake;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
-    sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
+    sync::{
+        mpsc::{self, UnboundedSender},
+        watch,
+    },
     task::JoinHandle,
 };
+use tracing::warn;
 use tracker_client::TrackerHandler;
 
 pub static CLIENT_ID: Lazy<PeerID> = Lazy::new(PeerID::generate);
 
 use crate::{
     storage::Storage,
-    torrent::{self, TorrentSession},
+    torrent_refactor::{Torrent, TorrentError, TorrentMessage},
 };
 
 pub struct Session {
@@ -73,11 +77,16 @@ impl Session {
     }
 }
 
+type TorrentSession = (
+    mpsc::Sender<TorrentMessage>,
+    JoinHandle<Result<(), TorrentError>>,
+);
+
 struct SessionManager {
     port: u16,
     save_path: PathBuf,
     rx: mpsc::UnboundedReceiver<SessionCommand>,
-    torrents: Arc<RwLock<HashMap<InfoHash, TorrentSession>>>,
+    sessions: Arc<RwLock<HashMap<InfoHash, TorrentSession>>>,
 }
 
 impl SessionManager {
@@ -86,7 +95,7 @@ impl SessionManager {
             port,
             save_path,
             rx,
-            torrents: Arc::new(RwLock::new(HashMap::new())),
+            sessions: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -94,6 +103,8 @@ impl SessionManager {
     pub async fn start(mut self) {
         let tracker = Arc::new(TrackerHandler::new(*CLIENT_ID));
         let storage = Arc::new(Storage::new());
+
+        let (shutdown_tx, shutdown_rx) = watch::channel(());
 
         self.spawn_tcp_listener();
 
@@ -103,11 +114,20 @@ impl SessionManager {
                     tracing::info!(%metainfo);
 
                     let info_hash = metainfo.info_hash;
-                    let torrent_session =
-                        TorrentSession::new(metainfo, tracker.clone(), storage.clone());
+                    let (torrent, tx) = Torrent::from_torrent_info(
+                        metainfo,
+                        tracker.clone(),
+                        storage.clone(),
+                        shutdown_rx.clone(),
+                    );
 
-                    let mut torrent_guard = self.torrents.write().unwrap();
-                    torrent_guard.insert(info_hash, torrent_session);
+                    let session_handle = tokio::spawn(async move { torrent.start_session().await });
+
+                    let t_session = (tx, session_handle);
+
+                    let mut s = self.sessions.write().unwrap();
+
+                    s.insert(info_hash, t_session);
                 }
                 SessionCommand::AddMagnet(magnet) => {
                     let info_hash = match magnet.info_hash() {
@@ -135,34 +155,49 @@ impl SessionManager {
 
                     println!("Peers: {:?}", magnet.peers);
 
-                    // TODO:  Torrent session should support creating one that does not have
-                    // metainfo yet
+                    let (torrent, tx) = Torrent::from_magnet(
+                        magnet,
+                        tracker.clone(),
+                        storage.clone(),
+                        shutdown_rx.clone(),
+                    );
 
-                    // let torrent_session = TorrentSession::new(
-                    //     metainfo,
-                    //     tracker.clone(),
-                    //     storage.clone(),
-                    //     self.stats_tx.clone(),
-                    // );
+                    let session_handle = tokio::spawn(async move { torrent.start_session().await });
 
-                    todo!("Add magnet support")
+                    let t_session = (tx, session_handle);
+
+                    let mut s = self.sessions.write().unwrap();
+
+                    s.insert(info_hash, t_session);
                 }
                 SessionCommand::Shutdown => {
-                    let torrent_guard = self.torrents.read().unwrap();
-                    for (info, torrent_session) in torrent_guard.iter() {
-                        tracing::debug!(%info,"Shutdown ");
-                        torrent_session.shutdown();
+                    if shutdown_tx.send(()).is_err() {
+                        tracing::warn!("No receivers for shutdown signal");
                     }
+
+                    let handles: Vec<_> = {
+                        let mut sessions = self.sessions.write().unwrap();
+                        sessions.drain().map(|(_, (_, h))| h).collect()
+                    };
+
+                    for h in handles {
+                        match h.await {
+                            Ok(Ok(())) => tracing::info!("Session exited cleanly"),
+                            Ok(Err(e)) => tracing::warn!(?e, "Session error"),
+                            Err(e) => tracing::warn!(?e, "Join error"),
+                        }
+                    }
+
+                    break;
                 }
             }
         }
     }
 
-    // TODO: Gracefully stop tcp_listener
     fn spawn_tcp_listener(&self) {
         tracing::info!("started connection listener");
         let port = self.port;
-        let torrent = self.torrents.clone();
+        let torrent = self.sessions.clone();
 
         tokio::spawn(async move {
             let listener = TcpListener::bind(format!("0.0.0.0:{port}"))
@@ -214,16 +249,16 @@ impl SessionManager {
                         remote_handshake.info_hash
                     );
 
-                    torrent
-                        .read()
-                        .unwrap()
-                        .get(&remote_handshake.info_hash)
-                        .unwrap()
-                        .add_peer(torrent::Peer::Inbound {
-                            stream,
-                            remote_addr,
-                            supports_ext,
-                        });
+                    // torrent
+                    //     .read()
+                    //     .unwrap()
+                    //     .get(&remote_handshake.info_hash)
+                    //     .unwrap()
+                    //     .add_peer(torrent::Peer::Inbound {
+                    //         stream,
+                    //         remote_addr,
+                    //         supports_ext,
+                    //     });
                 });
             }
         });

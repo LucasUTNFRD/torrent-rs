@@ -281,7 +281,7 @@ impl Bencode {
         Bencode::encoder(&bencode)
     }
 
-    pub(crate) fn encoder(bencode: &Bencode) -> Vec<u8> {
+    pub fn encoder(bencode: &Bencode) -> Vec<u8> {
         match bencode {
             Bencode::Int(i) => Bencode::encode_int(*i),
             Bencode::Bytes(bytes) => Bencode::encode_bytes(bytes),

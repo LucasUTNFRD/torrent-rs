@@ -3,7 +3,7 @@ use std::sync::Arc;
 use bittorrent_common::metainfo::TorrentInfo;
 use peer_protocol::protocol::BlockInfo;
 
-use super::manager::bitfield::Bitfield;
+use super::Bitfield;
 
 pub const BLOCK_SIZE: u32 = 1 << 14;
 
@@ -39,6 +39,7 @@ pub enum AvailabilityUpdate<'a> {
 }
 
 impl Picker {
+    // TODO: Construct this from
     pub fn new(torrent: Arc<TorrentInfo>) -> Self {
         let total_pieces = torrent.num_pieces();
         let pieces = (0..total_pieces)

@@ -30,6 +30,9 @@ struct StorageManager {
 // or implement FileSystem for WindowsPlatform of MacOS
 // TODO: Implement FileSystem trait for WindowsPlatform and MacOS (low priority)
 
+// TODO: Storage uses TorrentInfo, we should aim for a more generic type like info for wider
+// support of magnet and .torrent
+
 struct Cache {
     metainfo: Arc<TorrentInfo>,
     files: Vec<FileInfo>,

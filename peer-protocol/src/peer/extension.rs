@@ -14,8 +14,11 @@ pub enum ExtensionError {
     InvalidFieldType,
 }
 
+pub const EXTENSION_NAME_METADATA: &str = "ut_metadata";
+pub const EXTENSION_NAME_PEX: &str = "ut_pex";
+
 /// [docs](https://www.libtorrent.org/extension_protocol.html)
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtendedHandshake {
     /// Dictionary of supported extension messages which maps names of
     /// extensions to an extended message ID
@@ -174,7 +177,7 @@ impl ExtendedHandshake {
         self
     }
 
-    /// Set IPv6 address (16 bytes compact representation)  
+    /// Set IPv6 address (16 bytes compact representation)
     pub fn with_ipv6(mut self, ip: Bytes) -> Self {
         self.ipv6 = Some(ip);
         self
@@ -197,32 +200,69 @@ impl Default for ExtendedHandshake {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExtendedMessage {
     /// Extended handshake (ID 0)
     Handshake(ExtendedHandshake),
-    // /// Generic extension message with custom ID and payload
-    // Extension { id: u8, payload: Bytes },
-    // /// ut_metadata extension messages
-    // Metadata(MetadataMessage),
-    // /// lt_donthave extension message
-    // DontHave { piece_index: u32 },
+    ///  RAW Extension message
+    ///  it is up to peer connection layer on how to handle this
+    ExtensionMessage(RawExtendedMessage),
 }
 
-// /// ut_metadata extension message types
-// #[derive(Debug, Clone, PartialEq)]
-// pub enum MetadataMessage {
-//     /// Request metadata piece
-//     Request { piece: u32 },
-//     /// Metadata piece data
-//     Data {
-//         piece: u32,
-//         total_size: Option<u32>,
-//         data: Bytes,
-//     },
-//     /// Reject metadata request
-//     Reject { piece: u32 },
-// }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawExtendedMessage {
+    pub id: u8,
+
+    pub payload: Bytes,
+}
+
+/// ut_metadata extension message types
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MetadataMessage {
+    /// Request metadata piece
+    Request { piece: u32 },
+    /// Metadata piece data
+    Data {
+        piece: u32,
+        total_size: u32,
+        data: Bytes,
+    },
+    /// Reject metadata request
+    Reject { piece: u32 },
+}
+
+pub const REQUEST_ID: i64 = 0;
+pub const DATA_ID: i64 = 1;
+pub const REJECT_ID: i64 = 2;
+
+impl Encode for MetadataMessage {
+    fn to_bencode(&self) -> Bencode {
+        let mut dict = BTreeMap::new();
+
+        match self {
+            MetadataMessage::Request { piece } => {
+                dict.insert("msg_type".as_bytes().to_vec(), Bencode::Int(REQUEST_ID));
+                dict.insert("piece".as_bytes().to_vec(), Bencode::Int(*piece as i64));
+            }
+            MetadataMessage::Data {
+                piece, total_size, ..
+            } => {
+                dict.insert("msg_type".as_bytes().to_vec(), Bencode::Int(DATA_ID));
+                dict.insert("piece".as_bytes().to_vec(), Bencode::Int(*piece as i64));
+                dict.insert(
+                    "total_size".as_bytes().to_vec(),
+                    Bencode::Int(*total_size as i64),
+                );
+            }
+            MetadataMessage::Reject { piece } => {
+                dict.insert("msg_type".as_bytes().to_vec(), Bencode::Int(REJECT_ID));
+                dict.insert("piece".as_bytes().to_vec(), Bencode::Int(*piece as i64));
+            }
+        }
+
+        Bencode::Dict(dict)
+    }
+}
 
 #[cfg(test)]
 mod test {
