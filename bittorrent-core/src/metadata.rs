@@ -285,7 +285,7 @@ impl Metadata {
                             .map_err(|e| format!("Failed to parse Info from bencode: {}", e))?;
 
                     // Transition to Complete state
-                    *metadata_state = MetadataState::Complete(info_struct);
+                    *metadata_state = MetadataState::Complete(Arc::new(info_struct));
 
                     Ok(())
                 }
@@ -398,7 +398,7 @@ pub enum MetadataState {
         metadata_pieces: Vec<MetadataPiece>,
     },
     /// Metadata successfully fetched
-    Complete(Info),
+    Complete(Arc<Info>),
 }
 
 #[derive(Debug, Clone)]

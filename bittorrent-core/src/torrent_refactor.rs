@@ -10,7 +10,10 @@ use std::{
     time::Duration,
 };
 
-use bittorrent_common::{metainfo::TorrentInfo, types::InfoHash};
+use bittorrent_common::{
+    metainfo::{Info, TorrentInfo},
+    types::InfoHash,
+};
 use bytes::Bytes;
 use magnet_uri::Magnet;
 use peer_protocol::protocol::{BlockInfo, Message};
@@ -20,12 +23,13 @@ use tokio::{
     sync::{mpsc, oneshot, watch},
     time::sleep,
 };
-use tracing::{debug, field::debug, info, warn};
+use tracing::{debug, info, warn};
 use tracker_client::{ClientState, Events, TrackerError, TrackerHandler, TrackerResponse};
 use url::Url;
 
 use crate::{
     Storage,
+    bitfield::Bitfield,
     metadata::{Metadata, MetadataState},
     peer::peer_connection::{ConnectionError, spawn_outgoing_peer},
 };
@@ -125,7 +129,7 @@ pub enum PeerMessage {
     SendUnchoke,
     Disconnect,
     SendMessage(Message),
-    HaveMetadata,
+    HaveMetadata(Arc<Info>),
 }
 
 pub(crate) struct PeerState {
@@ -159,6 +163,8 @@ pub struct Torrent {
 
     /// Shutdown signal
     shutdown_rx: watch::Receiver<()>,
+
+    bitfield: Bitfield,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -201,6 +207,7 @@ impl Torrent {
                 shutdown_rx,
                 torrent_tx: tx.clone(),
                 torrent_rx: rx,
+                bitfield: Bitfield::new(),
             },
             tx,
         )
@@ -239,6 +246,7 @@ impl Torrent {
                 peers: HashMap::default(),
                 torrent_tx: tx.clone(),
                 torrent_rx: rx,
+                bitfield: Bitfield::new(),
             },
             tx,
         )
@@ -480,7 +488,7 @@ impl Torrent {
 
             tracing::info!("Metadata Info: {:#?}", info);
 
-            self.broadcast_to_peers(PeerMessage::HaveMetadata).await;
+            // self.broadcast_to_peers(PeerMessage::HaveMetadata).await;
             // Now we have complete metadata and can start downloading the actual torrent
             // we have to notify peers that we now have metadata
         }

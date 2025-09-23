@@ -2,11 +2,12 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     net::SocketAddr,
+    sync::Arc,
     time::Instant,
 };
 
 use bencode::Bencode;
-use bittorrent_common::types::InfoHash;
+use bittorrent_common::{metainfo::Info, types::InfoHash};
 use bytes::{Bytes, BytesMut};
 use futures::{
     SinkExt, StreamExt,
@@ -20,15 +21,17 @@ use peer_protocol::{
     },
     protocol::{BlockInfo, Handshake, Message},
 };
+use thiserror::Error;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
     sync::{mpsc, oneshot},
 };
 use tokio_util::codec::Framed;
-use tracing::{debug, field::debug, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::{
+    bitfield::{Bitfield, BitfieldError},
     session::CLIENT_ID,
     torrent_refactor::{PeerMessage, Pid, TorrentMessage},
 };
@@ -36,19 +39,27 @@ use crate::{
 ///The metadata is handled in blocks of 16KiB (16384 Bytes).
 const METADATA_BLOCK_SIZE: usize = 1 << 14;
 
-#[derive(Debug)]
-pub enum ConnectionError {
-    Network(tokio::io::Error),
-    Handshake(String),
-    Protocol(String),
-    Timeout,
-    InvalidHandshake,
-}
+const UT_METADATA_ID: u8 = 1;
 
-impl From<tokio::io::Error> for ConnectionError {
-    fn from(e: tokio::io::Error) -> Self {
-        ConnectionError::Network(e)
-    }
+#[derive(Debug, Error)]
+pub enum ConnectionError {
+    #[error("Network error: {0}")]
+    Network(#[from] tokio::io::Error),
+
+    #[error("Handshake failed: {0}")]
+    Handshake(String),
+
+    #[error("Protocol error: {0}")]
+    Protocol(String),
+
+    #[error("Connection timeout")]
+    Timeout,
+
+    #[error("Invalid handshake")]
+    InvalidHandshake,
+
+    #[error("Bitfield error")]
+    BitfieldError(#[from] BitfieldError),
 }
 
 pub trait ConnectionState {}
@@ -161,8 +172,12 @@ pub struct Connected {
     choked: bool,
 
     have_metadata: bool,
+    metadata: Option<Arc<Info>>,
     metadata_size: usize,
     max_outgoing_request: usize,
+
+    bitfield: Bitfield,
+    bitfield_received: bool,
 }
 
 impl ConnectionState for Connected {}
@@ -186,6 +201,9 @@ impl Connected {
             remote_extensions: HashMap::new(),
             metadata_size: 0,
             max_outgoing_request: 0,
+            bitfield: Bitfield::new(),
+            bitfield_received: false,
+            metadata: None,
         }
     }
 }
@@ -230,6 +248,31 @@ impl Peer<Connected> {
         Ok(())
     }
 
+    async fn handle_msg(&mut self, msg: Message) -> Result<(), ConnectionError> {
+        match msg {
+            Message::KeepAlive => self.on_keepalive().await?,
+            Message::Choke => self.on_choke().await?,
+            Message::Unchoke => self.on_unchoke().await?,
+            Message::Interested => self.on_interested().await?,
+            Message::NotInterested => self.on_not_interested().await?,
+            Message::Have { piece_index } => self.on_have(piece_index).await?,
+            Message::Bitfield(payload) => self.on_bitfield(payload).await?,
+            Message::Request(block) => self.on_request().await?,
+            Message::Piece(info) => self.on_piece().await?,
+            Message::Cancel(block) => self.on_cancel().await?,
+            Message::Extended(extended) => match extended {
+                ExtendedMessage::Handshake(handshake) => {
+                    self.on_extended_handshake(handshake).await?
+                }
+                ExtendedMessage::ExtensionMessage(raw_extended_msg) => {
+                    self.on_extension(raw_extended_msg).await?;
+                }
+            },
+        }
+
+        Ok(())
+    }
+
     async fn handle_peer_cmd(&mut self, peer_cmd: PeerMessage) -> Result<(), ConnectionError> {
         match peer_cmd {
             PeerMessage::SendHave { piece_index } => todo!(),
@@ -238,23 +281,44 @@ impl Peer<Connected> {
             PeerMessage::SendUnchoke => todo!(),
             PeerMessage::Disconnect => todo!(),
             PeerMessage::SendMessage(protocol_msg) => todo!(),
-            PeerMessage::HaveMetadata => {
-                debug!("HAVE METADATA");
+            PeerMessage::HaveMetadata(metadata) => {
+                debug!("Received metadata from torrent");
+
                 self.state.have_metadata = true;
+                self.state.metadata = Some(metadata);
+
+                // Validate bitfield if we received one before having metadata
+                if self.state.bitfield_received && !self.state.bitfield.is_empty() {
+                    let num_pieces = self.state.metadata.as_ref().unwrap().pieces.len();
+                    self.state.bitfield.validate(num_pieces)?;
+                }
+
+                // Update interest status now that we have metadata
+                self.update_interest_status().await?;
             }
         }
         Ok(())
     }
 
+    async fn update_interest_status(&mut self) -> Result<(), ConnectionError> {
+        if self.state.interesting {
+            return Ok(());
+        }
+
+        // ask torrent manager if we should be interested in this peer
+
+        todo!()
+    }
+
     async fn send_extended_handshake(&mut self) -> Result<(), ConnectionError> {
         let mut extensions = BTreeMap::new();
-        extensions.insert(EXTENSION_NAME_METADATA.to_string(), 1);
+        extensions.insert(EXTENSION_NAME_METADATA.to_string(), UT_METADATA_ID.into());
         // TODO: extensions.insert(EXTENSION_NAME_PEX.to_string(), 2);
 
         let handshake = ExtendedHandshake::new()
             .with_extensions(extensions)
             .with_client_version("torrent-rs 0.1.0")
-            .with_request_queue_size(250); //for now we ignore this 
+            .with_request_queue_size(250); //for now we ignore this
 
         self.state
             .sink
@@ -266,7 +330,7 @@ impl Peer<Connected> {
 
     // Message Handlers
     async fn on_keepalive(&mut self) -> Result<(), ConnectionError> {
-        debug("recv keepalive");
+        debug!("recv keepalive");
         Ok(())
     }
     async fn on_choke(&mut self) -> Result<(), ConnectionError> {
@@ -318,27 +382,127 @@ impl Peer<Connected> {
     async fn on_interested(&mut self) -> Result<(), ConnectionError> {
         todo!()
     }
+
     async fn on_not_interested(&mut self) -> Result<(), ConnectionError> {
         todo!()
     }
 
     // Updates piece availability - Affects which pieces the torrent tries to download next
     // Enables requests - May make this peer interesting if they have pieces we want
-    // Peer classification - May identify peer as a seed
-    async fn on_have(&mut self) -> Result<(), ConnectionError> {
-        debug!("recv have");
+    async fn on_have(&mut self, have_idx: u32) -> Result<(), ConnectionError> {
+        debug!("Received HAVE message for piece {}", have_idx);
+
+        // Step 1: Bitfield Initialization - If no bitfield received yet, treat peer as having none
+        if !self.state.bitfield_received && self.state.bitfield.is_empty() {
+            debug!("First HAVE message without bitfield - initializing empty bitfield");
+            // Initialize with minimal size, will be resized as needed
+            self.state.bitfield = Bitfield::with_size(1);
+        }
+
+        // Step 2: Dynamic Resizing - If no metadata yet, resize bitfield to accommodate new piece index
+        if !self.state.have_metadata {
+            let required_pieces = (have_idx + 1) as usize;
+            if required_pieces > self.state.bitfield.size() {
+                debug!(
+                    "Resizing bitfield from {} to {} pieces",
+                    self.state.bitfield.size(),
+                    required_pieces
+                );
+                self.state.bitfield.resize(required_pieces);
+            }
+        }
+
+        // Step 3: Index Validation - Ensure piece index is within valid range
+        if self.state.have_metadata {
+            let num_pieces = self.state.metadata.as_ref().unwrap().pieces.len();
+            if have_idx as usize >= num_pieces {
+                warn!(
+                    "Received HAVE for invalid piece index {} (max: {})",
+                    have_idx,
+                    num_pieces - 1
+                );
+                return Err(ConnectionError::Protocol(format!(
+                    "Invalid piece index: {} >= {}",
+                    have_idx, num_pieces
+                )));
+            }
+        } else {
+            // Pre-metadata validation - cap at 64k pieces
+            if have_idx >= 65536 {
+                warn!(
+                    "Received HAVE for piece index {} exceeding 64k limit",
+                    have_idx
+                );
+                return Err(ConnectionError::Protocol(format!(
+                    "Piece index {} exceeds maximum",
+                    have_idx
+                )));
+            }
+        }
+
+        // Step 4: Update Peer State - Set bit in peer's bitfield and increment piece count
+        let had_piece_before = self.state.bitfield.has_bit(have_idx as usize);
+        if !had_piece_before {
+            self.state.bitfield.set_bit(have_idx as usize);
+
+            // Notify torrent about piece availability
+            let _ = self
+                .torrent_tx
+                .send(TorrentMessage::Have {
+                    pid: self.pid,
+                    piece_idx: have_idx,
+                })
+                .await;
+        }
+
+        // Step 6: Determine if peer became interesting to us
+        self.update_interest_status().await?;
+
         Ok(())
     }
 
-    // we can only verify bitfield if we have first the whole metadata
-    //
-    // Establishes peer capabilities - We know exactly what the peer has
-    // Enables piece selection - Piece picker can make informed decisions
-    // Interest determination - Determines if we want to download from this peer
-    // Connection management - May disconnect redundant connections
-    // Performance optimization - Avoids individual HAVE messages for initial state
-    async fn on_bitfield(&mut self) -> Result<(), ConnectionError> {
-        debug!("recv bitfield");
+    async fn on_bitfield(&mut self, bitfield_payload: Bytes) -> Result<(), ConnectionError> {
+        debug!(
+            "Received BITFIELD message ({} bytes)",
+            bitfield_payload.len()
+        );
+
+        // Check if we already received a bitfield
+        if self.state.bitfield_received {
+            warn!("Received duplicate bitfield from peer");
+            return Err(ConnectionError::Protocol(
+                "Duplicate bitfield message".to_string(),
+            ));
+        }
+
+        // Step 1: Reception Flag - Mark that bitfield has been received
+        self.state.bitfield_received = true;
+
+        if self.state.have_metadata {
+            // Step 2: Size Validation - Verify bitfield size matches expected piece count
+            let num_pieces = self.state.metadata.as_ref().unwrap().pieces.len();
+
+            match Bitfield::from_bytes_checked(bitfield_payload, num_pieces) {
+                Ok(bitfield) => {
+                    self.state.bitfield = bitfield;
+                }
+                Err(e) => {
+                    warn!("Invalid bitfield received: {}", e);
+                    return Err(ConnectionError::BitfieldError(e));
+                }
+            }
+        } else {
+            // Step 5: Pre-Metadata Handling - Just store bitfield and detect potential seeds
+            debug!("Storing bitfield for later validation (no metadata yet)");
+
+            // Store bitfield for torrent even without validation
+            self.state.bitfield = Bitfield::from_bytes_unchecked(bitfield_payload.clone());
+        }
+
+        // Step 6: Interest Calculation - Determine if peer is interesting to us
+        self.update_interest_status().await?;
+
+        debug!("Bitfield processed successfully");
         Ok(())
     }
 
@@ -420,7 +584,7 @@ impl Peer<Connected> {
             }
 
             if dbg!(!self.state.have_metadata) {
-                debug("SHOULD REQUEST METADATA");
+                debug!("SHOULD REQUEST METADATA");
                 let _ = self
                     .torrent_tx
                     .send(TorrentMessage::PeerWithMetadata {
@@ -462,10 +626,9 @@ impl Peer<Connected> {
         orx.await.unwrap_or(false)
     }
 
-    const UT_METADATA_ID: u8 = 1;
     async fn on_extension(&mut self, raw_msg: RawExtendedMessage) -> Result<(), ConnectionError> {
         debug!("recv raw extended message");
-        if raw_msg.id == Self::UT_METADATA_ID {
+        if raw_msg.id == UT_METADATA_ID {
             self.handle_metadata_message(raw_msg.payload).await?;
         } else {
             tracing::debug!("Received unknown extension message with id: {}", raw_msg.id);
@@ -580,31 +743,6 @@ impl Peer<Connected> {
 
         Ok(())
     }
-
-    async fn handle_msg(&mut self, msg: Message) -> Result<(), ConnectionError> {
-        match msg {
-            Message::KeepAlive => self.on_keepalive().await?,
-            Message::Choke => self.on_choke().await?,
-            Message::Unchoke => self.on_unchoke().await?,
-            Message::Interested => self.on_interested().await?,
-            Message::NotInterested => self.on_not_interested().await?,
-            Message::Have { piece_index } => self.on_have().await?,
-            Message::Bitfield(bit) => self.on_bitfield().await?,
-            Message::Request(block) => self.on_request().await?,
-            Message::Piece(info) => self.on_piece().await?,
-            Message::Cancel(block) => self.on_cancel().await?,
-            Message::Extended(extended) => match extended {
-                ExtendedMessage::Handshake(handshake) => {
-                    self.on_extended_handshake(handshake).await?
-                }
-                ExtendedMessage::ExtensionMessage(raw_extended_msg) => {
-                    self.on_extension(raw_extended_msg).await?;
-                }
-            },
-        }
-
-        Ok(())
-    }
 }
 
 pub fn spawn_outgoing_peer(
@@ -627,6 +765,7 @@ pub fn spawn_outgoing_peer(
         .await;
 
         if let Err(err) = result {
+            warn!(?err);
             let _ = torrent_tx.send(TorrentMessage::PeerError(pid, err)).await;
         } else {
             let _ = torrent_tx.send(TorrentMessage::PeerDisconnected(pid)).await;
