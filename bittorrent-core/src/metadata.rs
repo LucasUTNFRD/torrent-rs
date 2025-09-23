@@ -141,6 +141,28 @@ impl Metadata {
         }
     }
 
+    pub fn metadata_request_reject(&mut self, piece_idx: u32) -> Result<(), String> {
+        match self {
+            Metadata::MagnetUri { metadata_state, .. } => match metadata_state {
+                MetadataState::Fetching {
+                    metadata_pieces, ..
+                } => {
+                    if let Some(piece) = metadata_pieces.get_mut(piece_idx as usize) {
+                        piece.num_req = piece.num_req.saturating_sub(1);
+                        piece.time_metadata_request = Instant::now();
+                        Ok(())
+                    } else {
+                        Err("out of bound metadata piece index".to_string())
+                    }
+                }
+                _ => Err("Cannot mark metadata piece when not in Fetching state".to_string()),
+            },
+            Metadata::TorrentFile(_) => {
+                Err("Cannot mark metadata piece for torrent file".to_string())
+            }
+        }
+    }
+
     pub fn mark_metadata_piece(&mut self, piece_idx: u32) -> Result<bool, String> {
         match self {
             Metadata::MagnetUri { metadata_state, .. } => match metadata_state {

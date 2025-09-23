@@ -1,7 +1,6 @@
-use std::{
-    io::{self},
-    os::unix::raw,
-};
+use std::io::{self};
+
+// TODO: Reject packets bigger than 1mb
 
 use bencode::Bencode;
 use bytes::{Buf, BufMut, Bytes, BytesMut};

@@ -199,6 +199,8 @@ impl SessionManager {
         let port = self.port;
         let torrent = self.sessions.clone();
 
+        // make this a spawn peer connection
+        // and after reading info hash, perform a attact_to_torrent
         tokio::spawn(async move {
             let listener = TcpListener::bind(format!("0.0.0.0:{port}"))
                 .await

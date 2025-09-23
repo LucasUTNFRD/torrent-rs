@@ -1,3 +1,5 @@
+use std::u16;
+
 use bytes::Bytes;
 use thiserror::Error;
 

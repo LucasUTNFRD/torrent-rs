@@ -20,7 +20,7 @@ use tokio::{
     sync::{mpsc, oneshot, watch},
     time::sleep,
 };
-use tracing::{debug, field::debug, info};
+use tracing::{debug, field::debug, info, warn};
 use tracker_client::{ClientState, Events, TrackerError, TrackerHandler, TrackerResponse};
 use url::Url;
 
@@ -84,6 +84,7 @@ pub enum TorrentMessage {
         resp: oneshot::Sender<bool>,
     },
 
+    // -- METADATA REQUEST --
     PeerWithMetadata {
         pid: Pid,
         metadata_size: usize,
@@ -96,6 +97,10 @@ pub enum TorrentMessage {
         pid: Pid,
         piece_idx: u32,
         metadata: Bytes,
+    },
+    RejectedMetadataRequest {
+        pid: Pid,
+        rejected_piece: u32,
     },
 }
 
@@ -112,14 +117,15 @@ pub struct Metrics {
 
 // Peer related
 
+#[derive(Debug, Clone)]
 pub enum PeerMessage {
-    RequestMetadata,
     SendHave { piece_index: u32 },
     SendBitfield { bitfield: Vec<u8> },
     SendChoke,
     SendUnchoke,
     Disconnect,
     SendMessage(Message),
+    HaveMetadata,
 }
 
 pub(crate) struct PeerState {
@@ -275,7 +281,7 @@ impl Torrent {
     }
 
     pub fn add_peer(&mut self, peer: PeerSource) {
-        if self.peers.len() >= 15 {
+        if self.peers.len() >= 25 {
             return;
         }
         // Create peer info
@@ -422,20 +428,8 @@ impl Torrent {
                 // Mark the piece as received and check if we have all pieces
                 match self.metadata.mark_metadata_piece(piece_idx) {
                     Ok(true) => {
-                        // We have all pieces! Try to construct the info and validate
                         tracing::info!("All metadata pieces received, constructing info...");
-
-                        if let Err(e) = self.metadata.construct_info() {
-                            tracing::error!("Failed to construct info from metadata: {}", e);
-                        } else {
-                            tracing::info!("Successfully constructed metadata info!");
-                            // print the metadata info
-                            if let Some(info) = self.metadata.info() {
-                                tracing::info!("Metadata Info: {:#?}", info);
-                            }
-                            // Now we have complete metadata and can start downloading the actual torrent
-                            // we have to notify peers that we now have metadata
-                        }
+                        self.on_complete_metadata()?;
                     }
                     Ok(false) => {
                         // Still need more pieces, continue requesting
@@ -449,6 +443,30 @@ impl Torrent {
                     }
                 }
             }
+            RejectedMetadataRequest {
+                pid,
+                rejected_piece,
+            } => {
+                debug!("{:?} rejected metadata request", pid);
+                if let Err(e) = self.metadata.metadata_request_reject(rejected_piece) {
+                    warn!(?e);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    // TODO: when metadata implement an enum i will use `?`
+    fn on_complete_metadata(&mut self) -> Result<(), TorrentError> {
+        if let Err(e) = self.metadata.construct_info() {
+            tracing::error!("Failed to construct info from metadata: {}", e);
+        } else {
+            tracing::info!("Successfully constructed metadata info!");
+            if let Some(info) = self.metadata.info() {
+                tracing::info!("Metadata Info: {:#?}", info);
+            }
+            // Now we have complete metadata and can start downloading the actual torrent
+            // we have to notify peers that we now have metadata
         }
         Ok(())
     }
@@ -459,6 +477,13 @@ impl Torrent {
     async fn send_to_peer(&self, pid: Pid, message: PeerMessage) {
         if let Some(p) = self.peers.get(&pid) {
             let _ = p.tx.send(message).await;
+        }
+    }
+
+    /// Send a message to a specific peer
+    async fn broadcast_to_peers(&self, message: PeerMessage) {
+        for (pid, _) in self.peers.iter() {
+            self.send_to_peer(*pid, message.clone()).await
         }
     }
 
@@ -508,6 +533,4 @@ impl Torrent {
             });
         }
     }
-
-    fn process_announce(&self) {}
 }

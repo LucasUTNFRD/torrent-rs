@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     net::SocketAddr,
     time::Instant,
 };
@@ -197,6 +197,7 @@ impl Peer<Connected> {
 
     pub async fn start(mut self) -> Result<(), ConnectionError> {
         self.state.have_metadata = self.have_valid_metadata().await;
+
         if self.state.have_metadata {
             debug!("HAVE METADATA");
         }
@@ -206,9 +207,12 @@ impl Peer<Connected> {
         }
 
         loop {
+            self.maybe_request_medata().await?;
+
             tokio::select! {
                 maybe_msg = self.state.stream.next() => {
                     match maybe_msg{
+                        // TODO: Not all error should return
                         Some(Ok(msg)) => self.handle_msg(msg).await?,
                         Some(Err(_e)) => break,
                         None => break,
@@ -227,23 +231,30 @@ impl Peer<Connected> {
     }
 
     async fn handle_peer_cmd(&mut self, peer_cmd: PeerMessage) -> Result<(), ConnectionError> {
-        // match peer_cmd {
-        //     // PeerMessage::CompleteMetadata() {}
-        // }
+        match peer_cmd {
+            PeerMessage::SendHave { piece_index } => todo!(),
+            PeerMessage::SendBitfield { bitfield } => todo!(),
+            PeerMessage::SendChoke => todo!(),
+            PeerMessage::SendUnchoke => todo!(),
+            PeerMessage::Disconnect => todo!(),
+            PeerMessage::SendMessage(protocol_msg) => todo!(),
+            PeerMessage::HaveMetadata => {
+                debug!("HAVE METADATA");
+                self.state.have_metadata = true;
+            }
+        }
         Ok(())
     }
 
     async fn send_extended_handshake(&mut self) -> Result<(), ConnectionError> {
-        use std::collections::BTreeMap;
-
         let mut extensions = BTreeMap::new();
         extensions.insert(EXTENSION_NAME_METADATA.to_string(), 1);
-        // extensions.insert(EXTENSION_NAME_PEX.to_string(), 2);
+        // TODO: extensions.insert(EXTENSION_NAME_PEX.to_string(), 2);
 
         let handshake = ExtendedHandshake::new()
             .with_extensions(extensions)
             .with_client_version("torrent-rs 0.1.0")
-            .with_request_queue_size(250);
+            .with_request_queue_size(250); //for now we ignore this 
 
         self.state
             .sink
@@ -310,12 +321,22 @@ impl Peer<Connected> {
     async fn on_not_interested(&mut self) -> Result<(), ConnectionError> {
         todo!()
     }
+
+    // Updates piece availability - Affects which pieces the torrent tries to download next
+    // Enables requests - May make this peer interesting if they have pieces we want
+    // Peer classification - May identify peer as a seed
     async fn on_have(&mut self) -> Result<(), ConnectionError> {
         debug!("recv have");
         Ok(())
     }
 
     // we can only verify bitfield if we have first the whole metadata
+    //
+    // Establishes peer capabilities - We know exactly what the peer has
+    // Enables piece selection - Piece picker can make informed decisions
+    // Interest determination - Determines if we want to download from this peer
+    // Connection management - May disconnect redundant connections
+    // Performance optimization - Avoids individual HAVE messages for initial state
     async fn on_bitfield(&mut self) -> Result<(), ConnectionError> {
         debug!("recv bitfield");
         Ok(())
@@ -332,6 +353,7 @@ impl Peer<Connected> {
     }
 
     async fn maybe_request_medata(&mut self) -> Result<(), ConnectionError> {
+        // If extension map to id 0, the peer removed in runtime the extension support
         let client_support_metadata_yet = self
             .state
             .remote_extensions
@@ -340,8 +362,9 @@ impl Peer<Connected> {
             .unwrap_or(false);
 
         if dbg!(client_support_metadata_yet && !self.state.have_metadata) {
-            self.request_metadata().await?;
+            self.request_metadata().await?
         }
+
         Ok(())
     }
 
@@ -440,7 +463,7 @@ impl Peer<Connected> {
     }
 
     const UT_METADATA_ID: u8 = 1;
-    async fn on_extension(&self, raw_msg: RawExtendedMessage) -> Result<(), ConnectionError> {
+    async fn on_extension(&mut self, raw_msg: RawExtendedMessage) -> Result<(), ConnectionError> {
         debug!("recv raw extended message");
         if raw_msg.id == Self::UT_METADATA_ID {
             self.handle_metadata_message(raw_msg.payload).await?;
@@ -451,7 +474,8 @@ impl Peer<Connected> {
         Ok(())
     }
 
-    async fn handle_metadata_message(&self, payload: Bytes) -> Result<(), ConnectionError> {
+    // Metadata
+    async fn handle_metadata_message(&mut self, payload: Bytes) -> Result<(), ConnectionError> {
         use bencode::{Bencode, BencodeDict};
 
         // Parse the bencode part to get the message info
@@ -480,6 +504,22 @@ impl Peer<Connected> {
             REQUEST_ID => {
                 // Request - peer is asking us for metadata (we don't handle this yet)
                 tracing::debug!("Received metadata request for piece {}", piece);
+
+                let extension_id = self.state.remote_extensions[EXTENSION_NAME_METADATA];
+                let reject_metadata_msg = MetadataMessage::Reject { piece };
+                let payload = Bencode::encode(&reject_metadata_msg).into();
+
+                let raw_message = RawExtendedMessage {
+                    id: extension_id as u8,
+                    payload,
+                };
+
+                self.state
+                    .sink
+                    .send(Message::Extended(ExtendedMessage::ExtensionMessage(
+                        raw_message,
+                    )))
+                    .await?
             }
             DATA_ID => {
                 // Data - peer is sending us metadata
@@ -521,7 +561,14 @@ impl Peer<Connected> {
             REJECT_ID => {
                 // Reject - peer rejected our request
                 tracing::debug!("Metadata request for piece {} was rejected", piece);
-                // Maybe request from a different peer or retry later
+                // Cancel the metadata request
+                let _ = self
+                    .torrent_tx
+                    .send(TorrentMessage::RejectedMetadataRequest {
+                        pid: self.pid,
+                        rejected_piece: piece,
+                    })
+                    .await;
             }
             _ => {
                 return Err(ConnectionError::Protocol(format!(
