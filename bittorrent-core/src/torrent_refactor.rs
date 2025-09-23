@@ -281,9 +281,16 @@ impl Torrent {
     }
 
     pub fn add_peer(&mut self, peer: PeerSource) {
+        // check if we already are connected to this peer?
+        let already_connected = self.peers.values().any(|p| p.addr == *peer.get_addr());
+        if already_connected {
+            return;
+        }
+
         if self.peers.len() >= 25 {
             return;
         }
+
         // Create peer info
         let peer_id = PEER_COUNTER.fetch_add(1, Ordering::Relaxed);
         let peer_id = Pid(peer_id);
@@ -291,6 +298,8 @@ impl Torrent {
         let (peer_tx, peer_rx) = mpsc::channel(64);
 
         info!("connecting to {}", peer.get_addr());
+
+        self.metrics.connected_peers.fetch_add(1, Ordering::Relaxed);
         match peer {
             PeerSource::Inbound {
                 stream,
@@ -319,8 +328,8 @@ impl Torrent {
         match msg {
             PeerDisconnected(pid) => self.clean_up_peer(pid),
             PeerError(pid, err) => {
-                // tracing::warn!(?err, "Peer {pid:?} encountered an error");
-                // self.clean_up_peer(pid);
+                tracing::warn!(?err, "Peer {pid:?} encountered an error");
+                self.clean_up_peer(pid);
             }
             Have { pid, piece_idx } => {
                 // Update our knowledge about what pieces the peer has
@@ -429,7 +438,7 @@ impl Torrent {
                 match self.metadata.mark_metadata_piece(piece_idx) {
                     Ok(true) => {
                         tracing::info!("All metadata pieces received, constructing info...");
-                        self.on_complete_metadata()?;
+                        self.on_complete_metadata().await?;
                     }
                     Ok(false) => {
                         // Still need more pieces, continue requesting
@@ -457,21 +466,28 @@ impl Torrent {
     }
 
     // TODO: when metadata implement an enum i will use `?`
-    fn on_complete_metadata(&mut self) -> Result<(), TorrentError> {
+    async fn on_complete_metadata(&mut self) -> Result<(), TorrentError> {
         if let Err(e) = self.metadata.construct_info() {
             tracing::error!("Failed to construct info from metadata: {}", e);
+            // BUG: we need to re-Start metadata fetching mechanism
         } else {
-            tracing::info!("Successfully constructed metadata info!");
-            if let Some(info) = self.metadata.info() {
-                tracing::info!("Metadata Info: {:#?}", info);
-            }
+            let info = self
+                .metadata
+                .info()
+                .expect("metadata was not successfully constructed");
+
+            tracing::info!("Metadata Info: {:#?}", info);
+            self.broadcast_to_peers(PeerMessage::HaveMetadata).await;
             // Now we have complete metadata and can start downloading the actual torrent
             // we have to notify peers that we now have metadata
         }
         Ok(())
     }
 
-    fn clean_up_peer(&mut self, pid: Pid) {}
+    fn clean_up_peer(&mut self, pid: Pid) {
+        self.peers.remove(&pid);
+        self.metrics.connected_peers.fetch_sub(1, Ordering::Relaxed);
+    }
 
     /// Send a message to a specific peer
     async fn send_to_peer(&self, pid: Pid, message: PeerMessage) {

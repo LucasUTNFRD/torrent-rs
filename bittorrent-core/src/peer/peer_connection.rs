@@ -616,7 +616,7 @@ pub fn spawn_outgoing_peer(
 ) {
     tokio::spawn(async move {
         let result: Result<(), ConnectionError> = async {
-            let p0 = Peer::new(pid, addr, info_hash, torrent_tx, cmd_rx);
+            let p0 = Peer::new(pid, addr, info_hash, torrent_tx.clone(), cmd_rx);
             // Establish connection to remote peer
             let p1 = p0.connect().await?;
             // Handshake remote peer
@@ -627,7 +627,9 @@ pub fn spawn_outgoing_peer(
         .await;
 
         if let Err(err) = result {
-            debug!(?err);
+            let _ = torrent_tx.send(TorrentMessage::PeerError(pid, err)).await;
+        } else {
+            let _ = torrent_tx.send(TorrentMessage::PeerDisconnected(pid)).await;
         }
     });
 }
