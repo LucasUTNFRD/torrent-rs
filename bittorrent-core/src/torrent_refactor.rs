@@ -280,6 +280,7 @@ impl Torrent {
         Ok(())
     }
 
+    // TODO: implement a retry mechanism for failed peer
     pub fn add_peer(&mut self, peer: PeerSource) {
         // check if we already are connected to this peer?
         let already_connected = self.peers.values().any(|p| p.addr == *peer.get_addr());
@@ -465,7 +466,8 @@ impl Torrent {
         Ok(())
     }
 
-    // TODO: when metadata implement an enum i will use `?`
+    // Broadcast have metadata to peers
+    // TODO: Register torrent file to storage
     async fn on_complete_metadata(&mut self) -> Result<(), TorrentError> {
         if let Err(e) = self.metadata.construct_info() {
             tracing::error!("Failed to construct info from metadata: {}", e);
@@ -477,6 +479,7 @@ impl Torrent {
                 .expect("metadata was not successfully constructed");
 
             tracing::info!("Metadata Info: {:#?}", info);
+
             self.broadcast_to_peers(PeerMessage::HaveMetadata).await;
             // Now we have complete metadata and can start downloading the actual torrent
             // we have to notify peers that we now have metadata
