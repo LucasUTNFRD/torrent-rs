@@ -28,7 +28,7 @@ use tokio::{
     sync::{mpsc, oneshot},
 };
 use tokio_util::codec::Framed;
-use tracing::{debug, info, warn};
+use tracing::{debug, field::debug, info, warn};
 
 use crate::{
     bitfield::{Bitfield, BitfieldError},
@@ -291,6 +291,7 @@ impl Peer<Connected> {
                 if self.state.bitfield_received && !self.state.bitfield.is_empty() {
                     let num_pieces = self.state.metadata.as_ref().unwrap().pieces.len();
                     self.state.bitfield.validate(num_pieces)?;
+                    debug!("HERE IPO");
                 }
 
                 // Update interest status now that we have metadata
@@ -550,7 +551,7 @@ impl Peer<Connected> {
                 payload,
             };
 
-            debug!(?raw_message, "requesting metadata");
+            debug!(?raw_message, "---------- requesting metadata piece {piece}");
 
             self.state
                 .sink
@@ -641,6 +642,8 @@ impl Peer<Connected> {
     async fn handle_metadata_message(&mut self, payload: Bytes) -> Result<(), ConnectionError> {
         use bencode::{Bencode, BencodeDict};
 
+        //  TODO: Move this to protocol
+
         // Parse the bencode part to get the message info
         let decoded = Bencode::decode(&payload).map_err(|e| {
             ConnectionError::Protocol(format!("Failed to decode metadata message: {}", e))
@@ -706,7 +709,7 @@ impl Peer<Connected> {
                 let data = payload.slice(data_start..);
 
                 tracing::debug!(
-                    "Received metadata piece {}, data size: {}",
+                    "-------------- Received metadata piece {}, data size: {}",
                     piece,
                     data.len()
                 );
@@ -768,6 +771,7 @@ pub fn spawn_outgoing_peer(
             warn!(?err);
             let _ = torrent_tx.send(TorrentMessage::PeerError(pid, err)).await;
         } else {
+            warn!("disconnected");
             let _ = torrent_tx.send(TorrentMessage::PeerDisconnected(pid)).await;
         }
     });

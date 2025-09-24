@@ -74,6 +74,10 @@ pub enum TorrentError {
 pub enum TorrentMessage {
     PeerDisconnected(Pid),
     PeerError(Pid, ConnectionError),
+    ValidMetadata {
+        resp: oneshot::Sender<bool>,
+    },
+
     Have {
         pid: Pid,
         piece_idx: u32,
@@ -81,12 +85,12 @@ pub enum TorrentMessage {
     Bitfield(Pid, Vec<u8>),
     BlockRequest(Pid, BlockInfo),
     AddBlock(Pid, peer_protocol::protocol::Block),
+    // Ignore this for now
     Interest(Pid),
     NotInterest(Pid),
+
+    //
     NeedTask(Pid),
-    ValidMetadata {
-        resp: oneshot::Sender<bool>,
-    },
 
     // -- METADATA REQUEST --
     PeerWithMetadata {
@@ -296,7 +300,7 @@ impl Torrent {
             return;
         }
 
-        if self.peers.len() >= 25 {
+        if self.peers.len() >= 50 {
             return;
         }
 
@@ -402,7 +406,6 @@ impl Torrent {
             }
             ValidMetadata { resp } => {
                 let _ = resp.send(self.metadata.has_metadata());
-                debug_assert!(!self.metadata.has_metadata());
             }
             PeerWithMetadata {
                 pid: _,
@@ -452,7 +455,7 @@ impl Torrent {
                     Ok(false) => {
                         // Still need more pieces, continue requesting
                         tracing::debug!(
-                            "Metadata piece {} marked, still need more pieces",
+                            "---------------- Metadata piece {} marked, still need more pieces",
                             piece_idx
                         );
                     }
@@ -488,10 +491,14 @@ impl Torrent {
 
             tracing::info!("Metadata Info: {:#?}", info);
 
-            // self.broadcast_to_peers(PeerMessage::HaveMetadata).await;
-            // Now we have complete metadata and can start downloading the actual torrent
-            // we have to notify peers that we now have metadata
+            // TODO:
+            // 1. Broadcast Have metadata to peers
+            // 2. Register this torrent in storage
+
+            self.broadcast_to_peers(PeerMessage::HaveMetadata(info))
+                .await;
         }
+
         Ok(())
     }
 

@@ -12,6 +12,7 @@ use bytes::{Bytes, BytesMut};
 use magnet_uri::Magnet;
 use sha1::{Digest, Sha1};
 use tokio::time::Instant;
+use tracing::debug;
 
 /// Represents the metadata of a torrent and its current metadata state
 #[derive(Debug, Clone)]
@@ -254,6 +255,7 @@ impl Metadata {
     }
 
     pub fn construct_info(&mut self) -> Result<(), String> {
+        debug!("constructing metadata-------------");
         match self {
             Metadata::MagnetUri {
                 magnet,
@@ -343,11 +345,11 @@ impl Metadata {
     }
 
     /// Get the Info struct if available
-    pub fn info(&self) -> Option<&Info> {
+    pub fn info(&self) -> Option<Arc<Info>> {
         match &self {
-            Metadata::TorrentFile(torrent_info) => Some(&torrent_info.info),
+            Metadata::TorrentFile(torrent_info) => Some(torrent_info.info.clone()),
             Metadata::MagnetUri { metadata_state, .. } => match metadata_state {
-                MetadataState::Complete(info) => Some(info),
+                MetadataState::Complete(info) => Some(info.clone()),
                 _ => None,
             },
         }

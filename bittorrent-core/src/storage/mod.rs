@@ -473,6 +473,8 @@ mod test {
             },
         };
 
+        let info = Arc::new(info);
+
         let torrent = TorrentInfo {
             info,
             announce: "http://localhost".to_string(),
@@ -559,6 +561,8 @@ mod test {
             },
         };
 
+        let info = Arc::new(info);
+
         let torrent = TorrentInfo {
             info,
             announce: "http://localhost".to_string(),
@@ -635,6 +639,8 @@ mod test {
                 md5sum: None,
             },
         };
+
+        let info = Arc::new(info);
 
         let torrent = TorrentInfo {
             info,

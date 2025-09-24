@@ -4,6 +4,7 @@ use std::{
     fs::File,
     io::Read,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use bencode::{Bencode, BencodeError, Encode};
@@ -15,7 +16,7 @@ use crate::types::InfoHash;
 #[derive(Debug, Clone)]
 pub struct TorrentInfo {
     /// Dictionary describing the file(s) of the torrent
-    pub info: Info,
+    pub info: Arc<Info>,
 
     /// The announce URL of the tracker
     pub announce: String,
@@ -373,7 +374,7 @@ fn parse_torrent_from_bencode(bencode: &Bencode) -> Result<TorrentInfo, TorrentP
     let encoding = get_optional_string_from_dict(dict, KEY_ENCODING);
 
     Ok(TorrentInfo {
-        info,
+        info: Arc::new(info),
         announce,
         announce_list,
         creation_date,
