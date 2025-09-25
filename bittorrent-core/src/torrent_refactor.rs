@@ -197,6 +197,8 @@ impl Torrent {
             .filter_map(|url| Url::parse(&url).ok())
             .collect();
 
+        let bitfield = Bitfield::with_size(torrent_info.num_pieces());
+
         let metadata = Metadata::TorrentFile(Arc::new(torrent_info));
         // let metadata = Arc::new(metadata);
 
@@ -215,7 +217,7 @@ impl Torrent {
                 shutdown_rx,
                 torrent_tx: tx.clone(),
                 torrent_rx: rx,
-                bitfield: Bitfield::new(),
+                bitfield,
             },
             tx,
         )
