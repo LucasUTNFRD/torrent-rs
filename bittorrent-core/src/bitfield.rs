@@ -1,3 +1,5 @@
+use std::fmt;
+
 use bytes::Bytes;
 use thiserror::Error;
 
@@ -14,10 +16,23 @@ pub enum BitfieldError {
     NonZeroSpareBits,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct Bitfield {
-    inner: Vec<u8>,
+    inner: Vec<u8>, // is this the best fit for the data?
     num_pieces: usize,
+}
+
+impl fmt::Debug for Bitfield {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Print each byte as 8-bit binary
+        let bits: Vec<String> = self.inner.iter().map(|b| format!("{:08b}", b)).collect();
+        write!(
+            f,
+            "Bitfield {{ inner: [{}], num_pieces: {} }}",
+            bits.join(" "),
+            self.num_pieces
+        )
+    }
 }
 
 impl Bitfield {
@@ -114,6 +129,8 @@ impl Bitfield {
 
         self.num_pieces = num_pieces;
 
+        debug_assert!(self.num_pieces != 0);
+
         Ok(())
     }
 
@@ -153,6 +170,10 @@ impl Bitfield {
         let byte_idx = index / 8;
         let bit_idx = index % 8;
         self.inner[byte_idx] |= MSB_MASK >> bit_idx;
+    }
+
+    pub fn iter_set(&self) -> impl Iterator<Item = usize> {
+        (0..self.num_pieces).filter(|&i| self.has(i))
     }
 
     pub fn has(&self, index: usize) -> bool {
@@ -292,6 +313,15 @@ mod test {
         assert_eq!(bitfield.inner[0], 0b10000001); // bits 0 and 7
         assert_eq!(bitfield.inner[1], 0b10000000); // bit 8
         assert_eq!(bitfield.inner[2], 0b00010000); // bit 19
+        //
+
+        let mut iter = bitfield.iter_set();
+
+        assert_eq!(iter.next(), Some(0));
+        assert_eq!(iter.next(), Some(7));
+        assert_eq!(iter.next(), Some(8));
+        assert_eq!(iter.next(), Some(19));
+        assert_eq!(iter.next(), None); // bit 19
     }
 
     #[test]
@@ -316,7 +346,6 @@ mod test {
         bitfield.resize(4);
         assert_eq!(bitfield.size(), 4);
         assert!(bitfield.has(0));
-        assert!(!bitfield.has(7)); // This will panic in real usage but test the resize logic
     }
 
     #[test]
@@ -398,4 +427,9 @@ mod test {
             assert!(bf.has(i), "Piece {} should be set", i);
         }
     }
+
+    // implement a test on iter set
+    // like simulating us comparing our bitfield to peer to check if we should be interested
+    // and assure that there are not malfunctions neither panics.
+    //
 }

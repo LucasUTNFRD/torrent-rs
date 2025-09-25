@@ -29,7 +29,7 @@ use tokio::{
 };
 
 use tokio_util::codec::Framed;
-use tracing::{debug, info, warn};
+use tracing::{debug, field::debug, info, warn};
 
 use crate::{
     bitfield::{Bitfield, BitfieldError},
@@ -302,13 +302,37 @@ impl Peer<Connected> {
     }
 
     async fn update_interest_status(&mut self) -> Result<(), ConnectionError> {
+        if !self.state.bitfield_received {
+            debug!("we did not received the bitfield yet");
+            return Ok(());
+        }
+
         if self.state.interesting {
             return Ok(());
         }
 
-        // ask torrent manager if we should be interested in this peer
+        // if we have the bitfield we we dont have the metadata yet, it mean it was not vaildated
+        if !self.state.have_metadata {
+            debug!("the bitfield is not validated");
+            return Ok(());
+        }
 
-        todo!()
+        debug!("checking interest ----------------");
+
+        // ask torrent manager if we should be interested in this peer
+        let (resp_tx, resp_rx) = oneshot::channel();
+        let _ = self
+            .torrent_tx
+            .send(TorrentMessage::ShouldBeInterested {
+                pid: self.pid,
+                bitfield: self.state.bitfield.clone(),
+                resp_tx,
+            })
+            .await;
+
+        self.state.interesting = resp_rx.await.expect("sender dropped");
+
+        Ok(())
     }
 
     async fn send_extended_handshake(&mut self) -> Result<(), ConnectionError> {
@@ -481,7 +505,13 @@ impl Peer<Connected> {
 
         if self.state.have_metadata {
             // Step 2: Size Validation - Verify bitfield size matches expected piece count
-            let num_pieces = self.state.metadata.as_ref().unwrap().pieces.len();
+            let num_pieces = self
+                .state
+                .metadata
+                .as_ref()
+                .expect("have metatada flag without Some(metadata)")
+                .pieces
+                .len();
 
             match Bitfield::from_bytes_checked(bitfield_payload, num_pieces) {
                 Ok(bitfield) => {

@@ -23,7 +23,7 @@ use tokio::{
     sync::{mpsc, oneshot, watch},
     time::sleep,
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, field::debug, info, warn};
 use tracker_client::{ClientState, Events, TrackerError, TrackerHandler, TrackerResponse};
 use url::Url;
 
@@ -82,14 +82,18 @@ pub enum TorrentMessage {
         pid: Pid,
         piece_idx: u32,
     },
-    Bitfield(Pid, Vec<u8>),
     BlockRequest(Pid, BlockInfo),
     AddBlock(Pid, peer_protocol::protocol::Block),
-    // Ignore this for now
+    // Peer state management
+    ShouldBeInterested {
+        pid: Pid,
+        bitfield: Bitfield,
+        resp_tx: oneshot::Sender<bool>,
+    },
     Interest(Pid),
     NotInterest(Pid),
 
-    //
+    // Seeding / Uploading related
     NeedTask(Pid),
 
     // -- METADATA REQUEST --
@@ -349,10 +353,6 @@ impl Torrent {
                 tracing::debug!("Peer {pid:?} has piece {piece_idx}");
                 // TODO: Update piece picker/availability map
             }
-            Bitfield(pid, bitfield) => {
-                tracing::debug!("Received bitfield from peer {pid:?}");
-                // TODO: Update piece picker/availability map with full bitfield
-            }
             BlockRequest(pid, block_info) => {
                 // Handle a request for a block from a peer
                 // if let Some(peer_tx) = self.peers.get(&pid) {
@@ -393,6 +393,24 @@ impl Torrent {
             NotInterest(pid) => {
                 tracing::debug!("Peer {pid:?} is no longer interested in our pieces");
                 // TODO: Consider choking this peer to save resources
+            }
+            ShouldBeInterested {
+                pid: _,
+                bitfield,
+                resp_tx,
+            } => {
+                debug!("---------- received a should be interested");
+                debug!(?bitfield);
+                let mut interest = false;
+
+                for piece_peer_has in bitfield.iter_set() {
+                    if !self.bitfield.has(piece_peer_has) {
+                        interest = true;
+                        break;
+                    }
+                }
+
+                let _ = resp_tx.send(interest);
             }
             NeedTask(pid) => {
                 // Peer needs more blocks to download
@@ -477,8 +495,10 @@ impl Torrent {
         Ok(())
     }
 
-    // Broadcast have metadata to peers
-    // TODO: Register torrent file to storage
+    // 1.Register torrent in storage
+    // 2.Build bitfield for this torrent
+    // 3.Notify peer connection control structure about have metainfo for ending ut_metadfata
+    // fetching
     async fn on_complete_metadata(&mut self) -> Result<(), TorrentError> {
         if let Err(e) = self.metadata.construct_info() {
             tracing::error!("Failed to construct info from metadata: {}", e);
@@ -489,11 +509,12 @@ impl Torrent {
                 .info()
                 .expect("metadata was not successfully constructed");
 
-            tracing::info!("Metadata Info: {:#?}", info);
+            self.bitfield = Bitfield::with_size(info.pieces.len());
 
             // TODO:
-            // 1. Broadcast Have metadata to peers
-            // 2. Register this torrent in storage
+            // register metadata
+
+            tracing::info!("Metadata Info: {:#?}", info);
 
             self.broadcast_to_peers(PeerMessage::HaveMetadata(info))
                 .await;
