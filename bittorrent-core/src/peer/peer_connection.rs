@@ -1,4 +1,4 @@
-#![allow(dead_code)]
+// #![allow(dead_code)]
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     net::SocketAddr,
@@ -27,8 +27,9 @@ use tokio::{
     net::TcpStream,
     sync::{mpsc, oneshot},
 };
+
 use tokio_util::codec::Framed;
-use tracing::{debug, field::debug, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::{
     bitfield::{Bitfield, BitfieldError},
@@ -291,7 +292,6 @@ impl Peer<Connected> {
                 if self.state.bitfield_received && !self.state.bitfield.is_empty() {
                     let num_pieces = self.state.metadata.as_ref().unwrap().pieces.len();
                     self.state.bitfield.validate(num_pieces)?;
-                    debug!("HERE IPO");
                 }
 
                 // Update interest status now that we have metadata
@@ -442,9 +442,9 @@ impl Peer<Connected> {
         }
 
         // Step 4: Update Peer State - Set bit in peer's bitfield and increment piece count
-        let had_piece_before = self.state.bitfield.has_bit(have_idx as usize);
+        let had_piece_before = self.state.bitfield.has(have_idx as usize);
         if !had_piece_before {
-            self.state.bitfield.set_bit(have_idx as usize);
+            self.state.bitfield.set(have_idx as usize);
 
             // Notify torrent about piece availability
             let _ = self
@@ -709,7 +709,7 @@ impl Peer<Connected> {
                 let data = payload.slice(data_start..);
 
                 tracing::debug!(
-                    "-------------- Received metadata piece {}, data size: {}",
+                    "Received metadata piece {}, data size: {}",
                     piece,
                     data.len()
                 );
