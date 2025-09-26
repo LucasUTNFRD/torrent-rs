@@ -29,12 +29,13 @@ use tokio::{
 };
 
 use tokio_util::codec::Framed;
-use tracing::{debug, field::debug, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::{
     bitfield::{Bitfield, BitfieldError},
+    peer::PeerMessage,
     session::CLIENT_ID,
-    torrent_refactor::{PeerMessage, Pid, TorrentMessage},
+    torrent_refactor::{Pid, TorrentMessage},
 };
 
 ///The metadata is handled in blocks of 16KiB (16384 Bytes).
@@ -290,7 +291,13 @@ impl Peer<Connected> {
 
                 // Validate bitfield if we received one before having metadata
                 if self.state.bitfield_received && !self.state.bitfield.is_empty() {
-                    let num_pieces = self.state.metadata.as_ref().unwrap().pieces.len();
+                    let num_pieces = self
+                        .state
+                        .metadata
+                        .as_ref()
+                        .expect("Bitfiled received and was not empty")
+                        .pieces
+                        .len();
                     self.state.bitfield.validate(num_pieces)?;
                 }
 
@@ -439,7 +446,14 @@ impl Peer<Connected> {
 
         // Step 3: Index Validation - Ensure piece index is within valid range
         if self.state.have_metadata {
-            let num_pieces = self.state.metadata.as_ref().unwrap().pieces.len();
+            let num_pieces = self
+                .state
+                .metadata
+                .as_ref()
+                .expect("Have metadata")
+                .pieces
+                .len();
+
             if have_idx as usize >= num_pieces {
                 warn!(
                     "Received HAVE for invalid piece index {} (max: {})",
@@ -452,7 +466,7 @@ impl Peer<Connected> {
                 )));
             }
         } else {
-            // Pre-metadata validation - cap at 64k pieces
+            // Pre-metadata validation - cap at 64k pieces - based on libtorrent codebase
             if have_idx >= 65536 {
                 warn!(
                     "Received HAVE for piece index {} exceeding 64k limit",
@@ -465,7 +479,8 @@ impl Peer<Connected> {
             }
         }
 
-        // Step 4: Update Peer State - Set bit in peer's bitfield and increment piece count
+        // Step 4: Update Peer State
+        // - Set bit in peer's bitfield and increment piece count
         let had_piece_before = self.state.bitfield.has(have_idx as usize);
         if !had_piece_before {
             self.state.bitfield.set(have_idx as usize);

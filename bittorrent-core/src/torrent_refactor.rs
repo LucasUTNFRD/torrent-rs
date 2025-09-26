@@ -5,7 +5,7 @@ use std::{
     net::SocketAddr,
     sync::{
         Arc,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -23,7 +23,7 @@ use tokio::{
     sync::{mpsc, oneshot, watch},
     time::sleep,
 };
-use tracing::{debug, field::debug, info, warn};
+use tracing::{debug, info, warn};
 use tracker_client::{ClientState, Events, TrackerError, TrackerHandler, TrackerResponse};
 use url::Url;
 
@@ -31,7 +31,10 @@ use crate::{
     Storage,
     bitfield::Bitfield,
     metadata::{Metadata, MetadataState},
-    peer::peer_connection::{ConnectionError, spawn_outgoing_peer},
+    peer::{
+        PeerMessage, PeerState,
+        peer_connection::{ConnectionError, spawn_outgoing_peer},
+    },
 };
 
 // Peer related
@@ -125,25 +128,6 @@ pub struct Metrics {
     pub downloaded_bytes: AtomicU64,
     pub uploaded_bytes: AtomicU64,
     pub connected_peers: AtomicUsize,
-}
-
-// Peer related
-
-#[derive(Debug, Clone)]
-pub enum PeerMessage {
-    SendHave { piece_index: u32 },
-    SendBitfield { bitfield: Vec<u8> },
-    SendChoke,
-    SendUnchoke,
-    Disconnect,
-    SendMessage(Message),
-    HaveMetadata(Arc<Info>),
-}
-
-pub(crate) struct PeerState {
-    pub(crate) addr: SocketAddr,
-    // pub(crate) bitfield: Bitfield,
-    pub(crate) tx: mpsc::Sender<PeerMessage>,
 }
 
 //
@@ -581,7 +565,11 @@ impl Torrent {
                         return;
                     }
 
-                    let response = response.unwrap();
+                    let Ok(response) = response else {
+                        tracing::warn!("Tracker failure");
+                        break;
+                    };
+
                     let sleep_duration = response.interval;
                     let _ = announce_tx.send(response).await;
 

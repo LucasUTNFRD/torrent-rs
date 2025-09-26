@@ -1,7 +1,44 @@
-// mod choker;
-pub mod peer_connection;
-// pub mod error;
-// pub mod manager;
-// mod piece_picker;
+use std::{
+    net::SocketAddr,
+    sync::{
+        Arc,
+        atomic::{AtomicU32, AtomicU64},
+    },
+};
 
-use super::bitfield::Bitfield;
+use bittorrent_common::metainfo::Info;
+use peer_protocol::protocol::Message;
+use tokio::sync::mpsc;
+
+pub mod peer_connection;
+
+mod metrics;
+// Peer related
+
+#[derive(Debug, Clone)]
+pub enum PeerMessage {
+    SendHave { piece_index: u32 },
+    SendBitfield { bitfield: Vec<u8> },
+    SendChoke,
+    SendUnchoke,
+    Disconnect,
+    SendMessage(Message),
+    HaveMetadata(Arc<Info>),
+}
+
+pub struct PeerState {
+    pub addr: SocketAddr,
+    // pub(crate) bitfield: Bitfield,
+    pub tx: mpsc::Sender<PeerMessage>,
+}
+
+struct PeerMetrics {
+    pub download_rate: AtomicU64, // bytes/sec
+    pub upload_rate: AtomicU64,   // bytes/sec
+    pub bytes_downloaded: AtomicU64,
+    pub bytes_uploaded: AtomicU64,
+    pub requests_sent: AtomicU32,
+    pub requests_completed: AtomicU32,
+    pub requests_failed: AtomicU32,
+    pub last_activity: AtomicU64, // unix timestamp nanos
+}
