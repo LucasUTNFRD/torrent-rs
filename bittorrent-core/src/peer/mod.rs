@@ -31,14 +31,3 @@ pub struct PeerState {
     // pub(crate) bitfield: Bitfield,
     pub tx: mpsc::Sender<PeerMessage>,
 }
-
-struct PeerMetrics {
-    pub download_rate: AtomicU64, // bytes/sec
-    pub upload_rate: AtomicU64,   // bytes/sec
-    pub bytes_downloaded: AtomicU64,
-    pub bytes_uploaded: AtomicU64,
-    pub requests_sent: AtomicU32,
-    pub requests_completed: AtomicU32,
-    pub requests_failed: AtomicU32,
-    pub last_activity: AtomicU64, // unix timestamp nanos
-}

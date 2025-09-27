@@ -4,10 +4,10 @@ use std::{
 };
 
 #[derive(Debug)]
-struct PeerMetrics {
-    pub download_rate: AtomicU64, // bytes/sec
-    pub bytes_downloaded: AtomicU64,
-    pub last_activity: AtomicU64, // unix timestamp nanos
+pub struct PeerMetrics {
+    download_rate: AtomicU64, // bytes/sec
+    bytes_downloaded: AtomicU64,
+    last_activity: AtomicU64, // unix timestamp nanos
 }
 
 impl PeerMetrics {

@@ -33,7 +33,8 @@ use tracing::{debug, info, warn};
 
 use crate::{
     bitfield::{Bitfield, BitfieldError},
-    peer::PeerMessage,
+    peer::{PeerMessage, metrics::PeerMetrics},
+    piece_picker::PiecePicker,
     session::CLIENT_ID,
     torrent_refactor::{Pid, TorrentMessage},
 };
@@ -157,6 +158,15 @@ pub struct Connected {
     sink: SplitSink<Framed<TcpStream, MessageCodec>, Message>,
     stream: SplitStream<Framed<TcpStream, MessageCodec>>,
 
+    // Download related
+    //
+    // the blocks we have reserved in the piece
+    // picker and will request from this peer.
+    // std::vector<pending_block> m_request_queue;
+
+    // the queue of blocks we have requested
+    // from this peer
+    // std::vector<pending_block> m_download_queue;
     outbound_requests: HashSet<BlockInfo>,
     incoming_request: HashSet<BlockInfo>,
 
@@ -173,8 +183,10 @@ pub struct Connected {
     interesting: bool,
     choked: bool,
 
+    // TODO: merge this two into None or Option<Arc<Info>>
     have_metadata: bool,
     metadata: Option<Arc<Info>>,
+
     metadata_size: usize,
     max_outgoing_request: usize,
 
@@ -400,16 +412,46 @@ impl Peer<Connected> {
         self.state.peer_choked = false;
         // todo: update last unchoked interval
         if self.state.interesting {
+            self.request_block()?;
             // request block for this torrent
             // send blocks
         }
+
         Ok(())
     }
 
+    // fn send
+
+    //
     fn request_block(&self) -> Result<(), ConnectionError> {
-        // check that the metadata is valid
-        todo!()
+        if !self.state.have_metadata {
+            return Ok(());
+        }
+
+        let info = self.state.metadata.as_ref().expect("have metadata").clone();
+        let bitfield = &self.state.bitfield;
+
+        // self.torrent_tx.send(TorrentMessage::NeedTask(self.pid));
+
+        let mut p = PiecePicker::new(info);
+        let dq_size = self.download_queue_size();
+
+        p.pick_piece(bitfield, dq_size);
+
+        Ok(())
     }
+
+    fn download_queue_size(&self) -> usize {
+        let metrics = PeerMetrics::new();
+        let download_rate = metrics.get_download_rate(); //metric in bytes per second
+
+        // assumes the latency of the link to be 1 second.
+        // https://blog.libtorrent.org/2011/11/requesting-pieces/
+        let m_desired_queue_size = download_rate / METADATA_BLOCK_SIZE as u64;
+        m_desired_queue_size as usize
+    }
+
+    fn send_block_request() {}
 
     async fn on_interested(&mut self) -> Result<(), ConnectionError> {
         todo!()
@@ -563,6 +605,9 @@ impl Peer<Connected> {
     }
 
     async fn maybe_request_medata(&mut self) -> Result<(), ConnectionError> {
+        if self.state.have_metadata {
+            return Ok(());
+        }
         // If extension map to id 0, the peer removed in runtime the extension support
         let client_support_metadata_yet = self
             .state
@@ -571,7 +616,7 @@ impl Peer<Connected> {
             .map(|ext| *ext != 0)
             .unwrap_or(false);
 
-        if dbg!(client_support_metadata_yet && !self.state.have_metadata) {
+        if client_support_metadata_yet {
             self.request_metadata().await?
         }
 

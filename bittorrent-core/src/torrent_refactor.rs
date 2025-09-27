@@ -23,7 +23,7 @@ use tokio::{
     sync::{mpsc, oneshot, watch},
     time::sleep,
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, field::debug, info, warn};
 use tracker_client::{ClientState, Events, TrackerError, TrackerHandler, TrackerResponse};
 use url::Url;
 
@@ -35,6 +35,7 @@ use crate::{
         PeerMessage, PeerState,
         peer_connection::{ConnectionError, spawn_outgoing_peer},
     },
+    piece_picker::{PieceCollector, PiecePicker},
 };
 
 // Peer related
@@ -153,6 +154,10 @@ pub struct Torrent {
     torrent_tx: mpsc::Sender<TorrentMessage>,
     torrent_rx: mpsc::Receiver<TorrentMessage>,
 
+    // Download related
+    piece_picker: Option<PiecePicker>,
+    piece_collector: Option<PieceCollector>,
+
     /// Shutdown signal
     shutdown_rx: watch::Receiver<()>,
 
@@ -202,6 +207,8 @@ impl Torrent {
                 torrent_tx: tx.clone(),
                 torrent_rx: rx,
                 bitfield,
+                piece_picker: None,
+                piece_collector: None,
             },
             tx,
         )
@@ -241,6 +248,8 @@ impl Torrent {
                 torrent_tx: tx.clone(),
                 torrent_rx: rx,
                 bitfield: Bitfield::new(),
+                piece_picker: None,
+                piece_collector: None,
             },
             tx,
         )
@@ -248,11 +257,7 @@ impl Torrent {
 
     /// Start torrent session
     pub async fn start_session(mut self) -> Result<(), TorrentError> {
-        if self.metadata.has_metadata()
-            && let Metadata::TorrentFile(file) = &self.metadata
-        {
-            self.storage.add_torrent(file.clone());
-        }
+        self.init_interal();
 
         // Star announcing to Trackers/DHT
         let (announce_tx, mut announce_rx) = mpsc::channel(16);
@@ -280,6 +285,36 @@ impl Torrent {
         }
 
         Ok(())
+    }
+
+    // init bitfield
+    // init piece picker
+    // init piece collector
+    fn init_interal(&mut self) {
+        if !self.metadata.has_metadata() {
+            return;
+        }
+
+        match &self.metadata {
+            Metadata::TorrentFile(torrent_info) => {
+                self.storage.add_torrent(torrent_info.clone());
+
+                let info = torrent_info.info.clone();
+                self.bitfield = Bitfield::with_size(info.pieces.len());
+                self.piece_picker = Some(PiecePicker::new(info.clone()));
+                self.piece_collector = Some(PieceCollector::new(info.clone()));
+            }
+
+            Metadata::MagnetUri {
+                metadata_state: MetadataState::Complete(info),
+                ..
+            } => {
+                self.bitfield = Bitfield::with_size(info.pieces.len());
+                self.piece_picker = Some(PiecePicker::new(info.clone()));
+                self.piece_collector = Some(PieceCollector::new(info.clone()));
+            }
+            _ => {}
+        }
     }
 
     // TODO: implement a retry mechanism for failed peer
@@ -365,6 +400,18 @@ impl Torrent {
                     block.index,
                     block.begin
                 );
+
+                let Some(piece) = self
+                    .piece_collector
+                    .as_mut()
+                    .expect("state initializated")
+                    .add_block(block)
+                else {
+                    return Ok(());
+                };
+
+                // TODO:
+                // 1. if valid then write
 
                 // Write the block to storage
                 // TODO: Handle the result properly
@@ -490,15 +537,12 @@ impl Torrent {
             tracing::error!("Failed to construct info from metadata: {}", e);
             // BUG: we need to re-Start metadata fetching mechanism
         } else {
+            self.init_interal();
+
             let info = self
                 .metadata
                 .info()
                 .expect("metadata was not successfully constructed");
-
-            self.bitfield = Bitfield::with_size(info.pieces.len());
-
-            // TODO:
-            // register metadata
 
             tracing::info!("Metadata Info: {:#?}", info);
 

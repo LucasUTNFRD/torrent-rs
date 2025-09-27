@@ -51,6 +51,29 @@ pub struct Info {
     pub mode: FileMode,
 }
 
+impl Info {
+    pub fn num_pieces(&self) -> usize {
+        self.pieces.len()
+    }
+
+    pub fn total_size(&self) -> i64 {
+        self.mode.length()
+    }
+
+    pub fn get_piece_len(&self, piece_idx: usize) -> u32 {
+        if piece_idx == self.num_pieces() - 1 {
+            let last_len = self.total_size() as u32 % self.piece_length as u32;
+            if last_len == 0 {
+                self.piece_length as u32
+            } else {
+                last_len
+            }
+        } else {
+            self.piece_length as u32
+        }
+    }
+}
+
 /// Represents either single-file or multi-file torrent mode
 #[derive(Debug, Clone)]
 pub enum FileMode {
