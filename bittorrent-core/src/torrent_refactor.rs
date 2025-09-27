@@ -35,7 +35,7 @@ use crate::{
         PeerMessage, PeerState,
         peer_connection::{ConnectionError, spawn_outgoing_peer},
     },
-    piece_picker::{PieceCollector, PiecePicker},
+    piece_picker::{DownloadTask, PieceCollector, PiecePicker},
 };
 
 // Peer related
@@ -97,8 +97,12 @@ pub enum TorrentMessage {
     Interest(Pid),
     NotInterest(Pid),
 
-    // Seeding / Uploading related
-    NeedTask(Pid),
+    RequestBlock {
+        pid: Pid,
+        num_bytes: usize,
+        bitfield: Bitfield,
+        block_tx: oneshot::Sender<Option<DownloadTask>>,
+    },
 
     // -- METADATA REQUEST --
     PeerWithMetadata {
@@ -445,15 +449,19 @@ impl Torrent {
 
                 let _ = resp_tx.send(interest);
             }
-            NeedTask(pid) => {
-                // Peer needs more blocks to download
-                // if let Some(peer_tx) = self.peers.get(&pid) {
-                //     // TODO: Get tasks from piece picker based on what the peer has
-                //     let tasks = self.get_download_tasks_for_peer(pid);
-                //     if !tasks.is_empty() {
-                //         let _ = peer_tx.send(PeerMessage::AvailableTask(tasks)).await;
-                //     }
-                // }
+            RequestBlock {
+                pid,
+                num_bytes,
+                bitfield,
+                block_tx,
+            } => {
+                let task = self
+                    .piece_picker
+                    .as_mut()
+                    .expect("intialized")
+                    .pick_piece(&bitfield, num_bytes);
+
+                block_tx.send(task).expect("peer alive")
             }
             ValidMetadata { resp } => {
                 let _ = resp.send(self.metadata.has_metadata());

@@ -34,7 +34,7 @@ use tracing::{debug, info, warn};
 use crate::{
     bitfield::{Bitfield, BitfieldError},
     peer::{PeerMessage, metrics::PeerMetrics},
-    piece_picker::PiecePicker,
+    piece_picker::{DownloadTask, PiecePicker},
     session::CLIENT_ID,
     torrent_refactor::{Pid, TorrentMessage},
 };
@@ -167,6 +167,7 @@ pub struct Connected {
     // the queue of blocks we have requested
     // from this peer
     // std::vector<pending_block> m_download_queue;
+    request_queue: Vec<DownloadTask>,
     outbound_requests: HashSet<BlockInfo>,
     incoming_request: HashSet<BlockInfo>,
 
@@ -218,6 +219,7 @@ impl Connected {
             bitfield: Bitfield::new(),
             bitfield_received: false,
             metadata: None,
+            request_queue: Vec::new(),
         }
     }
 }
@@ -412,7 +414,7 @@ impl Peer<Connected> {
         self.state.peer_choked = false;
         // todo: update last unchoked interval
         if self.state.interesting {
-            self.request_block()?;
+            self.request_block().await?;
             // request block for this torrent
             // send blocks
         }
@@ -423,20 +425,36 @@ impl Peer<Connected> {
     // fn send
 
     //
-    fn request_block(&self) -> Result<(), ConnectionError> {
+    async fn request_block(&self) -> Result<(), ConnectionError> {
         if !self.state.have_metadata {
             return Ok(());
         }
 
         let info = self.state.metadata.as_ref().expect("have metadata").clone();
-        let bitfield = &self.state.bitfield;
+        let bitfield = self.state.bitfield.clone();
 
         // self.torrent_tx.send(TorrentMessage::NeedTask(self.pid));
 
-        let mut p = PiecePicker::new(info);
         let dq_size = self.download_queue_size();
 
-        p.pick_piece(bitfield, dq_size);
+        let (block_tx, block_rx) = oneshot::channel();
+
+        let _ = self
+            .torrent_tx
+            .send(TorrentMessage::RequestBlock {
+                pid: self.pid,
+                num_bytes: dq_size,
+                bitfield,
+                block_tx,
+            })
+            .await;
+
+        let Some(task) = block_rx.await.expect("channel not dropped") else {
+            debug!("No more task available for this peer");
+            return Ok(());
+        };
+
+        // convert taks into BlockInfo
 
         Ok(())
     }

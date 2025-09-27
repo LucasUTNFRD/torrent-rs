@@ -46,9 +46,9 @@ impl PiecePicker {
 
     /// bitfiled indicated the pieces remote peer has
     /// num_bytes: represent the size in bytes that the remote peer need for a efficient outstanding block requests to keep to a peer
-    pub fn pick_piece(&mut self, bitfield: &Bitfield, num_bytes: usize) -> Option<DownloadTask> {
+    pub fn pick_piece(&mut self, bitfield: &Bitfield, _num_bytes: usize) -> Option<DownloadTask> {
         let pieces_peer_has = bitfield.iter_set();
-        todo!("select a piece based on peer bitifeld and num_bytes")
+        None
     }
 }
 
