@@ -4,7 +4,7 @@ mod peer;
 mod piece_picker;
 mod session;
 mod storage;
-mod torrent_refactor;
+mod torrent;
 
 pub use session::Session;
 

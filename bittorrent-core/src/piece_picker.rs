@@ -6,7 +6,10 @@ use std::{collections::HashMap, sync::Arc};
 use bittorrent_common::metainfo::Info;
 use peer_protocol::protocol::Block;
 
-use crate::bitfield::Bitfield;
+use crate::{
+    bitfield::{self, Bitfield},
+    torrent::Pid,
+};
 
 pub struct PiecePicker {
     pieces: Vec<Piece>,
@@ -23,11 +26,27 @@ pub enum DownloadTask {
 }
 
 #[derive(Debug, Clone, Copy)]
+pub enum State {
+    NotRequested,
+    Requested,
+    Received,
+    Downloaded,
+}
+
+#[derive(Debug, Clone, Copy)]
+//The operations of the piece picker are:
+// pick one or more pieces for peer p (this is to determine what to download from a peer)
 struct Piece {
     index: u32,
     /// Piece availabilty in the swarm
     num_peers: usize,
     partial: bool,
+    state: State,
+}
+
+pub enum AvailabilityUpdate {
+    Bitfield(Bitfield),
+    Have(PieceIndex),
 }
 
 impl PiecePicker {
@@ -38,6 +57,7 @@ impl PiecePicker {
                 index: piece_idx as u32,
                 num_peers: 0,
                 partial: false,
+                state: State::NotRequested,
             })
             .collect();
 
@@ -47,14 +67,128 @@ impl PiecePicker {
     /// bitfiled indicated the pieces remote peer has
     /// num_bytes: represent the size in bytes that the remote peer need for a efficient outstanding block requests to keep to a peer
     pub fn pick_piece(&mut self, bitfield: &Bitfield, _num_bytes: usize) -> Option<DownloadTask> {
-        let pieces_peer_has = bitfield.iter_set();
-        None
+        let mut candidate_pieces: Vec<&Piece> = self
+            .pieces
+            .iter()
+            .filter(|piece| {
+                matches!(piece.state, State::NotRequested) && bitfield.has(piece.index as usize)
+            })
+            .collect();
+
+        if candidate_pieces.is_empty() {
+            return None;
+        }
+
+        // Sort by rarest first (lowest num_peers)
+        candidate_pieces.sort_by(|a, b| a.num_peers.cmp(&b.num_peers));
+
+        // Return the rarest piece as a download task
+        Some(DownloadTask::Piece(candidate_pieces[0].index))
+    }
+
+    pub fn set_piece_as(&mut self, piece_index: usize, state: State) {
+        self.pieces[piece_index].state = state
+    }
+
+    // increment availability counter for piece i (when a peer announces that it just completed downloading a new piece)
+    // increment availability counters for all pieces of peer p (when a peer joins the swarm)
+    pub fn increment_availability(&mut self, update: AvailabilityUpdate) {
+        match update {
+            AvailabilityUpdate::Bitfield(bitfield) => {
+                for idx in bitfield.iter_set() {
+                    self.pieces[idx].num_peers += 1;
+                }
+            }
+            AvailabilityUpdate::Have(idx) => {
+                if let Some(p) = self.pieces.get_mut(idx as usize) {
+                    p.num_peers += 1;
+                }
+            }
+        }
+    }
+
+    // decrement availability counters for all pieces of peer p (when a peer leaves the swarm)
+    pub fn decrement_availability(&mut self, bitfield: &Bitfield) {
+        for piece in bitfield.iter_set() {
+            self.pieces[piece].num_peers -= 1;
+        }
+    }
+
+    pub fn info_log(&self) {
+        if self.pieces.is_empty() {
+            tracing::info!("PiecePicker: No pieces configured");
+            return;
+        }
+
+        let total = self.pieces.len();
+
+        // Count pieces by state
+        let not_requested = self
+            .pieces
+            .iter()
+            .filter(|p| matches!(p.state, State::NotRequested))
+            .count();
+        let requested = self
+            .pieces
+            .iter()
+            .filter(|p| matches!(p.state, State::Requested))
+            .count();
+        let received = self
+            .pieces
+            .iter()
+            .filter(|p| matches!(p.state, State::Received))
+            .count();
+        let downloaded = self
+            .pieces
+            .iter()
+            .filter(|p| matches!(p.state, State::Downloaded))
+            .count();
+
+        // Count partial pieces
+        let partial_pieces = self.pieces.iter().filter(|p| p.partial).count();
+
+        // Calculate availability statistics
+        let peer_counts: Vec<usize> = self.pieces.iter().map(|p| p.num_peers).collect();
+        let total_availability: usize = peer_counts.iter().sum();
+        let min_availability = peer_counts.iter().min().copied().unwrap_or(0);
+        let max_availability = peer_counts.iter().max().copied().unwrap_or(0);
+        let avg_availability = if total > 0 {
+            total_availability as f64 / total as f64
+        } else {
+            0.0
+        };
+
+        // Calculate percentages
+        let downloaded_pct = (downloaded as f64 / total as f64) * 100.0;
+        let progress_pct = ((downloaded + received) as f64 / total as f64) * 100.0;
+
+        // Count pieces with no availability (unavailable in swarm)
+        let unavailable_pieces = peer_counts.iter().filter(|&&count| count == 0).count();
+
+        tracing::info!(
+            "PiecePicker Status:\n\
+         ├─ Progress: {}/{} pieces ({:.1}% complete, {:.1}% in progress)\n\
+         ├─ States: {} not_requested, {} requested, {} received, {} downloaded\n\
+         ├─ Partial: {} pieces have partial downloads\n\
+         ├─ Availability: avg={:.1}, min={}, max={} peers per piece\n\
+         └─ Swarm: {} pieces unavailable (0 peers)",
+            downloaded + received,
+            total,
+            downloaded_pct,
+            progress_pct,
+            not_requested,
+            requested,
+            received,
+            downloaded,
+            partial_pieces,
+            avg_availability,
+            min_availability,
+            max_availability,
+            unavailable_pieces
+        );
     }
 }
 
-// This controlls Collect Block/Piece
-// It will be used to pick pieces
-// and to write complete pieces into Storage
 type PieceIndex = u32;
 
 /// Tracks completed byte ranges for a piece and manages the piece buffer
@@ -183,12 +317,10 @@ impl PieceCollector {
 
         for piece_idx in 0..num_pieces {
             let piece_len = torrent_info.get_piece_len(piece_idx) as usize;
-            piece_map.insert(piece_idx, PieceMetadata::new(piece_len));
+            piece_map.insert(piece_idx as u32, PieceMetadata::new(piece_len));
         }
 
-        Self {
-            piece_map: HashMap::new(),
-        }
+        Self { piece_map }
     }
 
     // return the subset of blocks of a piece which are not received yet

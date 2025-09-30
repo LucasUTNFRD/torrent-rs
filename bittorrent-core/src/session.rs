@@ -9,7 +9,7 @@ use bittorrent_common::{
     types::{InfoHash, PeerID},
 };
 use bytes::BytesMut;
-use magnet_uri::{HashType, Magnet, MagnetError};
+use magnet_uri::{Magnet, MagnetError};
 use once_cell::sync::Lazy;
 use peer_protocol::protocol::Handshake;
 use tokio::{
@@ -28,7 +28,7 @@ pub static CLIENT_ID: Lazy<PeerID> = Lazy::new(PeerID::generate);
 
 use crate::{
     storage::Storage,
-    torrent_refactor::{Torrent, TorrentError, TorrentMessage},
+    torrent::{Torrent, TorrentError, TorrentMessage},
 };
 
 pub struct Session {

@@ -1,18 +1,14 @@
-use std::{
-    net::SocketAddr,
-    sync::{
-        Arc,
-        atomic::{AtomicU32, AtomicU64},
-    },
-};
+use std::{net::SocketAddr, sync::Arc};
 
 use bittorrent_common::metainfo::Info;
 use peer_protocol::protocol::Message;
 use tokio::sync::mpsc;
 
+use crate::{bitfield::Bitfield, peer::metrics::PeerMetrics};
+
 pub mod peer_connection;
 
-mod metrics;
+pub mod metrics;
 // Peer related
 
 #[derive(Debug, Clone)]
@@ -28,6 +24,6 @@ pub enum PeerMessage {
 
 pub struct PeerState {
     pub addr: SocketAddr,
-    // pub(crate) bitfield: Bitfield,
+    pub metrics: PeerMetrics,
     pub tx: mpsc::Sender<PeerMessage>,
 }
