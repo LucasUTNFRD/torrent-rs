@@ -1,8 +1,9 @@
-use std::{net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
+use async_trait::async_trait;
 use bittorrent_common::metainfo::Info;
 use peer_protocol::protocol::Message;
-use tokio::sync::mpsc;
+use tokio::{net::TcpStream, sync::mpsc};
 
 use crate::{bitfield::Bitfield, peer::metrics::PeerMetrics};
 
@@ -26,4 +27,16 @@ pub struct PeerState {
     pub addr: SocketAddr,
     pub metrics: PeerMetrics,
     pub tx: mpsc::Sender<PeerMessage>,
+}
+
+#[async_trait]
+pub trait ConnectTimeout {
+    async fn connect_timeout(addr: &SocketAddr, timeout: Duration) -> tokio::io::Result<TcpStream>;
+}
+
+#[async_trait]
+impl ConnectTimeout for TcpStream {
+    async fn connect_timeout(addr: &SocketAddr, timeout: Duration) -> tokio::io::Result<TcpStream> {
+        tokio::time::timeout(timeout, async move { TcpStream::connect(addr).await }).await?
+    }
 }

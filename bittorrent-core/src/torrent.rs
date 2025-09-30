@@ -2,11 +2,10 @@
 
 use std::{
     collections::HashMap,
-    fmt::write,
     net::SocketAddr,
     sync::{
         Arc,
-        atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -24,7 +23,11 @@ use tokio::{
     sync::{mpsc, oneshot, watch},
     time::{interval, sleep},
 };
-use tracing::{debug, field::debug, info, warn};
+use tracing::{
+    Span, debug,
+    field::{self, debug},
+    info, instrument, warn,
+};
 use tracker_client::{ClientState, Events, TrackerError, TrackerHandler, TrackerResponse};
 use url::Url;
 
@@ -267,7 +270,9 @@ impl Torrent {
         )
     }
 
-    /// Start torrent session
+    #[instrument(skip(self), name = "torrent", fields(
+    info_hash=%self.info_hash,
+    ))]
     pub async fn start_session(mut self) -> Result<(), TorrentError> {
         self.init_interal();
 

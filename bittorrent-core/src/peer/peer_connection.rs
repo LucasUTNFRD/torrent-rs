@@ -3,7 +3,7 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     net::SocketAddr,
     sync::Arc,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use bencode::Bencode;
@@ -33,7 +33,7 @@ use tracing::{debug, info, instrument, warn};
 
 use crate::{
     bitfield::{Bitfield, BitfieldError},
-    peer::PeerMessage,
+    peer::{ConnectTimeout, PeerMessage},
     piece_picker::DownloadTask,
     session::CLIENT_ID,
     torrent::{Pid, TorrentMessage},
@@ -41,16 +41,13 @@ use crate::{
 
 ///The metadata is handled in blocks of 16KiB (16384 Bytes).
 const METADATA_BLOCK_SIZE: u32 = 1 << 14;
-
 const UT_METADATA_ID: u8 = 1;
+const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Error)]
 pub enum ConnectionError {
     #[error("Network error: {0}")]
     Network(#[from] tokio::io::Error),
-
-    #[error("Handshake failed: {0}")]
-    Handshake(String),
 
     #[error("Protocol error: {0}")]
     Protocol(String),
@@ -101,7 +98,7 @@ impl Peer<New> {
     }
 
     pub async fn connect(self) -> Result<Peer<Handshaking>, ConnectionError> {
-        let stream = TcpStream::connect(self.addr).await?;
+        let stream = TcpStream::connect_timeout(&self.addr, CONNECTION_TIMEOUT).await?;
 
         Ok(Peer {
             state: Handshaking { stream },
@@ -227,11 +224,16 @@ impl Peer<Connected> {
         todo!()
     }
 
-    #[instrument(skip(self), fields(
+    #[instrument(
+    skip(self),
+    name = "peer",
+    target = "torrent::peer",
+    fields(
         pid = %self.pid,
         addr = %self.addr,
         max_outgoing_request = self.state.max_outgoing_request,
-    ))]
+    )
+    )]
     pub async fn start(mut self) -> Result<(), ConnectionError> {
         info!("connection established");
 
@@ -739,20 +741,11 @@ impl Peer<Connected> {
             }
         }
 
-        // if let Some(v) = handshake.v {}
         if let Some(reqq) = handshake.reqq
             && reqq > 0
         {
             self.state.max_outgoing_request = self.state.max_outgoing_request.max(reqq as usize);
         }
-        // if let Some(p) = handshake.p {
-        //     // ingore this for now
-        // }
-        // if let Some(metadata_size) = handshake.metadata_size
-        //     && metadata_size > 0
-        // {
-        //     self.state.metadata_size = metadata_size as usize;
-        // }
 
         Ok(())
     }
@@ -780,7 +773,6 @@ impl Peer<Connected> {
         Ok(())
     }
 
-    // Metadata
     async fn handle_metadata_message(&mut self, payload: Bytes) -> Result<(), ConnectionError> {
         use bencode::{Bencode, BencodeDict};
 
