@@ -326,7 +326,8 @@ impl Torrent {
 
         match &self.metadata {
             Metadata::TorrentFile(torrent_info) => {
-                self.storage.add_torrent(torrent_info.clone());
+                self.storage
+                    .add_torrent(self.info_hash, torrent_info.info.clone());
 
                 let info = torrent_info.info.clone();
                 self.bitfield = Bitfield::with_size(info.pieces.len());
@@ -338,6 +339,7 @@ impl Torrent {
                 metadata_state: MetadataState::Complete(info),
                 ..
             } => {
+                self.storage.add_torrent(self.info_hash, info.clone());
                 self.bitfield = Bitfield::with_size(info.pieces.len());
                 self.piece_picker = Some(PiecePicker::new(info.clone()));
                 self.piece_collector = Some(PieceCollector::new(info.clone()));

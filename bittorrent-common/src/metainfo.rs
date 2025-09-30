@@ -72,6 +72,14 @@ impl Info {
             self.piece_length as u32
         }
     }
+
+    pub fn files(&self) -> Vec<FileInfo> {
+        self.mode.files()
+    }
+
+    pub fn get_piece_hash(&self, piece_idx: usize) -> Option<&[u8; 20]> {
+        self.pieces.get(piece_idx)
+    }
 }
 
 /// Represents either single-file or multi-file torrent mode
