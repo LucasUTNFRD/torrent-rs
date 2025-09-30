@@ -26,6 +26,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
     sync::{mpsc, oneshot},
+    time::interval,
 };
 
 use tokio_util::codec::Framed;
@@ -33,7 +34,7 @@ use tracing::{debug, info, instrument, warn};
 
 use crate::{
     bitfield::{Bitfield, BitfieldError},
-    peer::{ConnectTimeout, PeerMessage},
+    peer::{ConnectTimeout, PeerMessage, metrics::PeerMetrics},
     piece_picker::DownloadTask,
     session::CLIENT_ID,
     torrent::{Pid, TorrentMessage},
@@ -167,6 +168,8 @@ pub struct Connected {
     request_queue: Vec<BlockInfo>,
     outgoing_request: HashSet<BlockInfo>,
     incoming_request: HashSet<BlockInfo>,
+    metrics: Arc<PeerMetrics>,
+    last_block_request: Instant,
 
     supports_extended: bool,
     remote_extensions: HashMap<String, i64>,
@@ -187,8 +190,83 @@ pub struct Connected {
     metadata_size: usize,
     max_outgoing_request: usize,
 
-    bitfield: Bitfield,
-    bitfield_received: bool,
+    // Wrap this in a enum to ensure non invalid states
+    // Bitfield{
+    //  NotReceived,
+    //  Received(Bitfield),
+    //  Validated(Bitfield),
+    // }
+    // bitfield: Bitfield,
+    // bitfield_received: bool,
+    bitfield: BitfieldState,
+}
+
+#[derive(Debug, Clone)]
+enum BitfieldState {
+    NotReceived,
+    Received(Bitfield),
+    Validated(Bitfield),
+}
+
+impl BitfieldState {
+    fn new() -> Self {
+        Self::NotReceived
+    }
+
+    fn is_received(&self) -> bool {
+        !matches!(self, Self::NotReceived)
+    }
+
+    // fn is_validated(&self) -> bool {
+    //     matches!(self, Self::Validated(_))
+    // }
+    //
+    // fn get_bitfield(&self) -> Option<&Bitfield> {
+    //     match self {
+    //         Self::NotReceived => None,
+    //         Self::Received(bf) | Self::Validated(bf) => Some(bf),
+    //     }
+    // }
+
+    fn get_bitfield_mut(&mut self) -> Option<&mut Bitfield> {
+        match self {
+            Self::NotReceived => None,
+            Self::Received(bf) | Self::Validated(bf) => Some(bf),
+        }
+    }
+
+    fn set_received(&mut self, bitfield: Bitfield) {
+        *self = Self::Received(bitfield);
+    }
+
+    fn validate(&mut self, num_pieces: usize) -> Result<(), BitfieldError> {
+        match self {
+            Self::NotReceived => {
+                // Initialize with empty validated bitfield
+                *self = Self::Validated(Bitfield::with_size(num_pieces));
+                Ok(())
+            }
+            Self::Received(bitfield) => {
+                bitfield.validate(num_pieces)?;
+                *self = Self::Validated(bitfield.clone());
+                Ok(())
+            }
+            Self::Validated(_) => Ok(()), // Already validated
+        }
+    }
+
+    fn ensure_capacity(&mut self, required_pieces: usize) {
+        match self {
+            Self::NotReceived => {
+                *self = Self::Received(Bitfield::with_size(required_pieces));
+            }
+            Self::Received(bitfield) | Self::Validated(bitfield) => {
+                if required_pieces > bitfield.size() {
+                    bitfield.resize(required_pieces);
+                }
+            }
+        }
+    }
 }
 
 impl ConnectionState for Connected {}
@@ -211,10 +289,11 @@ impl Connected {
             remote_extensions: HashMap::new(),
             metadata_size: 0,
             max_outgoing_request: 250,
-            bitfield: Bitfield::new(),
-            bitfield_received: false,
+            bitfield: BitfieldState::new(),
             metadata: None,
             request_queue: Vec::new(),
+            metrics: Arc::new(PeerMetrics::new()),
+            last_block_request: Instant::now(),
         }
     }
 }
@@ -243,6 +322,9 @@ impl Peer<Connected> {
             self.send_extended_handshake().await?
         }
 
+        let mut heartbeat_ticker = interval(Duration::from_secs(1));
+        heartbeat_ticker.tick().await;
+
         loop {
             self.maybe_request_medata().await?;
 
@@ -261,11 +343,39 @@ impl Peer<Connected> {
                         None => break,
                     }
                 }
+                _=heartbeat_ticker.tick()=>{
+                    self.state.metrics.update_rates();
+
+                    info!("{}", self.state.metrics.get_download_rate_human());
+                    let last_req  = self.state.last_block_request;
+                    info!("Last request was at: {last_req:#?}");
+
+                    self.state.sink.send(Message::KeepAlive).await?;
+                }
             }
         }
 
+        // For proper cleanup
+        let bitifeld = if let BitfieldState::Validated(bitifeld) = self.state.bitfield {
+            Some(bitifeld)
+        } else {
+            None
+        };
+
+        // I did not figure out a easier way of doing this cleaup
+        // maybe implemet Drop trait for Peer<State>
+        let _ = self
+            .torrent_tx
+            .send(TorrentMessage::PeerDisconnected(self.pid, bitifeld))
+            .await;
+
         Ok(())
     }
+
+    // debug message with
+    // download speed
+    // pipeline utilization
+    fn debug_peer_dowload() {}
 
     async fn handle_msg(&mut self, msg: Message) -> Result<(), ConnectionError> {
         match msg {
@@ -294,7 +404,13 @@ impl Peer<Connected> {
 
     async fn handle_peer_cmd(&mut self, peer_cmd: PeerMessage) -> Result<(), ConnectionError> {
         match peer_cmd {
-            PeerMessage::SendHave { piece_index } => todo!(),
+            PeerMessage::SendHave { piece_index } => {
+                if let BitfieldState::Validated(ref mut bitifled) = self.state.bitfield
+                    && bitifled.has(piece_index as usize)
+                {
+                    self.state.sink.send(Message::Have { piece_index }).await?
+                }
+            }
             PeerMessage::SendBitfield { bitfield } => todo!(),
             PeerMessage::SendChoke => todo!(),
             PeerMessage::SendUnchoke => todo!(),
@@ -306,13 +422,7 @@ impl Peer<Connected> {
                 let num_pieces = metadata.num_pieces();
                 self.state.metadata = Some(metadata);
 
-                // Validate bitfield if we received one before having metadata
-                if self.state.bitfield_received && !self.state.bitfield.is_empty() {
-                    self.state.bitfield.validate(num_pieces)?;
-                } else if self.state.bitfield.is_empty() {
-                    // Initialize empty bitfield to proper size now that we have metadata
-                    self.state.bitfield = Bitfield::with_size(num_pieces);
-                }
+                self.state.bitfield.validate(num_pieces)?;
 
                 // Update interest status now that we have metadata
                 self.update_interest_status().await?;
@@ -322,22 +432,13 @@ impl Peer<Connected> {
     }
 
     async fn update_interest_status(&mut self) -> Result<(), ConnectionError> {
-        if !self.state.bitfield_received {
-            debug!("we did not received the bitfield yet");
-            return Ok(());
-        }
-
         if self.state.interesting {
             return Ok(());
         }
 
-        // if we have the bitfield we we dont have the metadata yet, it mean it was not vaildated
-        if self.state.metadata.is_none() {
-            debug!("the bitfield is not validated");
+        let BitfieldState::Validated(ref bitfield) = self.state.bitfield else {
             return Ok(());
-        }
-
-        debug!("checking interest ----------------");
+        };
 
         // ask torrent manager if we should be interested in this peer
         let (resp_tx, resp_rx) = oneshot::channel();
@@ -345,14 +446,12 @@ impl Peer<Connected> {
             .torrent_tx
             .send(TorrentMessage::ShouldBeInterested {
                 pid: self.pid,
-                bitfield: self.state.bitfield.clone(),
+                bitfield: bitfield.clone(),
                 resp_tx,
             })
             .await;
 
         self.state.interesting = resp_rx.await.expect("sender dropped");
-        dbg!(self.state.interesting);
-        dbg!(&self.state.bitfield);
 
         Ok(())
     }
@@ -400,35 +499,22 @@ impl Peer<Connected> {
         Ok(())
     }
 
-    async fn send_block_request(&mut self) -> Result<(), ConnectionError> {
-        while let Some(block) = self.state.request_queue.pop() {
-            if self.state.outgoing_request.len() > self.state.max_outgoing_request {
-                debug!("pipeline is empty, should request more pieces");
-                break;
-            }
-
-            self.state.outgoing_request.insert(block);
-            self.state.sink.send(Message::Request(block)).await?;
-        }
-
-        Ok(())
-    }
-
+    /// Request blocks to TorrentSupervisor
     async fn request_block(&mut self) -> Result<(), ConnectionError> {
         if self.state.metadata.is_none() {
-            debug!("NOT HAVING METADATA");
             return Ok(());
         }
 
+        // TODO:
+        // THis should check if we need to fullfill the request queue
         if !self.state.request_queue.is_empty() {
             debug!("There are remaing piece to request in the queue");
             return Ok(());
         }
 
-        // let info = self.state.metadata.as_ref().expect("have metadata").clone();
-        let bitfield = self.state.bitfield.clone();
-
-        // let dq_size = self.download_queue_size();
+        let BitfieldState::Validated(bitfield) = self.state.bitfield.clone() else {
+            return Ok(());
+        };
 
         let (block_tx, block_rx) = oneshot::channel();
 
@@ -443,7 +529,6 @@ impl Peer<Connected> {
             .await;
 
         let Some(task) = block_rx.await.expect("channel not dropped") else {
-            debug!("---------------------------------------No more task available for this peer");
             return Ok(());
         };
 
@@ -451,6 +536,21 @@ impl Peer<Connected> {
 
         // Add block_request to the request_queue
         self.state.request_queue.extend(block_request);
+
+        Ok(())
+    }
+
+    async fn send_block_request(&mut self) -> Result<(), ConnectionError> {
+        while let Some(block) = self.state.request_queue.pop() {
+            if self.state.outgoing_request.len() > self.state.max_outgoing_request {
+                debug!("pipeline is empty, should request more pieces");
+                break;
+            }
+
+            self.state.outgoing_request.insert(block);
+            self.state.last_block_request = Instant::now();
+            self.state.sink.send(Message::Request(block)).await?;
+        }
 
         Ok(())
     }
@@ -498,36 +598,23 @@ impl Peer<Connected> {
     async fn on_have(&mut self, have_idx: u32) -> Result<(), ConnectionError> {
         debug!("Received HAVE message for piece {}", have_idx);
 
-        // Step 1: Bitfield Initialization - If no bitfield received yet, treat peer as having none
-        if !self.state.bitfield_received && self.state.bitfield.is_empty() {
+        // Step 1: Bitfield Initialization - If no bitfield received yet, initialize one
+        if !self.state.bitfield.is_received() {
             debug!("First HAVE message without bitfield - initializing empty bitfield");
-            // Initialize with minimal size, will be resized as needed
-            self.state.bitfield = Bitfield::with_size(1);
-            self.state.bitfield_received = true; // BUG
+            self.state
+                .bitfield
+                .set_received(Bitfield::with_size((have_idx + 1) as usize));
         }
 
         // Step 2: Dynamic Resizing - If no metadata yet, resize bitfield to accommodate new piece index
         if self.state.metadata.is_none() {
             let required_pieces = (have_idx + 1) as usize;
-            if required_pieces > self.state.bitfield.size() {
-                debug!(
-                    "Resizing bitfield from {} to {} pieces",
-                    self.state.bitfield.size(),
-                    required_pieces
-                );
-                self.state.bitfield.resize(required_pieces);
-            }
+            self.state.bitfield.ensure_capacity(required_pieces);
         }
 
         // Step 3: Index Validation - Ensure piece index is within valid range
-        if self.state.metadata.is_some() {
-            let num_pieces = self
-                .state
-                .metadata
-                .as_ref()
-                .expect("Have metadata")
-                .pieces
-                .len();
+        if let Some(metadata) = &self.state.metadata {
+            let num_pieces = metadata.pieces.len();
 
             if have_idx as usize >= num_pieces {
                 warn!(
@@ -541,7 +628,7 @@ impl Peer<Connected> {
                 )));
             }
         } else {
-            // Pre-metadata validation - cap at 64k pieces - based on libtorrent codebase
+            // Pre-metadata validation - cap at 64k pieces
             if have_idx >= 65536 {
                 warn!(
                     "Received HAVE for piece index {} exceeding 64k limit",
@@ -554,10 +641,13 @@ impl Peer<Connected> {
             }
         }
 
-        debug!("HERE");
-        let had_piece_before = self.state.bitfield.has(have_idx as usize);
-        if !had_piece_before {
-            self.state.bitfield.set(have_idx as usize);
+        // Update the bitfield if we don't already have this piece
+        if let Some(bitfield) = self.state.bitfield.get_bitfield_mut() {
+            if bitfield.has(have_idx as usize) {
+                return Ok(());
+            }
+
+            bitfield.set(have_idx as usize);
 
             // Notify torrent about piece availability
             if self.state.metadata.is_some() {
@@ -584,29 +674,19 @@ impl Peer<Connected> {
         );
 
         // Check if we already received a bitfield
-        if self.state.bitfield_received {
+        if self.state.bitfield.is_received() {
             warn!("Received duplicate bitfield from peer");
             return Err(ConnectionError::Protocol(
                 "Duplicate bitfield message".to_string(),
             ));
         }
 
-        // Step 1: Reception Flag - Mark that bitfield has been received
-        dbg!(self.state.bitfield_received = true);
-
-        if dbg!(self.state.metadata.is_some()) {
-            // Step 2: Size Validation - Verify bitfield size matches expected piece count
-            let num_pieces = self
-                .state
-                .metadata
-                .as_ref()
-                .expect("have metatada flag without Some(metadata)")
-                .pieces
-                .len();
+        if let Some(metadata) = &self.state.metadata {
+            let num_pieces = metadata.pieces.len();
 
             match Bitfield::from_bytes_checked(bitfield_payload, num_pieces) {
                 Ok(bitfield) => {
-                    self.state.bitfield = bitfield;
+                    self.state.bitfield = BitfieldState::Validated(bitfield);
                 }
                 Err(e) => {
                     warn!("Invalid bitfield received: {}", e);
@@ -614,17 +694,15 @@ impl Peer<Connected> {
                 }
             }
         } else {
-            // Step 5: Pre-Metadata Handling - Just store bitfield and detect potential seeds
             debug!("Storing bitfield for later validation (no metadata yet)");
-
-            // Store bitfield for torrent even without validation
-            self.state.bitfield = Bitfield::from_bytes_unchecked(bitfield_payload.clone());
+            let bitfield = Bitfield::from_bytes_unchecked(bitfield_payload);
+            self.state.bitfield.set_received(bitfield);
         }
 
-        // Step 6: Interest Calculation - Determine if peer is interesting to us
         self.update_interest_status().await?;
 
         debug!("Bitfield processed successfully");
+
         Ok(())
     }
 
@@ -632,6 +710,8 @@ impl Peer<Connected> {
         todo!()
     }
     async fn on_incoming_piece(&mut self, block: Block) -> Result<(), ConnectionError> {
+        // self.state.metrics.update_download(block.data.len() as u64, rate);
+        self.state.metrics.record_download(block.data.len() as u64);
         let block_info = BlockInfo {
             index: block.index,
             begin: block.begin,
@@ -644,7 +724,6 @@ impl Peer<Connected> {
                 .send(TorrentMessage::ReceiveBlock(self.pid, block))
                 .await;
 
-            debug!("requesting more");
             self.request_block().await?;
             self.send_block_request().await?;
         } else {
@@ -901,12 +980,8 @@ pub fn spawn_outgoing_peer(
         }
         .await;
 
-        if let Err(err) = result {
-            warn!(?err);
-            let _ = torrent_tx.send(TorrentMessage::PeerError(pid, err)).await;
-        } else {
-            warn!("disconnected");
-            let _ = torrent_tx.send(TorrentMessage::PeerDisconnected(pid)).await;
+        if let Err(e) = result {
+            warn!(?e);
         }
     });
 }

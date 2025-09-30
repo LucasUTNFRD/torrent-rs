@@ -6,14 +6,16 @@ use std::{collections::HashMap, sync::Arc};
 use bittorrent_common::metainfo::Info;
 use peer_protocol::protocol::Block;
 
-use crate::{
-    bitfield::{self, Bitfield},
-    torrent::Pid,
-};
+use crate::bitfield::Bitfield;
 
 pub struct PiecePicker {
     pieces: Vec<Piece>,
 }
+
+// TODO:
+// We need to keep track of peers bitfields
+// Pieces when they are picked should be marked with the PID
+// We need to implement Block level piece request
 
 #[derive(Debug)]
 pub enum DownloadTask {
@@ -107,85 +109,11 @@ impl PiecePicker {
         }
     }
 
-    // decrement availability counters for all pieces of peer p (when a peer leaves the swarm)
+    /// decrement piece availability of a peer which we lost connection
     pub fn decrement_availability(&mut self, bitfield: &Bitfield) {
         for piece in bitfield.iter_set() {
             self.pieces[piece].num_peers -= 1;
         }
-    }
-
-    pub fn info_log(&self) {
-        if self.pieces.is_empty() {
-            tracing::info!("PiecePicker: No pieces configured");
-            return;
-        }
-
-        let total = self.pieces.len();
-
-        // Count pieces by state
-        let not_requested = self
-            .pieces
-            .iter()
-            .filter(|p| matches!(p.state, State::NotRequested))
-            .count();
-        let requested = self
-            .pieces
-            .iter()
-            .filter(|p| matches!(p.state, State::Requested))
-            .count();
-        let received = self
-            .pieces
-            .iter()
-            .filter(|p| matches!(p.state, State::Received))
-            .count();
-        let downloaded = self
-            .pieces
-            .iter()
-            .filter(|p| matches!(p.state, State::Downloaded))
-            .count();
-
-        // Count partial pieces
-        let partial_pieces = self.pieces.iter().filter(|p| p.partial).count();
-
-        // Calculate availability statistics
-        let peer_counts: Vec<usize> = self.pieces.iter().map(|p| p.num_peers).collect();
-        let total_availability: usize = peer_counts.iter().sum();
-        let min_availability = peer_counts.iter().min().copied().unwrap_or(0);
-        let max_availability = peer_counts.iter().max().copied().unwrap_or(0);
-        let avg_availability = if total > 0 {
-            total_availability as f64 / total as f64
-        } else {
-            0.0
-        };
-
-        // Calculate percentages
-        let downloaded_pct = (downloaded as f64 / total as f64) * 100.0;
-        let progress_pct = ((downloaded + received) as f64 / total as f64) * 100.0;
-
-        // Count pieces with no availability (unavailable in swarm)
-        let unavailable_pieces = peer_counts.iter().filter(|&&count| count == 0).count();
-
-        tracing::info!(
-            "PiecePicker Status:\n\
-         ├─ Progress: {}/{} pieces ({:.1}% complete, {:.1}% in progress)\n\
-         ├─ States: {} not_requested, {} requested, {} received, {} downloaded\n\
-         ├─ Partial: {} pieces have partial downloads\n\
-         ├─ Availability: avg={:.1}, min={}, max={} peers per piece\n\
-         └─ Swarm: {} pieces unavailable (0 peers)",
-            downloaded + received,
-            total,
-            downloaded_pct,
-            progress_pct,
-            not_requested,
-            requested,
-            received,
-            downloaded,
-            partial_pieces,
-            avg_availability,
-            min_availability,
-            max_availability,
-            unavailable_pieces
-        );
     }
 }
 
@@ -301,6 +229,7 @@ impl PieceMetadata {
         self.completed_ranges.insert(insert_pos, merged_range);
     }
 
+    // Is Box<[u8]> representative for what we need?
     pub fn into_bytes(self) -> Box<[u8]> {
         self.piece_bytes
     }
@@ -336,6 +265,9 @@ impl PieceCollector {
         if let Some(meta) = self.piece_map.get_mut(&idx)
             && meta.add_block(&block)
         {
+            // WARN: This remove the whole mapping to the piece metadata of a given piece index
+            // if the piece validation fails, we cannot keep caching incoming related blocks of the
+            // given piece due to previous remove on piece_map
             return self.piece_map.remove(&idx).map(PieceMetadata::into_bytes);
         }
         None

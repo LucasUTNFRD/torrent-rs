@@ -16,7 +16,7 @@ use bittorrent_common::{
 };
 use bytes::Bytes;
 use magnet_uri::Magnet;
-use peer_protocol::protocol::Message;
+use peer_protocol::protocol::{Block, Message};
 use thiserror::Error;
 use tokio::{
     net::TcpStream,
@@ -87,8 +87,8 @@ pub enum TorrentError {
 }
 
 pub enum TorrentMessage {
-    PeerDisconnected(Pid),
-    PeerError(Pid, ConnectionError),
+    PeerDisconnected(Pid, Option<Bitfield>),
+    PeerError(Pid, ConnectionError, Option<Bitfield>),
     ValidMetadata {
         resp: oneshot::Sender<Option<Arc<Info>>>,
     },
@@ -280,13 +280,10 @@ impl Torrent {
         let (announce_tx, mut announce_rx) = mpsc::channel(16);
         self.announce(announce_tx);
 
-        let mut log_tick = interval(Duration::from_millis(500));
-
         loop {
             tokio::select! {
                 Ok(_) = self.shutdown_rx.changed() => {
                     tracing::info!("Shutting down...");
-                    //TODO: Await on connection handle
                     break;
                 }
                 maybe_msg = self.torrent_rx.recv() => {
@@ -300,14 +297,6 @@ impl Torrent {
                         self.add_peer(PeerSource::Outbound(*peer));
                     }
 
-                }
-                _ = log_tick.tick() => {
-                    let peer_connected = self.peers.len();
-                    info!("Connected to {peer_connected:?}");
-
-                    if let Some(p) = &self.piece_picker {
-                        p.info_log();
-                    }
                 }
             }
         }
@@ -344,7 +333,9 @@ impl Torrent {
                 self.piece_picker = Some(PiecePicker::new(info.clone()));
                 self.piece_collector = Some(PieceCollector::new(info.clone()));
             }
-            _ => {}
+            _ => {
+                panic!("called this in wrong state")
+            }
         }
     }
 
@@ -396,65 +387,17 @@ impl Torrent {
     async fn handle_message(&mut self, msg: TorrentMessage) -> Result<(), TorrentError> {
         use TorrentMessage::*;
         match msg {
-            PeerDisconnected(pid) => self.clean_up_peer(pid),
-            PeerError(pid, err) => {
+            PeerDisconnected(pid, bitfield) => self.clean_up_peer(pid, bitfield),
+            PeerError(pid, err, bitfield) => {
                 tracing::warn!(?err, "Peer {pid:?} encountered an error");
-                self.clean_up_peer(pid);
+                self.clean_up_peer(pid, bitfield);
             }
             Have { pid, piece_idx } => {
-                // Update our knowledge about what pieces the peer has
-                tracing::debug!("Peer {pid:?} has piece {piece_idx}");
-
-                // TODO: Update piece picker/availability map
                 let p = self.piece_picker.as_mut().expect("init");
-
                 p.increment_availability(AvailabilityUpdate::Have(piece_idx));
-
-                // dbg!("{p:?}");
             }
             ReceiveBlock(pid, block) => {
-                // A peer has sent us a block
-                tracing::debug!(
-                    "Received block from peer {pid:?}: piece {}, offset {}",
-                    block.index,
-                    block.begin
-                );
-
-                let piece_index = block.index;
-                let (verification_tx, verification_rx) = oneshot::channel();
-
-                if let Some(piece) = self
-                    .piece_collector
-                    .as_mut()
-                    .expect("state initializated")
-                    .add_block(block)
-                {
-                    // TODO: move this to a on_complete_piece
-                    let p = self.piece_picker.as_mut().expect("inti");
-                    // self.piece_picker
-                    //     .as_mut()
-                    //     .expect("intialized")
-                    p.set_piece_as(piece_index as usize, State::Received); // but not verified
-
-                    let torrent_id = self.info_hash;
-                    let piece: Arc<[u8]> = piece.into();
-
-                    self.storage.verify_piece(
-                        torrent_id,
-                        piece_index,
-                        piece.clone(),
-                        verification_tx,
-                    );
-
-                    let valid = verification_rx.await.expect("storage");
-                    if valid {
-                        p.set_piece_as(piece_index as usize, State::Downloaded);
-                        self.storage
-                            .write_piece(torrent_id, piece_index, piece.clone());
-                    }
-                } else {
-                    info!("received a block for piece ={piece_index:?}");
-                }
+                self.incoming_block(pid, block).await;
             }
             Interest(pid) => {
                 tracing::debug!("Peer {pid:?} is interested in our pieces");
@@ -493,7 +436,6 @@ impl Torrent {
 
                 if let Some(DownloadTask::Piece(index)) = task {
                     // this ensure non other peer can request this
-                    info!("{pid} request a task");
                     p.set_piece_as(index as usize, State::Requested);
                 }
 
@@ -573,6 +515,49 @@ impl Torrent {
         Ok(())
     }
 
+    async fn incoming_have(&mut self) {}
+
+    async fn incoming_block(&mut self, pid: Pid, block: Block) {
+        let piece_index = block.index;
+
+        if let Some(piece) = self
+            .piece_collector
+            .as_mut()
+            .expect("state initializated")
+            .add_block(block)
+        {
+            self.on_complete_piece(piece_index, piece).await;
+        }
+    }
+
+    async fn on_complete_piece(&mut self, piece_index: u32, piece: Box<[u8]>) {
+        let p = self.piece_picker.as_mut().expect("inti");
+        p.set_piece_as(piece_index as usize, State::Received);
+
+        let torrent_id = self.info_hash;
+        let piece: Arc<[u8]> = piece.into();
+
+        let (verification_tx, verification_rx) = oneshot::channel();
+        self.storage
+            .verify_piece(torrent_id, piece_index, piece.clone(), verification_tx);
+
+        let valid = verification_rx.await.expect("storage actor alive");
+        if !valid {
+            p.set_piece_as(piece_index as usize, State::NotRequested);
+            return;
+        }
+
+        p.set_piece_as(piece_index as usize, State::Downloaded);
+        self.bitfield.set(piece_index as usize);
+        self.broadcast_to_peers(PeerMessage::SendHave { piece_index })
+            .await;
+
+        info!("Completed piece {piece_index:?}");
+        self.storage.write_piece(torrent_id, piece_index, piece);
+    }
+
+    async fn pick_task_for_peer(&mut self) {}
+
     // 1.Register torrent in storage
     // 2.Build bitfield for this torrent
     // 3.Notify peer connection control structure about have metainfo for ending ut_metadfata
@@ -581,7 +566,6 @@ impl Torrent {
         if let Err(e) = self.metadata.construct_info() {
             tracing::error!("Failed to construct info from metadata: {}", e);
         } else {
-            debug!("SHOULD BE HEREEE");
             self.init_interal();
 
             let info = self
@@ -598,8 +582,16 @@ impl Torrent {
         Ok(())
     }
 
-    fn clean_up_peer(&mut self, pid: Pid) {
+    fn clean_up_peer(&mut self, pid: Pid, bitfield: Option<Bitfield>) {
+        info!("peer disconnected {pid:?}");
         self.peers.remove(&pid);
+        if let Some(bitfield) = bitfield {
+            // WARN: This is bad
+            self.piece_picker
+                .as_mut()
+                .expect("idk")
+                .decrement_availability(&bitfield);
+        }
         self.metrics.connected_peers.fetch_sub(1, Ordering::Relaxed);
     }
 

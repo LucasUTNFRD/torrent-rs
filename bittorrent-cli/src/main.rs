@@ -102,10 +102,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Save directory: {}", save_dir.display());
     info!("Listening on port: {}", args.port);
 
-    // Create session
     let session = Session::new(args.port, save_dir);
 
-    // Add the torrent or magnet
     if is_magnet {
         if let Err(e) = session.add_magnet(&args.torrent) {
             eprintln!("Error adding magnet URI: {}", e);

@@ -21,6 +21,7 @@ use tokio::{
     },
     task::JoinHandle,
 };
+
 use tracing::warn;
 use tracker_client::TrackerHandler;
 
@@ -125,7 +126,6 @@ impl SessionManager {
 
                     let t_session = (tx, session_handle);
 
-                    #[allow(clippy::unwrap_used, reason = "prototyping")]
                     let mut s = self.sessions.write().unwrap();
 
                     s.insert(info_hash, t_session);
