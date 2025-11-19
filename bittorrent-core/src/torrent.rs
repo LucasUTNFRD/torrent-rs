@@ -40,7 +40,7 @@ use crate::{
         metrics::PeerMetrics,
         peer_connection::{ConnectionError, spawn_outgoing_peer},
     },
-    piece_picker::{AvailabilityUpdate, DownloadTask, PieceCollector, PiecePicker, State},
+    piece_picker::{AvailabilityUpdate, PieceManager, PieceState},
 };
 
 // Peer related
@@ -112,7 +112,7 @@ pub enum TorrentMessage {
         pid: Pid,
         num_bytes: usize,
         bitfield: Bitfield,
-        block_tx: oneshot::Sender<Option<DownloadTask>>,
+        block_tx: oneshot::Sender<Option<u32>>,
     },
 
     // -- METADATA REQUEST --
@@ -170,10 +170,8 @@ pub struct Torrent {
     torrent_rx: mpsc::Receiver<TorrentMessage>,
 
     // Download related
-    piece_picker: Option<PiecePicker>,
-    piece_collector: Option<PieceCollector>,
-
-    /// Shutdown signal
+    piece_mananger: Option<PieceManager>,
+    //
     shutdown_rx: watch::Receiver<()>,
 
     bitfield: Bitfield,
@@ -222,8 +220,9 @@ impl Torrent {
                 torrent_tx: tx.clone(),
                 torrent_rx: rx,
                 bitfield,
-                piece_picker: None,
-                piece_collector: None,
+                piece_mananger: None,
+                // piece_picker: None,
+                // piece_collector: None,
             },
             tx,
         )
@@ -263,8 +262,8 @@ impl Torrent {
                 torrent_tx: tx.clone(),
                 torrent_rx: rx,
                 bitfield: Bitfield::new(),
-                piece_picker: None,
-                piece_collector: None,
+                piece_mananger: None,
+                // piece_collector: None,
             },
             tx,
         )
@@ -320,8 +319,7 @@ impl Torrent {
 
                 let info = torrent_info.info.clone();
                 self.bitfield = Bitfield::with_size(info.pieces.len());
-                self.piece_picker = Some(PiecePicker::new(info.clone()));
-                self.piece_collector = Some(PieceCollector::new(info.clone()));
+                self.piece_mananger = Some(PieceManager::new(info.clone()));
             }
 
             Metadata::MagnetUri {
@@ -330,8 +328,8 @@ impl Torrent {
             } => {
                 self.storage.add_torrent(self.info_hash, info.clone());
                 self.bitfield = Bitfield::with_size(info.pieces.len());
-                self.piece_picker = Some(PiecePicker::new(info.clone()));
-                self.piece_collector = Some(PieceCollector::new(info.clone()));
+
+                self.piece_mananger = Some(PieceManager::new(info.clone()));
             }
             _ => {
                 panic!("called this in wrong state")
@@ -393,10 +391,11 @@ impl Torrent {
                 self.clean_up_peer(pid, bitfield);
             }
             Have { pid, piece_idx } => {
-                let p = self.piece_picker.as_mut().expect("init");
-                p.increment_availability(AvailabilityUpdate::Have(piece_idx));
+                // let p = self.piece_picker.as_mut().expect("init");
+                // p.increment_availability(AvailabilityUpdate::Have(piece_idx));
             }
             ReceiveBlock(pid, block) => {
+                tracing::debug!("Incoming block {block:?}");
                 self.incoming_block(pid, block).await;
             }
             Interest(pid) => {
@@ -413,12 +412,13 @@ impl Torrent {
                 resp_tx,
             } => {
                 debug!("---------- received a should be interested");
-                // debug!(?bitfield);
-                self.piece_picker
+                // // debug!(?bitfield);
+                self.piece_mananger
                     .as_mut()
                     .expect("initialized on start")
-                    .increment_availability(AvailabilityUpdate::Bitfield(bitfield.clone()));
+                    .increment_availability(AvailabilityUpdate::Bitfield(&bitfield));
 
+                //
                 let interest = bitfield
                     .iter_set()
                     .any(|piece_peer_has| !self.bitfield.has(piece_peer_has));
@@ -430,14 +430,8 @@ impl Torrent {
                 bitfield,
                 block_tx,
             } => {
-                let p = self.piece_picker.as_mut().expect("init");
-
-                let task = p.pick_piece(&bitfield, num_bytes);
-
-                if let Some(DownloadTask::Piece(index)) = task {
-                    // this ensure non other peer can request this
-                    p.set_piece_as(index as usize, State::Requested);
-                }
+                let p = self.piece_mananger.as_mut().expect("init");
+                let task = p.pick_piece(bitfield, pid);
 
                 let _ = block_tx.send(task);
             }
@@ -521,7 +515,7 @@ impl Torrent {
         let piece_index = block.index;
 
         if let Some(piece) = self
-            .piece_collector
+            .piece_mananger
             .as_mut()
             .expect("state initializated")
             .add_block(block)
@@ -531,23 +525,24 @@ impl Torrent {
     }
 
     async fn on_complete_piece(&mut self, piece_index: u32, piece: Box<[u8]>) {
-        let p = self.piece_picker.as_mut().expect("inti");
-        p.set_piece_as(piece_index as usize, State::Received);
-
+        // todo!("Should persist piece");
+        let p = self.piece_mananger.as_mut().expect("inti");
+        p.set_piece_as(piece_index as usize, PieceState::Downloaded);
+        //
         let torrent_id = self.info_hash;
         let piece: Arc<[u8]> = piece.into();
-
+        //
         let (verification_tx, verification_rx) = oneshot::channel();
         self.storage
             .verify_piece(torrent_id, piece_index, piece.clone(), verification_tx);
 
         let valid = verification_rx.await.expect("storage actor alive");
         if !valid {
-            p.set_piece_as(piece_index as usize, State::NotRequested);
+            p.set_piece_as(piece_index as usize, PieceState::NotRequested);
             return;
         }
 
-        p.set_piece_as(piece_index as usize, State::Downloaded);
+        p.set_piece_as(piece_index as usize, PieceState::Have);
         self.bitfield.set(piece_index as usize);
         self.broadcast_to_peers(PeerMessage::SendHave { piece_index })
             .await;
@@ -585,12 +580,10 @@ impl Torrent {
     fn clean_up_peer(&mut self, pid: Pid, bitfield: Option<Bitfield>) {
         info!("peer disconnected {pid:?}");
         self.peers.remove(&pid);
-        if let Some(bitfield) = bitfield {
-            // WARN: This is bad
-            self.piece_picker
-                .as_mut()
-                .expect("idk")
-                .decrement_availability(&bitfield);
+        if let Some(bitfield) = bitfield
+            && let Some(mananger) = self.piece_mananger.as_mut()
+        {
+            mananger.decrement_availability(AvailabilityUpdate::Bitfield(&bitfield));
         }
         self.metrics.connected_peers.fetch_sub(1, Ordering::Relaxed);
     }

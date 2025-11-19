@@ -1,4 +1,3 @@
-// #![allow(dead_code)]
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     net::SocketAddr,
@@ -35,7 +34,7 @@ use tracing::{debug, info, instrument, warn};
 use crate::{
     bitfield::{Bitfield, BitfieldError},
     peer::{ConnectTimeout, PeerMessage, metrics::PeerMetrics},
-    piece_picker::DownloadTask,
+    // piece_picker::DownloadTask,
     session::CLIENT_ID,
     torrent::{Pid, TorrentMessage},
 };
@@ -555,28 +554,22 @@ impl Peer<Connected> {
         Ok(())
     }
 
-    fn task_into_block_info(&self, task: DownloadTask) -> Vec<BlockInfo> {
-        match task {
-            DownloadTask::Piece(piece_idx) => {
-                let piece_size = self
-                    .state
-                    .metadata
-                    .as_ref()
-                    .expect("have metadata")
-                    .get_piece_len(piece_idx as usize);
+    fn task_into_block_info(&self, piece_idx: u32) -> Vec<BlockInfo> {
+        let piece_size = self
+            .state
+            .metadata
+            .as_ref()
+            .expect("have metadata")
+            .get_piece_len(piece_idx as usize);
 
-                (0..piece_size)
-                    .step_by(METADATA_BLOCK_SIZE as usize)
-                    .map(|offset| BlockInfo {
-                        index: piece_idx,
-                        begin: offset,
-                        length: METADATA_BLOCK_SIZE.min(piece_size - offset),
-                    })
-                    .collect()
-            }
-            // DownloadTask::Blocks(range)
-            _ => Vec::new(),
-        }
+        (0..piece_size)
+            .step_by(METADATA_BLOCK_SIZE as usize)
+            .map(|offset| BlockInfo {
+                index: piece_idx,
+                begin: offset,
+                length: METADATA_BLOCK_SIZE.min(piece_size - offset),
+            })
+            .collect()
     }
 
     fn download_queue_size(&self) -> usize {
@@ -710,7 +703,6 @@ impl Peer<Connected> {
         todo!()
     }
     async fn on_incoming_piece(&mut self, block: Block) -> Result<(), ConnectionError> {
-        // self.state.metrics.update_download(block.data.len() as u64, rate);
         self.state.metrics.record_download(block.data.len() as u64);
         let block_info = BlockInfo {
             index: block.index,
@@ -727,7 +719,7 @@ impl Peer<Connected> {
             self.request_block().await?;
             self.send_block_request().await?;
         } else {
-            debug!("Recv a non-requested block");
+            debug!("Recv a non-requested block: {block_info:?}");
         }
 
         Ok(())

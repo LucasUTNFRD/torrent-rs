@@ -1,4 +1,7 @@
-use std::io::{self};
+use std::{
+    fmt::{self, Debug},
+    io::{self},
+};
 
 // TODO: Reject packets bigger than 1mb
 
@@ -19,11 +22,27 @@ pub struct BlockInfo {
     pub length: u32,
 }
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[derive(Clone, Hash, PartialEq, Eq)]
 pub struct Block {
     pub index: u32,
     pub begin: u32,
     pub data: Bytes,
+}
+
+impl fmt::Debug for Block {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Use fmt::Formatter's debug_struct method for structured output.
+        // The argument is the name of the struct.
+        f.debug_struct("Block")
+            // Call .field() for each field you want to include in the output.
+            .field("index", &self.index)
+            .field("begin", &self.begin)
+            // Do NOT call .field() for 'data' to exclude it from the Debug output.
+            // You can optionally add a placeholder string for the excluded field.
+            .field("data", &"<omitted Bytes>")
+            // Call .finish() to complete the struct formatting.
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

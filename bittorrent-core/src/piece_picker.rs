@@ -1,136 +1,132 @@
-// See [reference](https://blog.libtorrent.org/2011/11/writing-a-fast-piece-picker/)
-//
-
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use bittorrent_common::metainfo::Info;
 use peer_protocol::protocol::Block;
 
-use crate::bitfield::Bitfield;
+use crate::{bitfield::Bitfield, torrent::Pid};
 
-pub struct PiecePicker {
-    pieces: Vec<Piece>,
+// Tracks
+// Availability of pieces
+// State of each piece at block-level
+// Piece Buffer
+//
+type PieceIndex = usize;
+
+#[derive(Debug, Eq, PartialEq, PartialOrd, Ord)]
+struct PieceAvailability {
+    npeers: usize,
+    piece_index: PieceIndex,
 }
 
-// TODO:
-// We need to keep track of peers bitfields
-// Pieces when they are picked should be marked with the PID
-// We need to implement Block level piece request
-
-#[derive(Debug)]
-pub enum DownloadTask {
-    /// Indicated downloading a whole piece
-    Piece(u32),
-    // Indicated downloading a block subset from a piece
-    Blocks(std::ops::Range<usize>),
-    // Inidicated downlaoding a single block, probably we are in end-game
-    Block,
+pub struct PieceManager {
+    pieces: Vec<PieceMetadata>,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum State {
+struct PieceMetadata {
+    index: PieceIndex,
+    num_peer: usize,
+    state: PieceState,
+    buffer: Option<PieceBuffer>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub enum PieceState {
     NotRequested,
-    Requested,
-    Received,
+    Request(Pid),
     Downloaded,
+    Have,
 }
 
-#[derive(Debug, Clone, Copy)]
-//The operations of the piece picker are:
-// pick one or more pieces for peer p (this is to determine what to download from a peer)
-struct Piece {
-    index: u32,
-    /// Piece availabilty in the swarm
-    num_peers: usize,
-    partial: bool,
-    state: State,
+pub enum AvailabilityUpdate<'a> {
+    Bitfield(&'a Bitfield),
+    Have(u32),
 }
 
-pub enum AvailabilityUpdate {
-    Bitfield(Bitfield),
-    Have(PieceIndex),
-}
-
-impl PiecePicker {
+impl PieceManager {
     pub fn new(torrent_info: Arc<Info>) -> Self {
-        let num_pieces = torrent_info.pieces.len();
-        let pieces = (0..num_pieces)
-            .map(|piece_idx| Piece {
-                index: piece_idx as u32,
-                num_peers: 0,
-                partial: false,
-                state: State::NotRequested,
+        // torrent_info.num_pieces();
+        let pieces: Vec<_> = (0..torrent_info.num_pieces())
+            .map(|i| PieceMetadata {
+                index: i,
+                num_peer: 0,
+                state: PieceState::NotRequested,
+                buffer: Some(PieceBuffer::new(torrent_info.get_piece_len(i) as usize)),
             })
             .collect();
 
         Self { pieces }
     }
 
-    /// bitfiled indicated the pieces remote peer has
-    /// num_bytes: represent the size in bytes that the remote peer need for a efficient outstanding block requests to keep to a peer
-    pub fn pick_piece(&mut self, bitfield: &Bitfield, _num_bytes: usize) -> Option<DownloadTask> {
-        let mut candidate_pieces: Vec<&Piece> = self
-            .pieces
-            .iter()
-            .filter(|piece| {
-                matches!(piece.state, State::NotRequested) && bitfield.has(piece.index as usize)
-            })
-            .collect();
-
-        if candidate_pieces.is_empty() {
-            return None;
-        }
-
-        // Sort by rarest first (lowest num_peers)
-        candidate_pieces.sort_by(|a, b| a.num_peers.cmp(&b.num_peers));
-
-        // Return the rarest piece as a download task
-        Some(DownloadTask::Piece(candidate_pieces[0].index))
-    }
-
-    pub fn set_piece_as(&mut self, piece_index: usize, state: State) {
-        self.pieces[piece_index].state = state
-    }
-
-    // increment availability counter for piece i (when a peer announces that it just completed downloading a new piece)
-    // increment availability counters for all pieces of peer p (when a peer joins the swarm)
     pub fn increment_availability(&mut self, update: AvailabilityUpdate) {
         match update {
             AvailabilityUpdate::Bitfield(bitfield) => {
-                for idx in bitfield.iter_set() {
-                    self.pieces[idx].num_peers += 1;
+                for index in bitfield.iter_set() {
+                    if let Some(piece) = self.pieces.get_mut(index) {
+                        piece.num_peer += 1
+                    }
                 }
             }
-            AvailabilityUpdate::Have(idx) => {
-                if let Some(p) = self.pieces.get_mut(idx as usize) {
-                    p.num_peers += 1;
+            AvailabilityUpdate::Have(index) => {
+                if let Some(piece) = self.pieces.get_mut(index as usize) {
+                    piece.num_peer += 1
                 }
             }
         }
     }
 
-    /// decrement piece availability of a peer which we lost connection
-    pub fn decrement_availability(&mut self, bitfield: &Bitfield) {
-        for piece in bitfield.iter_set() {
-            self.pieces[piece].num_peers -= 1;
+    pub fn decrement_availability(&mut self, update: AvailabilityUpdate) {
+        match update {
+            AvailabilityUpdate::Bitfield(bitfield) => {
+                for index in bitfield.iter_set() {
+                    if let Some(piece) = self.pieces.get_mut(index) {
+                        piece.num_peer -= 1
+                    }
+                }
+            }
+            AvailabilityUpdate::Have(index) => {
+                if let Some(piece) = self.pieces.get_mut(index as usize) {
+                    piece.num_peer -= 1
+                }
+            }
         }
+    }
+
+    pub fn clear_pieces_by_peer(&mut self, peer_id: Pid) {}
+
+    pub fn set_piece_as(&mut self, index: PieceIndex, state: PieceState) {}
+
+    pub fn pick_piece(&mut self, remote_bitfield: Bitfield, peer_id: Pid) -> Option<u32> {
+        for peer_has in remote_bitfield.iter_set() {
+            if self.pieces[peer_has].state == PieceState::NotRequested {
+                return Some(peer_has as u32);
+            }
+        }
+
+        None
+    }
+
+    pub fn add_block(&mut self, block: Block) -> Option<Box<[u8]>> {
+        let piece_index = block.index;
+        let piece = self.pieces.get_mut(piece_index as usize)?;
+
+        let buffer = piece.buffer.as_mut()?;
+
+        if buffer.add_block(&block) {
+            piece.state = PieceState::Downloaded;
+            return piece.buffer.take().map(|b| b.into_bytes());
+        }
+
+        None
     }
 }
 
-type PieceIndex = u32;
-
-/// Tracks completed byte ranges for a piece and manages the piece buffer
-#[derive(Debug, Clone)]
-struct PieceMetadata {
-    /// Fixed-size piece buffer
+struct PieceBuffer {
     piece_bytes: Box<[u8]>,
-    /// Completed byte ranges, kept merged and sorted
     completed_ranges: Vec<std::ops::Range<u32>>,
-    /// Total expected length of this piece
     expected_length: u32,
 }
 
-impl PieceMetadata {
+impl PieceBuffer {
     /// Create a new piece metadata with the given expected length
     pub fn new(piece_len: usize) -> Self {
         Self {
@@ -232,60 +228,5 @@ impl PieceMetadata {
     // Is Box<[u8]> representative for what we need?
     pub fn into_bytes(self) -> Box<[u8]> {
         self.piece_bytes
-    }
-}
-
-pub struct PieceCollector {
-    piece_map: HashMap<PieceIndex, PieceMetadata>,
-}
-
-impl PieceCollector {
-    pub fn new(torrent_info: Arc<Info>) -> Self {
-        let mut piece_map = HashMap::new();
-        let num_pieces = torrent_info.pieces.len();
-
-        for piece_idx in 0..num_pieces {
-            let piece_len = torrent_info.get_piece_len(piece_idx) as usize;
-            piece_map.insert(piece_idx as u32, PieceMetadata::new(piece_len));
-        }
-
-        Self { piece_map }
-    }
-
-    // return the subset of blocks of a piece which are not received yet
-    pub fn get_empty_blocks(&self, piece_idx: u32) -> Vec<std::ops::Range<u32>> {
-        self.piece_map[&piece_idx].get_missing_ranges()
-    }
-
-    /// Add a block to the corresponding piece buffer
-    /// Returns Some(Box<[u8]>) if the piece is completed after adding this block
-    /// and remove entry from cache
-    pub fn add_block(&mut self, block: Block) -> Option<Box<[u8]>> {
-        let idx = block.index;
-        if let Some(meta) = self.piece_map.get_mut(&idx)
-            && meta.add_block(&block)
-        {
-            // WARN: This remove the whole mapping to the piece metadata of a given piece index
-            // if the piece validation fails, we cannot keep caching incoming related blocks of the
-            // given piece due to previous remove on piece_map
-            return self.piece_map.remove(&idx).map(PieceMetadata::into_bytes);
-        }
-        None
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use bittorrent_common::metainfo::parse_torrent_from_file;
-
-    use super::*;
-    #[test]
-    fn test_correct_amount_of_pieces() {
-        let torrent =
-            parse_torrent_from_file("../sample_torrents/sample.torrent").expect("parse torrent");
-        let t = torrent.info;
-        let piece_picker = PiecePicker::new(t.clone());
-
-        assert_eq!(piece_picker.pieces.len(), t.pieces.len())
     }
 }
