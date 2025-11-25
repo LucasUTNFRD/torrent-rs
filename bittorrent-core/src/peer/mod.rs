@@ -2,7 +2,7 @@ use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use bittorrent_common::metainfo::Info;
-use peer_protocol::protocol::Message;
+use peer_protocol::protocol::{BlockInfo, Message};
 use tokio::{net::TcpStream, sync::mpsc};
 
 use crate::{bitfield::Bitfield, peer::metrics::PeerMetrics};
@@ -27,6 +27,7 @@ pub struct PeerState {
     pub addr: SocketAddr,
     pub metrics: PeerMetrics,
     pub tx: mpsc::Sender<PeerMessage>,
+    pub pending_requests: Vec<BlockInfo>,
 }
 
 #[async_trait]

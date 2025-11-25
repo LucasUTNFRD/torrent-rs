@@ -26,6 +26,6 @@ console-subscriber.workspace = true
 once_cell = "1.21.3"
 magnet-uri = { path = "../magnet-uri/" }
 
-[lints.clippy]
+# [lints.clippy]
 # unwrap_used = "deny"
 # allow-unwrap-in-tests = "allow"

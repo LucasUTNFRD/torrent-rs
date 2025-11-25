@@ -189,14 +189,6 @@ pub struct Connected {
     metadata_size: usize,
     max_outgoing_request: usize,
 
-    // Wrap this in a enum to ensure non invalid states
-    // Bitfield{
-    //  NotReceived,
-    //  Received(Bitfield),
-    //  Validated(Bitfield),
-    // }
-    // bitfield: Bitfield,
-    // bitfield_received: bool,
     bitfield: BitfieldState,
 }
 
@@ -309,7 +301,6 @@ impl Peer<Connected> {
     fields(
         pid = %self.pid,
         addr = %self.addr,
-        max_outgoing_request = self.state.max_outgoing_request,
     )
     )]
     pub async fn start(mut self) -> Result<(), ConnectionError> {
@@ -345,9 +336,18 @@ impl Peer<Connected> {
                 _=heartbeat_ticker.tick()=>{
                     self.state.metrics.update_rates();
 
-                    info!("{}", self.state.metrics.get_download_rate_human());
-                    let last_req  = self.state.last_block_request;
-                    info!("Last request was at: {last_req:#?}");
+                    info!("dr : {} | choked: {} | interested: {} | max_queue_size : {}, outgoing_requests: {}", self.state.metrics.get_download_rate_human(),self.state.choked,self.state.interesting, self.state.max_outgoing_request,self.state.outgoing_request.len());
+
+
+
+                    let time_since_last_request = self.state.last_block_request.elapsed();
+                    if self.state.interesting && time_since_last_request > Duration::from_secs(30) {
+                        warn!(
+                            "Disconnecting peer: interested but no block request activity for {} seconds",
+                            time_since_last_request.as_secs()
+                        );
+                        break;
+                    }
 
                     self.state.sink.send(Message::KeepAlive).await?;
                 }
@@ -452,6 +452,9 @@ impl Peer<Connected> {
 
         self.state.interesting = resp_rx.await.expect("sender dropped");
 
+        self.request_block().await?;
+        self.send_block_request().await?;
+
         Ok(())
     }
 
@@ -515,31 +518,38 @@ impl Peer<Connected> {
             return Ok(());
         };
 
+        // Calculate how many blocks we can request
+        // max_outgoing_request is your pipeline size (e.g., 10-50 blocks)
+        let available_slots = self
+            .state
+            .max_outgoing_request
+            .saturating_sub(self.state.outgoing_request.len());
+
+        if available_slots == 0 {
+            return Ok(());
+        }
+
         let (block_tx, block_rx) = oneshot::channel();
 
         let _ = self
             .torrent_tx
             .send(TorrentMessage::RequestBlock {
                 pid: self.pid,
-                num_bytes: 0,
+                max_requests: available_slots,
                 bitfield,
                 block_tx,
             })
             .await;
 
-        let Some(task) = block_rx.await.expect("channel not dropped") else {
-            return Ok(());
-        };
+        let tasks = block_rx.await.expect("channel not dropped");
 
-        let block_request = self.task_into_block_info(task);
-
-        // Add block_request to the request_queue
-        self.state.request_queue.extend(block_request);
+        self.state.request_queue.extend(tasks);
 
         Ok(())
     }
 
     async fn send_block_request(&mut self) -> Result<(), ConnectionError> {
+        debug!("SENDING BLOCK REQUEST");
         while let Some(block) = self.state.request_queue.pop() {
             if self.state.outgoing_request.len() > self.state.max_outgoing_request {
                 debug!("pipeline is empty, should request more pieces");
@@ -549,33 +559,10 @@ impl Peer<Connected> {
             self.state.outgoing_request.insert(block);
             self.state.last_block_request = Instant::now();
             self.state.sink.send(Message::Request(block)).await?;
+            debug!("SENT");
         }
 
         Ok(())
-    }
-
-    fn task_into_block_info(&self, piece_idx: u32) -> Vec<BlockInfo> {
-        let piece_size = self
-            .state
-            .metadata
-            .as_ref()
-            .expect("have metadata")
-            .get_piece_len(piece_idx as usize);
-
-        (0..piece_size)
-            .step_by(METADATA_BLOCK_SIZE as usize)
-            .map(|offset| BlockInfo {
-                index: piece_idx,
-                begin: offset,
-                length: METADATA_BLOCK_SIZE.min(piece_size - offset),
-            })
-            .collect()
-    }
-
-    fn download_queue_size(&self) -> usize {
-        // assumes the latency of the link to be 1 second.
-        // https://blog.libtorrent.org/2011/11/requesting-pieces/
-        todo!()
     }
 
     async fn on_interested(&mut self) -> Result<(), ConnectionError> {
@@ -798,7 +785,7 @@ impl Peer<Connected> {
                 self.state.metadata_size = metadata_size as usize;
             }
 
-            if dbg!(self.state.metadata.is_none()) {
+            if self.state.metadata.is_none() {
                 debug!("SHOULD REQUEST METADATA");
                 let _ = self
                     .torrent_tx

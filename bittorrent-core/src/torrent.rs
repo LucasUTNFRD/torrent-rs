@@ -16,18 +16,14 @@ use bittorrent_common::{
 };
 use bytes::Bytes;
 use magnet_uri::Magnet;
-use peer_protocol::protocol::{Block, Message};
+use peer_protocol::protocol::{Block, BlockInfo, Message};
 use thiserror::Error;
 use tokio::{
     net::TcpStream,
     sync::{mpsc, oneshot, watch},
-    time::{interval, sleep},
+    time::sleep,
 };
-use tracing::{
-    Span, debug,
-    field::{self, debug},
-    info, instrument, warn,
-};
+use tracing::{debug, field::debug, info, instrument, warn};
 use tracker_client::{ClientState, Events, TrackerError, TrackerHandler, TrackerResponse};
 use url::Url;
 
@@ -40,7 +36,7 @@ use crate::{
         metrics::PeerMetrics,
         peer_connection::{ConnectionError, spawn_outgoing_peer},
     },
-    piece_picker::{AvailabilityUpdate, PieceManager, PieceState},
+    piece_picker::{AvailabilityUpdate, BlockRequest, PieceManager, PieceState},
 };
 
 // Peer related
@@ -110,9 +106,9 @@ pub enum TorrentMessage {
 
     RequestBlock {
         pid: Pid,
-        num_bytes: usize,
+        max_requests: usize,
         bitfield: Bitfield,
-        block_tx: oneshot::Sender<Option<u32>>,
+        block_tx: oneshot::Sender<Vec<BlockInfo>>,
     },
 
     // -- METADATA REQUEST --
@@ -279,6 +275,8 @@ impl Torrent {
         let (announce_tx, mut announce_rx) = mpsc::channel(16);
         self.announce(announce_tx);
 
+        let mut debug_interval = tokio::time::interval(Duration::from_secs(60));
+
         loop {
             tokio::select! {
                 Ok(_) = self.shutdown_rx.changed() => {
@@ -296,6 +294,11 @@ impl Torrent {
                         self.add_peer(PeerSource::Outbound(*peer));
                     }
 
+                }
+                _ = debug_interval.tick() => {
+                      if let Some(ref piece_manager) = self.piece_mananger {
+                        piece_manager.debug_print_state();
+                    }
                 }
             }
         }
@@ -377,6 +380,7 @@ impl Torrent {
             addr: *peer.get_addr(),
             tx: peer_tx,
             metrics: PeerMetrics::new(),
+            pending_requests: Vec::new(),
         };
 
         self.peers.insert(peer_id, peer);
@@ -422,18 +426,32 @@ impl Torrent {
                 let interest = bitfield
                     .iter_set()
                     .any(|piece_peer_has| !self.bitfield.has(piece_peer_has));
+                dbg!(interest);
                 let _ = resp_tx.send(interest);
             }
             RequestBlock {
                 pid,
-                num_bytes,
+                max_requests,
                 bitfield,
                 block_tx,
             } => {
+                debug!("----recevied blokc request");
                 let p = self.piece_mananger.as_mut().expect("init");
-                let task = p.pick_piece(bitfield, pid);
+                let blocks = p.pick_piece(&bitfield, max_requests);
+                //
+                // Register these requests (increment heat)
+                for block in &blocks {
+                    let request = BlockRequest::from(*block);
+                    p.add_request(request);
+                }
 
-                let _ = block_tx.send(task);
+                self.peers
+                    .get_mut(&pid)
+                    .unwrap()
+                    .pending_requests
+                    .extend(blocks.clone());
+
+                let _ = block_tx.send(blocks);
             }
             ValidMetadata { resp } => {
                 let metadata = self.metadata.info();
@@ -514,6 +532,24 @@ impl Torrent {
     async fn incoming_block(&mut self, pid: Pid, block: Block) {
         let piece_index = block.index;
 
+        let request = BlockRequest {
+            piece_index: block.index,
+            begin: block.begin,
+            length: block.data.len() as u32,
+        };
+
+        // Decrement heat
+        if let Some(p) = self.piece_mananger.as_mut() {
+            p.delete_request(request);
+        }
+
+        // Remove from peer's pending requests
+        if let Some(peer_state) = self.peers.get_mut(&pid) {
+            peer_state
+                .pending_requests
+                .retain(|r| *r != BlockInfo::from(request));
+        }
+
         if let Some(piece) = self
             .piece_mananger
             .as_mut()
@@ -579,11 +615,20 @@ impl Torrent {
 
     fn clean_up_peer(&mut self, pid: Pid, bitfield: Option<Bitfield>) {
         info!("peer disconnected {pid:?}");
-        self.peers.remove(&pid);
+        let p = self.peers.remove(&pid);
+
+        let requests: Vec<_> = p
+            .unwrap()
+            .pending_requests
+            .iter()
+            .map(|x| BlockRequest::from(*x))
+            .collect();
+
         if let Some(bitfield) = bitfield
             && let Some(mananger) = self.piece_mananger.as_mut()
         {
             mananger.decrement_availability(AvailabilityUpdate::Bitfield(&bitfield));
+            mananger.cancel_peer_requests(&requests);
         }
         self.metrics.connected_peers.fetch_sub(1, Ordering::Relaxed);
     }
