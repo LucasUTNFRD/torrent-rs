@@ -242,7 +242,7 @@ impl Torrent {
 
         // let metadata = Arc::new(metadata);
 
-        let (tx, rx) = mpsc::channel(64);
+        let (tx, rx) = mpsc::channel(300);
 
         (
             Self {
@@ -275,9 +275,20 @@ impl Torrent {
         let (announce_tx, mut announce_rx) = mpsc::channel(16);
         self.announce(announce_tx);
 
-        let mut debug_interval = tokio::time::interval(Duration::from_secs(60));
+        // let mut debug_interval = tokio::time::interval(Duration::from_secs(60));
 
         loop {
+            if let Some(piece_manager) = self.piece_mananger.as_ref()
+                && piece_manager.have_all_pieces()
+            {
+                if let Some(name) = self.metadata.display_name() {
+                    info!("Torrent-{} Download Completed", name);
+                } else {
+                    info!("Torrent Download Completed");
+                }
+                //  TODO: BEFORFE BREAKING WE SHOULD DO SOME MERCIFUL SHUTDOWN OF PEER CONNECTIONS
+                break;
+            }
             tokio::select! {
                 Ok(_) = self.shutdown_rx.changed() => {
                     tracing::info!("Shutting down...");
@@ -295,11 +306,11 @@ impl Torrent {
                     }
 
                 }
-                _ = debug_interval.tick() => {
-                      if let Some(ref piece_manager) = self.piece_mananger {
-                        piece_manager.debug_print_state();
-                    }
-                }
+                // _ = debug_interval.tick() => {
+                //       if let Some(ref piece_manager) = self.piece_mananger {
+                //         piece_manager.debug_print_state();
+                //     }
+                // }
             }
         }
 
@@ -391,7 +402,6 @@ impl Torrent {
         match msg {
             PeerDisconnected(pid, bitfield) => self.clean_up_peer(pid, bitfield),
             PeerError(pid, err, bitfield) => {
-                tracing::warn!(?err, "Peer {pid:?} encountered an error");
                 self.clean_up_peer(pid, bitfield);
             }
             Have { pid, piece_idx } => {
@@ -426,7 +436,6 @@ impl Torrent {
                 let interest = bitfield
                     .iter_set()
                     .any(|piece_peer_has| !self.bitfield.has(piece_peer_has));
-                dbg!(interest);
                 let _ = resp_tx.send(interest);
             }
             RequestBlock {
@@ -435,7 +444,7 @@ impl Torrent {
                 bitfield,
                 block_tx,
             } => {
-                debug!("----recevied blokc request");
+                // debug!("----recevied blokc request");
                 let p = self.piece_mananger.as_mut().expect("init");
                 let blocks = p.pick_piece(&bitfield, max_requests);
                 //
@@ -550,6 +559,9 @@ impl Torrent {
                 .retain(|r| *r != BlockInfo::from(request));
         }
 
+        // TODO: IF OTHER PEER IS ALSO REQUESTING THIS PIECE WE SHOULD SEND CANCEL
+        //  AND REMOVEIT from its pending requests
+
         if let Some(piece) = self
             .piece_mananger
             .as_mut()
@@ -561,18 +573,19 @@ impl Torrent {
     }
 
     async fn on_complete_piece(&mut self, piece_index: u32, piece: Box<[u8]>) {
-        // todo!("Should persist piece");
         let p = self.piece_mananger.as_mut().expect("inti");
         p.set_piece_as(piece_index as usize, PieceState::Downloaded);
-        //
+
         let torrent_id = self.info_hash;
         let piece: Arc<[u8]> = piece.into();
-        //
+
         let (verification_tx, verification_rx) = oneshot::channel();
         self.storage
             .verify_piece(torrent_id, piece_index, piece.clone(), verification_tx);
 
         let valid = verification_rx.await.expect("storage actor alive");
+        tracing::debug!("PIECE VALIDATION RECV");
+
         if !valid {
             p.set_piece_as(piece_index as usize, PieceState::NotRequested);
             return;
@@ -580,10 +593,15 @@ impl Torrent {
 
         p.set_piece_as(piece_index as usize, PieceState::Have);
         self.bitfield.set(piece_index as usize);
+        // tracing::debug!("BROADCASTING PIECE TO PEERS");
         self.broadcast_to_peers(PeerMessage::SendHave { piece_index })
             .await;
 
-        info!("Completed piece {piece_index:?}");
+        self.piece_mananger
+            .as_ref()
+            .expect("initalized")
+            .info_progress();
+
         self.storage.write_piece(torrent_id, piece_index, piece);
     }
 
@@ -615,6 +633,7 @@ impl Torrent {
 
     fn clean_up_peer(&mut self, pid: Pid, bitfield: Option<Bitfield>) {
         info!("peer disconnected {pid:?}");
+
         let p = self.peers.remove(&pid);
 
         let requests: Vec<_> = p
@@ -630,13 +649,14 @@ impl Torrent {
             mananger.decrement_availability(AvailabilityUpdate::Bitfield(&bitfield));
             mananger.cancel_peer_requests(&requests);
         }
+
         self.metrics.connected_peers.fetch_sub(1, Ordering::Relaxed);
     }
 
     /// Send a message to a specific peer
     async fn send_to_peer(&self, pid: Pid, message: PeerMessage) {
         if let Some(p) = self.peers.get(&pid) {
-            let _ = p.tx.send(message).await;
+            let _ = p.tx.send_timeout(message, Duration::from_millis(50)).await;
         }
     }
 

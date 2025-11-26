@@ -40,7 +40,6 @@ use crate::{
 };
 
 ///The metadata is handled in blocks of 16KiB (16384 Bytes).
-const METADATA_BLOCK_SIZE: u32 = 1 << 14;
 const UT_METADATA_ID: u8 = 1;
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -154,26 +153,16 @@ pub struct Connected {
     // Socket Layer
     sink: SplitSink<Framed<TcpStream, MessageCodec>, Message>,
     stream: SplitStream<Framed<TcpStream, MessageCodec>>,
+    last_recv_msg: Instant,
 
-    // Download related
-    //
-    // the blocks we have reserved in the piece
-    // picker and will request from this peer.
-    // std::vector<pending_block> m_request_queue;
-
-    // the queue of blocks we have requested
-    // from this peer
-    // std::vector<pending_block> m_download_queue;
     request_queue: Vec<BlockInfo>,
     outgoing_request: HashSet<BlockInfo>,
-    incoming_request: HashSet<BlockInfo>,
-    metrics: Arc<PeerMetrics>,
     last_block_request: Instant,
+
+    metrics: Arc<PeerMetrics>,
 
     supports_extended: bool,
     remote_extensions: HashMap<String, i64>,
-
-    last_recv_msg: Instant,
 
     // Remote peer state
     peer_interested: bool,
@@ -183,7 +172,6 @@ pub struct Connected {
     interesting: bool,
     choked: bool,
 
-    // TODO: merge this two into None or Option<Arc<Info>>
     metadata: Option<Arc<Info>>,
 
     metadata_size: usize,
@@ -270,7 +258,6 @@ impl Connected {
             sink,
             stream,
             outgoing_request: HashSet::new(),
-            incoming_request: HashSet::new(),
             supports_extended,
             last_recv_msg: Instant::now(),
             peer_interested: false,
@@ -290,10 +277,6 @@ impl Connected {
 }
 
 impl Peer<Connected> {
-    pub fn start_from_incoming() -> Result<(), ConnectionError> {
-        todo!()
-    }
-
     #[instrument(
     skip(self),
     name = "peer",
@@ -312,8 +295,10 @@ impl Peer<Connected> {
             self.send_extended_handshake().await?
         }
 
-        let mut heartbeat_ticker = interval(Duration::from_secs(1));
+        let mut heartbeat_ticker = interval(Duration::from_secs(60));
+        let mut metric_update = interval(Duration::from_secs(1));
         heartbeat_ticker.tick().await;
+        metric_update.tick().await;
 
         loop {
             self.maybe_request_medata().await?;
@@ -334,14 +319,10 @@ impl Peer<Connected> {
                     }
                 }
                 _=heartbeat_ticker.tick()=>{
-                    self.state.metrics.update_rates();
-
                     info!("dr : {} | choked: {} | interested: {} | max_queue_size : {}, outgoing_requests: {}", self.state.metrics.get_download_rate_human(),self.state.choked,self.state.interesting, self.state.max_outgoing_request,self.state.outgoing_request.len());
 
-
-
                     let time_since_last_request = self.state.last_block_request.elapsed();
-                    if self.state.interesting && time_since_last_request > Duration::from_secs(30) {
+                    if self.state.interesting && time_since_last_request > Duration::from_secs(30) || self.state.last_recv_msg.elapsed() > Duration::from_secs(60) {
                         warn!(
                             "Disconnecting peer: interested but no block request activity for {} seconds",
                             time_since_last_request.as_secs()
@@ -350,6 +331,10 @@ impl Peer<Connected> {
                     }
 
                     self.state.sink.send(Message::KeepAlive).await?;
+                }
+                _ = metric_update.tick() => {
+                    self.state.metrics.update_rates();
+
                 }
             }
         }
@@ -377,6 +362,8 @@ impl Peer<Connected> {
     fn debug_peer_dowload() {}
 
     async fn handle_msg(&mut self, msg: Message) -> Result<(), ConnectionError> {
+        self.state.last_recv_msg = Instant::now();
+
         match msg {
             Message::KeepAlive => self.on_keepalive().await?,
             Message::Choke => self.on_choke().await?,

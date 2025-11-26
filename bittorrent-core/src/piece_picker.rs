@@ -124,6 +124,10 @@ impl PieceManager {
         }
     }
 
+    pub fn have_all_pieces(&self) -> bool {
+        self.pieces.iter().all(|p| p.state == PieceState::Have)
+    }
+
     /// Create block metadata for a piece based on its length
     fn create_blocks_for_piece(piece_index: usize, piece_len: u32) -> Vec<BlockMetadata> {
         let mut blocks = Vec::new();
@@ -221,6 +225,17 @@ impl PieceManager {
         false
     }
 
+    pub fn info_progress(&self) {
+        let have = self
+            .pieces
+            .iter()
+            .filter(|p| p.state == PieceState::Have)
+            .count();
+        let total = self.pieces.len();
+
+        tracing::info!("Piece progress {have:?}/{total:?}");
+    }
+
     /// Remove a block request and decrement its heat
     pub fn delete_request(&mut self, request: BlockRequest) {
         if let Some(heat) = self.heat.get_mut(&request) {
@@ -254,7 +269,7 @@ impl PieceManager {
 
     /// Pick blocks to request based on piece availability and block heat
     /// Returns up to `max_requests` blocks to request
-    pub fn pick_blocks(
+    fn pick_blocks(
         &mut self,
         remote_bitfield: &Bitfield,
         max_requests: usize,
@@ -381,6 +396,7 @@ impl PieceManager {
     }
 
     /// Add a received block to its piece buffer
+    /// Returns Some(Box<[u8>]) in case a piece is completed
     pub fn add_block(&mut self, block: Block) -> Option<Box<[u8]>> {
         let piece_index = block.index as usize;
         let piece = self.pieces.get_mut(piece_index)?;

@@ -3,6 +3,9 @@ use clap::Parser;
 use std::path::PathBuf;
 use std::time::Duration;
 use tracing::info;
+use tracing_subscriber::Layer;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 #[derive(Parser)]
 #[command(name = "bittorrent-cli")]
@@ -48,15 +51,30 @@ impl From<LogLevel> for tracing::Level {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let console_layer = console_subscriber::spawn();
+
     let args = Args::parse();
 
     let log_level = tracing::Level::from(args.log_level);
-    tracing_subscriber::fmt()
-        .with_max_level(log_level)
-        .with_target(false)
-        .with_thread_ids(false)
-        .with_file(false)
-        .with_line_number(true)
+
+    // let t = tracing_subscriber::fmt()
+    //     .with_max_level(log_level)
+    //     .with_target(false)
+    //     .with_thread_ids(false)
+    //     .with_file(false)
+    //     .with_line_number(true)
+    //     .finish();
+
+    tracing_subscriber::registry()
+        .with(console_layer)
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_target(false)
+                .with_thread_ids(false)
+                .with_file(false)
+                .with_line_number(true)
+                .with_filter(tracing_subscriber::filter::LevelFilter::from(log_level)),
+        )
         .init();
 
     let is_magnet = args.torrent.starts_with("magnet:");
