@@ -1,4 +1,9 @@
-use std::io::{self};
+use std::{
+    fmt::{self, Debug},
+    io::{self},
+};
+
+// TODO: Reject packets bigger than 1mb
 
 use bencode::Bencode;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -6,7 +11,7 @@ use tokio_util::codec::{Decoder, Encoder};
 
 use bittorrent_common::types::{InfoHash, PeerID};
 
-use crate::peer::extension::{ExtendedHandshake, ExtendedMessage};
+use crate::peer::extension::{ExtendedHandshake, ExtendedMessage, RawExtendedMessage};
 
 // TODO: Implement Extended Handshake Message code/decode
 
@@ -17,14 +22,30 @@ pub struct BlockInfo {
     pub length: u32,
 }
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[derive(Clone, Hash, PartialEq, Eq)]
 pub struct Block {
     pub index: u32,
     pub begin: u32,
     pub data: Bytes,
 }
 
-#[derive(Debug)]
+impl fmt::Debug for Block {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Use fmt::Formatter's debug_struct method for structured output.
+        // The argument is the name of the struct.
+        f.debug_struct("Block")
+            // Call .field() for each field you want to include in the output.
+            .field("index", &self.index)
+            .field("begin", &self.begin)
+            // Do NOT call .field() for 'data' to exclude it from the Debug output.
+            // You can optionally add a placeholder string for the excluded field.
+            .field("data", &"<omitted Bytes>")
+            // Call .finish() to complete the struct formatting.
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Message {
     KeepAlive,
     Choke,
@@ -240,17 +261,13 @@ impl Decoder for MessageCodec {
                             }
                         }
                     }
-
-                    // 1 => {todo!()}
-                    // 2 => {todo!()}
                     _ => {
-                        // Other extension messages - skip payload for now
                         let payload_length = msg_length as usize - 2;
-                        src.advance(payload_length);
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            format!("Unsupported extension message ID: {}", extension_id),
-                        ));
+                        let payload = src.split_to(payload_length).freeze();
+                        Message::Extended(ExtendedMessage::ExtensionMessage(RawExtendedMessage {
+                            id: extension_id,
+                            payload,
+                        }))
                     }
                 }
             }
@@ -337,6 +354,14 @@ impl Encoder<Message> for MessageCodec {
                     dst.put_u8(MessageId::Extended as u8);
                     dst.put_u8(0); // msg_id for handshake
                     dst.put_slice(&extended_payload);
+                    Ok(())
+                }
+                ExtendedMessage::ExtensionMessage(raw_extended_msg) => {
+                    let length = raw_extended_msg.payload.len() + 1 /*msg_id*/ + 1 /*extended msg_id*/;
+                    dst.put_u32(length as u32);
+                    dst.put_u8(MessageId::Extended as u8);
+                    dst.put_u8(raw_extended_msg.id);
+                    dst.put_slice(&raw_extended_msg.payload);
                     Ok(())
                 }
             },

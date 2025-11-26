@@ -1,14 +1,11 @@
-// Core public API
+mod bitfield;
+mod metadata;
 mod peer;
+mod piece_picker;
 mod session;
 mod storage;
 mod torrent;
 
-// High-level API - what most users need
 pub use session::Session;
-pub use torrent::TorrentStats;
 
-// Mid-level API
-pub use peer::manager::PeerManagerHandle;
-pub use peer::manager::bitfield::Bitfield;
 pub use storage::Storage;

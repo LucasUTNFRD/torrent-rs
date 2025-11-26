@@ -5,56 +5,72 @@ use std::{
 };
 
 use bittorrent_common::{
-    metainfo::parse_torrent_from_file,
+    metainfo::{TorrentInfo, TorrentParseError, parse_torrent_from_file},
     types::{InfoHash, PeerID},
 };
 use bytes::BytesMut;
+use magnet_uri::{Magnet, MagnetError};
 use once_cell::sync::Lazy;
 use peer_protocol::protocol::Handshake;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
-    sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
+    sync::{
+        mpsc::{self, UnboundedSender},
+        watch,
+    },
     task::JoinHandle,
 };
+
+use tracing::warn;
 use tracker_client::TrackerHandler;
 
 pub static CLIENT_ID: Lazy<PeerID> = Lazy::new(PeerID::generate);
 
 use crate::{
     storage::Storage,
-    torrent::{self, TorrentSession, TorrentStats},
+    torrent::{Torrent, TorrentError, TorrentMessage},
 };
 
 pub struct Session {
     pub handle: JoinHandle<()>,
     tx: UnboundedSender<SessionCommand>,
-    pub stats_receiver: UnboundedReceiver<TorrentStats>,
 }
 
 pub enum SessionCommand {
-    AddTorrent { directory: PathBuf },
+    AddTorrent(TorrentInfo),
+    AddMagnet(Magnet),
     Shutdown,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SessionError {
+    #[error("Magnet URI error: {0}")]
+    Magnet(MagnetError),
+
+    #[error("Torrent parsing error: {0}")]
+    TorrentParse(#[from] TorrentParseError),
 }
 
 impl Session {
     pub fn new(port: u16, save_path: PathBuf) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
-        let (stats_tx, statx_rx) = mpsc::unbounded_channel();
 
-        let manager = SessionManager::new(port, save_path, rx, stats_tx);
+        let manager = SessionManager::new(port, save_path, rx);
         let handle = tokio::task::spawn(async move { manager.start().await });
-        Self {
-            tx,
-            handle,
-            stats_receiver: statx_rx,
-        }
+        Self { tx, handle }
     }
 
-    pub fn add_torrent(&self, dir: impl AsRef<Path>) {
-        let _ = self.tx.send(SessionCommand::AddTorrent {
-            directory: dir.as_ref().to_path_buf(),
-        });
+    pub fn add_torrent(&self, dir: impl AsRef<Path>) -> Result<(), SessionError> {
+        let metainfo = parse_torrent_from_file(dir.as_ref())?;
+        let _ = self.tx.send(SessionCommand::AddTorrent(metainfo));
+        Ok(())
+    }
+
+    pub fn add_magnet(&self, uri: impl AsRef<str>) -> Result<(), SessionError> {
+        let magnet = Magnet::parse(uri).map_err(SessionError::Magnet)?;
+        let _ = self.tx.send(SessionCommand::AddMagnet(magnet));
+        Ok(())
     }
 
     pub fn shutdown(&self) {
@@ -62,27 +78,25 @@ impl Session {
     }
 }
 
+type TorrentSession = (
+    mpsc::Sender<TorrentMessage>,
+    JoinHandle<Result<(), TorrentError>>,
+);
+
 struct SessionManager {
     port: u16,
     save_path: PathBuf,
     rx: mpsc::UnboundedReceiver<SessionCommand>,
-    torrents: Arc<RwLock<HashMap<InfoHash, TorrentSession>>>,
-    stats_tx: mpsc::UnboundedSender<TorrentStats>,
+    sessions: Arc<RwLock<HashMap<InfoHash, TorrentSession>>>,
 }
 
 impl SessionManager {
-    pub fn new(
-        port: u16,
-        save_path: PathBuf,
-        rx: mpsc::UnboundedReceiver<SessionCommand>,
-        stats_tx: UnboundedSender<TorrentStats>,
-    ) -> Self {
+    pub fn new(port: u16, save_path: PathBuf, rx: mpsc::UnboundedReceiver<SessionCommand>) -> Self {
         Self {
             port,
             save_path,
             rx,
-            torrents: Arc::new(RwLock::new(HashMap::new())),
-            stats_tx,
+            sessions: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -91,49 +105,103 @@ impl SessionManager {
         let tracker = Arc::new(TrackerHandler::new(*CLIENT_ID));
         let storage = Arc::new(Storage::new());
 
+        let (shutdown_tx, shutdown_rx) = watch::channel(());
+
         self.spawn_tcp_listener();
 
         while let Some(cmd) = self.rx.recv().await {
             match cmd {
-                SessionCommand::AddTorrent { directory } => {
-                    let metainfo = match parse_torrent_from_file(directory) {
-                        Ok(torrent) => torrent,
-                        Err(e) => {
-                            tracing::warn!(?e);
-                            return;
-                        }
-                    };
-
+                SessionCommand::AddTorrent(metainfo) => {
                     tracing::info!(%metainfo);
 
                     let info_hash = metainfo.info_hash;
-                    let torrent_session = TorrentSession::new(
+                    let (torrent, tx) = Torrent::from_torrent_info(
                         metainfo,
                         tracker.clone(),
                         storage.clone(),
-                        self.stats_tx.clone(),
+                        shutdown_rx.clone(),
                     );
 
-                    let mut torrent_guard = self.torrents.write().unwrap();
-                    torrent_guard.insert(info_hash, torrent_session);
+                    let session_handle = tokio::spawn(async move { torrent.start_session().await });
+
+                    let t_session = (tx, session_handle);
+
+                    let mut s = self.sessions.write().unwrap();
+
+                    s.insert(info_hash, t_session);
+                }
+                SessionCommand::AddMagnet(magnet) => {
+                    let info_hash = match magnet.info_hash() {
+                        Some(ih) => ih,
+                        None => {
+                            tracing::error!("Magnet URI does not contain a valid info hash");
+                            continue;
+                        }
+                    };
+
+                    println!("{magnet}");
+                    println!("Info Hash: {info_hash}");
+                    if let Some(name) = &magnet.display_name {
+                        println!("Display Name: {name}");
+                    }
+                    if magnet.trackers.is_empty() {
+                        tracing::warn!(
+                            "No tracker is specfied, client SHOULD use DHT to acquire peers",
+                        );
+                        tracing::warn!("Torrent-RS doest not implement DHT,yet");
+                        continue;
+                    }
+
+                    println!("Trackers: {:?}", magnet.trackers);
+
+                    println!("Peers: {:?}", magnet.peers);
+
+                    let (torrent, tx) = Torrent::from_magnet(
+                        magnet,
+                        tracker.clone(),
+                        storage.clone(),
+                        shutdown_rx.clone(),
+                    );
+
+                    let session_handle = tokio::spawn(async move { torrent.start_session().await });
+
+                    let t_session = (tx, session_handle);
+
+                    let mut s = self.sessions.write().unwrap();
+
+                    s.insert(info_hash, t_session);
                 }
                 SessionCommand::Shutdown => {
-                    let torrent_guard = self.torrents.read().unwrap();
-                    for (info, torrent_session) in torrent_guard.iter() {
-                        tracing::debug!(%info,"Shutdown ");
-                        torrent_session.shutdown();
+                    if shutdown_tx.send(()).is_err() {
+                        tracing::warn!("No receivers for shutdown signal");
                     }
+
+                    let handles: Vec<_> = {
+                        let mut sessions = self.sessions.write().unwrap();
+                        sessions.drain().map(|(_, (_, h))| h).collect()
+                    };
+
+                    for h in handles {
+                        match h.await {
+                            Ok(Ok(())) => tracing::info!("Session exited cleanly"),
+                            Ok(Err(e)) => tracing::warn!(?e, "Session error"),
+                            Err(e) => tracing::warn!(?e, "Join error"),
+                        }
+                    }
+
+                    break;
                 }
             }
         }
     }
 
-    // TODO: Gracefully stop tcp_listener
     fn spawn_tcp_listener(&self) {
         tracing::info!("started connection listener");
         let port = self.port;
-        let torrent = self.torrents.clone();
+        let torrent = self.sessions.clone();
 
+        // make this a spawn peer connection
+        // and after reading info hash, perform a attact_to_torrent
         tokio::spawn(async move {
             let listener = TcpListener::bind(format!("0.0.0.0:{port}"))
                 .await
@@ -184,16 +252,16 @@ impl SessionManager {
                         remote_handshake.info_hash
                     );
 
-                    torrent
-                        .read()
-                        .unwrap()
-                        .get(&remote_handshake.info_hash)
-                        .unwrap()
-                        .add_peer(torrent::Peer::Inbound {
-                            stream,
-                            remote_addr,
-                            supports_ext,
-                        });
+                    // torrent
+                    //     .read()
+                    //     .unwrap()
+                    //     .get(&remote_handshake.info_hash)
+                    //     .unwrap()
+                    //     .add_peer(torrent::Peer::Inbound {
+                    //         stream,
+                    //         remote_addr,
+                    //         supports_ext,
+                    //     });
                 });
             }
         });

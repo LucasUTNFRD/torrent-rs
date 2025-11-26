@@ -4,6 +4,7 @@ use std::{
     fs::File,
     io::Read,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use bencode::{Bencode, BencodeError, Encode};
@@ -15,7 +16,7 @@ use crate::types::InfoHash;
 #[derive(Debug, Clone)]
 pub struct TorrentInfo {
     /// Dictionary describing the file(s) of the torrent
-    pub info: Info,
+    pub info: Arc<Info>,
 
     /// The announce URL of the tracker
     pub announce: String,
@@ -48,6 +49,37 @@ pub struct Info {
 
     /// File mode - either single file or multiple files
     pub mode: FileMode,
+}
+
+impl Info {
+    pub fn num_pieces(&self) -> usize {
+        self.pieces.len()
+    }
+
+    pub fn total_size(&self) -> i64 {
+        self.mode.length()
+    }
+
+    pub fn get_piece_len(&self, piece_idx: usize) -> u32 {
+        if piece_idx == self.num_pieces() - 1 {
+            let last_len = self.total_size() as u32 % self.piece_length as u32;
+            if last_len == 0 {
+                self.piece_length as u32
+            } else {
+                last_len
+            }
+        } else {
+            self.piece_length as u32
+        }
+    }
+
+    pub fn files(&self) -> Vec<FileInfo> {
+        self.mode.files()
+    }
+
+    pub fn get_piece_hash(&self, piece_idx: usize) -> Option<&[u8; 20]> {
+        self.pieces.get(piece_idx)
+    }
 }
 
 /// Represents either single-file or multi-file torrent mode
@@ -211,7 +243,7 @@ impl TorrentInfo {
 
     /// Get the number of pieces in the torrent
     pub fn num_pieces(&self) -> usize {
-        (self.total_size() as f64 / self.info.piece_length as f64).ceil() as usize
+        self.info.pieces.len()
     }
 
     /// Get all tracker URLs (primary + announce-list)
@@ -373,7 +405,7 @@ fn parse_torrent_from_bencode(bencode: &Bencode) -> Result<TorrentInfo, TorrentP
     let encoding = get_optional_string_from_dict(dict, KEY_ENCODING);
 
     Ok(TorrentInfo {
-        info,
+        info: Arc::new(info),
         announce,
         announce_list,
         creation_date,
@@ -384,7 +416,8 @@ fn parse_torrent_from_bencode(bencode: &Bencode) -> Result<TorrentInfo, TorrentP
     })
 }
 
-fn parse_info_dict(info_bencode: &Bencode) -> Result<Info, TorrentParseError> {
+// This is what we need for parsing ut_metadata
+pub fn parse_info_dict(info_bencode: &Bencode) -> Result<Info, TorrentParseError> {
     let dict = match info_bencode {
         Bencode::Dict(dict) => dict,
         _ => {
@@ -661,4 +694,21 @@ fn get_optional_int_from_dict(
         Bencode::Int(value) => Some(*value),
         _ => None,
     })
+}
+
+#[cfg(test)]
+mod test {
+    use crate::metainfo::parse_torrent_from_file;
+
+    #[test]
+    fn test_num_pieces_matches_len_of_pieces() {
+        let file =
+            parse_torrent_from_file("../sample_torrents/sample.torrent").expect("parse torrent");
+
+        let file2 =
+            parse_torrent_from_file("../sample_torrents/kubuntu-25.04-desktop-amd64.iso.torrent")
+                .expect("parse torrent");
+
+        assert_eq!(file.num_pieces(), file.info.pieces.len())
+    }
 }

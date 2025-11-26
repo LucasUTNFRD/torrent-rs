@@ -1,45 +1,26 @@
 use core::panic;
 use std::{
-    collections::HashMap,
     env,
     fs::{File, OpenOptions},
     io,
-    os::unix::fs::FileExt,
     path::{Path, PathBuf},
     sync::{Arc, mpsc},
     thread::{self},
 };
 
-use bittorrent_common::{
-    metainfo::{FileInfo, TorrentInfo},
-    types::InfoHash,
-};
-use bytes::BytesMut;
+use bittorrent_common::{metainfo::Info, types::InfoHash};
 use peer_protocol::protocol::{Block, BlockInfo};
-use sha1::{Digest, Sha1};
+use sha1::Digest;
 use tokio::sync::oneshot;
 
-struct StorageManager {
-    download_dir: PathBuf,
-    torrents: HashMap<InfoHash, Cache>,
-    rx: mpsc::Receiver<StorageMessage>,
-}
+use crate::storage::storage_manager::StorageManager;
 
-// TODO: Abstract the File System with a trait
-// this will let us implement for example an TestFileSystem for in memory test
-// or implement FileSystem for WindowsPlatform of MacOS
-// TODO: Implement FileSystem trait for WindowsPlatform and MacOS (low priority)
-
-struct Cache {
-    metainfo: Arc<TorrentInfo>,
-    files: Vec<FileInfo>,
-    file_handles: HashMap<PathBuf, File>,
-}
+mod storage_manager;
 
 pub enum StorageMessage {
     AddTorrent {
-        id: InfoHash,
-        meta: Arc<TorrentInfo>,
+        info_hash: InfoHash,
+        meta: Arc<Info>,
     },
     #[allow(dead_code)]
     RemoveTorrent { id: InfoHash },
@@ -52,12 +33,12 @@ pub enum StorageMessage {
         block_rx: oneshot::Sender<Result<Block, io::Error>>,
     },
     Write {
-        id: InfoHash,
+        info_hash: InfoHash,
         piece: u32,
         data: Arc<[u8]>,
     },
     Verify {
-        id: InfoHash,
+        info_hash: InfoHash,
         piece: u32,
         data: Arc<[u8]>,
         verification_tx: oneshot::Sender<bool>,
@@ -100,9 +81,9 @@ impl Storage {
         Self { tx }
     }
 
-    pub fn add_torrent(&self, torrent: Arc<TorrentInfo>) {
+    pub fn add_torrent(&self, info_hash: InfoHash, torrent: Arc<Info>) {
         let _ = self.tx.send(StorageMessage::AddTorrent {
-            id: torrent.info_hash,
+            info_hash,
             meta: torrent,
         });
     }
@@ -116,22 +97,22 @@ impl Storage {
 
     pub fn verify_piece(
         &self,
-        torrent_id: InfoHash,
+        info_hash: InfoHash,
         piece_index: u32,
         piece_data: Arc<[u8]>,
         verification_tx: oneshot::Sender<bool>,
     ) {
         let _ = self.tx.send(StorageMessage::Verify {
-            id: torrent_id,
+            info_hash,
             piece: piece_index,
             data: piece_data,
             verification_tx,
         });
     }
 
-    pub fn write_piece(&self, torrent_id: InfoHash, piece_index: u32, piece_data: Arc<[u8]>) {
+    pub fn write_piece(&self, info_hash: InfoHash, piece_index: u32, piece_data: Arc<[u8]>) {
         let _ = self.tx.send(StorageMessage::Write {
-            id: torrent_id,
+            info_hash,
             piece: piece_index,
             data: piece_data,
         });
@@ -151,251 +132,6 @@ impl Storage {
             length: block_info.length,
             block_rx,
         });
-    }
-}
-
-impl StorageManager {
-    pub fn new(download_dir: PathBuf, rx: mpsc::Receiver<StorageMessage>) -> Self {
-        Self {
-            download_dir,
-            rx,
-            torrents: HashMap::new(),
-        }
-    }
-
-    fn handle_add_torrent(&mut self, id: InfoHash, meta: Arc<TorrentInfo>) {
-        let files = meta.files();
-
-        for fi in &files {
-            let full_path = self.download_dir.join(&fi.path);
-
-            if let Some(parent) = full_path.parent()
-                && let Err(e) = std::fs::create_dir_all(parent)
-            {
-                eprintln!("storage: failed to create directory {:?}: {}", parent, e);
-            }
-        }
-
-        self.torrents.insert(
-            id,
-            Cache {
-                metainfo: meta,
-                files,
-                file_handles: HashMap::new(),
-            },
-        );
-    }
-
-    pub fn start(mut self) {
-        use StorageMessage::*;
-        while let Ok(msg) = self.rx.recv() {
-            match msg {
-                AddTorrent { id, meta } => {
-                    self.handle_add_torrent(id, meta);
-                }
-                RemoveTorrent { id } => {
-                    self.torrents.remove(&id);
-                }
-                Read {
-                    id,
-                    piece_index,
-                    begin,
-                    length,
-                    block_rx,
-                } => {
-                    let data = self.read(id, piece_index, begin, length);
-                    let _ = block_rx.send(data);
-                }
-                Write { id, piece, data } => {
-                    // TODO: return error to peer
-                    if let Err(e) = self.write(id, piece, &data) {
-                        tracing::error!(?e);
-                    }
-                }
-                Verify {
-                    id,
-                    piece,
-                    data,
-                    verification_tx,
-                } => {
-                    let expected_piece_hash = self
-                        .torrents
-                        .get(&id)
-                        .expect("peice verification of a non registered torrent")
-                        .metainfo
-                        .get_piece_hash(piece as usize);
-
-                    match expected_piece_hash {
-                        Some(expected_piece_hash) => {
-                            let mut hasher = Sha1::new();
-                            hasher.update(data);
-                            let piece_hash: [u8; 20] = hasher.finalize().into();
-
-                            let matches = piece_hash == *expected_piece_hash;
-                            if verification_tx.send(matches).is_err() {
-                                tracing::error!("failed to send verification to peer");
-                            };
-                        }
-                        None => {
-                            if verification_tx.send(false).is_err() {
-                                tracing::error!("failed to send verification to peer");
-                            };
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    fn write(&mut self, info_hash: InfoHash, piece_index: u32, data: &[u8]) -> io::Result<()> {
-        // First, collect the file information we need
-        let (files, piece_length) = {
-            let cache = self.torrents.get(&info_hash).unwrap();
-            (
-                // TODO: Remove this clone
-                cache.files.clone(),
-                cache.metainfo.info.piece_length as usize,
-            )
-        };
-
-        // Calculate the global byte offset for this piece
-        let mut global_offset = piece_index as usize * piece_length;
-        let mut remaining_data = data;
-
-        // Iterate through files to find where to start writing
-        for file_info in &files {
-            let file_len = file_info.length as usize;
-
-            // If this entire file is before our starting offset, skip it
-            if global_offset >= file_len {
-                global_offset -= file_len;
-                continue;
-            }
-
-            // Get or open the file handle
-            let file = self.get_or_open_file(info_hash, &file_info.path)?;
-
-            // Calculate how much we can write to this file
-            let start_in_file = global_offset;
-            let available_in_file = file_len - start_in_file;
-            let write_len = available_in_file.min(remaining_data.len());
-
-            // Write to this file
-            file.write_all_at(&remaining_data[..write_len], start_in_file as u64)?;
-
-            // Update remaining data and reset offset for next file
-            remaining_data = &remaining_data[write_len..];
-            global_offset = 0;
-
-            // If we've written all data, we're done
-            if remaining_data.is_empty() {
-                break;
-            }
-        }
-
-        if !remaining_data.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::WriteZero,
-                "Could not write all piece data - insufficient file space",
-            ));
-        }
-
-        Ok(())
-    }
-
-    fn read(
-        &mut self,
-        info_hash: InfoHash,
-        piece_index: u32,
-        begin: u32,
-        length: u32,
-    ) -> io::Result<Block> {
-        // First, collect the file information we need
-        let (files, piece_length) = {
-            let cache = self.torrents.get(&info_hash).unwrap();
-            (
-                cache.files.clone(),
-                cache.metainfo.info.piece_length as usize,
-            )
-        };
-
-        // Calculate global byte offset for this read
-        let mut global_offset = (piece_index as usize * piece_length) + begin as usize;
-
-        let mut data = BytesMut::zeroed(length as usize);
-        let mut bytes_read = 0;
-
-        // Iterate through files to find where to start reading
-        for file_info in &files {
-            let file_len = file_info.length as usize;
-
-            // If this entire file is before our starting offset, skip it
-            if global_offset >= file_len {
-                global_offset -= file_len;
-                continue;
-            }
-
-            // Get or open the file handle
-            let file = self.get_or_open_file(info_hash, &file_info.path)?;
-
-            // Calculate how much we can read from this file
-            let start_in_file = global_offset;
-            let available_in_file = file_len - start_in_file;
-            let remaining_to_read = data.len() - bytes_read;
-            let read_len = available_in_file.min(remaining_to_read);
-
-            // Read from this file
-            file.read_exact_at(
-                &mut data[bytes_read..bytes_read + read_len],
-                start_in_file as u64,
-            )?;
-
-            // Update counters and reset offset for next file
-            bytes_read += read_len;
-            global_offset = 0;
-
-            // If we've read all requested data, we're done
-            if bytes_read >= data.len() {
-                break;
-            }
-        }
-
-        if bytes_read != data.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "Could not read all requested bytes",
-            ));
-        }
-
-        Ok(Block {
-            index: piece_index,
-            begin: begin,
-            data: data.freeze(),
-        })
-    }
-
-    fn get_or_open_file(&mut self, info_hash: InfoHash, file_path: &Path) -> io::Result<&mut File> {
-        let cache = self.torrents.get_mut(&info_hash).unwrap();
-
-        // On first access for this torrent, ensure parents exist for all files.
-        // This is more efficient than creating directories on every write/read,
-        // and it also covers tests that insert Cache directly (bypassing AddTorrent).
-        if cache.file_handles.is_empty() {
-            for fi in &cache.files {
-                let full_path = self.download_dir.join(&fi.path);
-                if let Some(parent) = full_path.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-            }
-        }
-
-        if !cache.file_handles.contains_key(file_path) {
-            let full_path = self.download_dir.join(file_path);
-            let file = open_file(&full_path)?;
-            cache.file_handles.insert(file_path.to_path_buf(), file);
-        }
-
-        Ok(cache.file_handles.get_mut(file_path).unwrap())
     }
 }
 
@@ -470,6 +206,8 @@ mod test {
             },
         };
 
+        let info = Arc::new(info);
+
         let torrent = TorrentInfo {
             info,
             announce: "http://localhost".to_string(),
@@ -481,15 +219,15 @@ mod test {
             info_hash: InfoHash::new([0u8; 20]),
         };
 
-        let id = torrent.info_hash;
-        let meta = Arc::new(torrent.clone());
+        let info_hash = torrent.info_hash;
+        let meta = torrent.info.clone();
 
         // Prepare StorageManager (rx never used in test)
         let (_tx, rx) = mpsc::channel();
         let mut manager = StorageManager::new(download_dir.clone(), rx);
 
         // Insert torrent into manager cache
-        manager.handle_add_torrent(id, meta);
+        manager.handle_add_torrent(info_hash, meta);
 
         // Prepare test data for each piece
         let piece0_data: Vec<u8> = (0..piece_length).map(|i| i as u8).collect();
@@ -497,26 +235,28 @@ mod test {
 
         // Write pieces individually (this is the correct usage)
         manager
-            .write(id, 0, &piece0_data)
+            .write(info_hash, 0, &piece0_data)
             .expect("write piece 0 failed");
 
         manager
-            .write(id, 1, &piece1_data)
+            .write(info_hash, 1, &piece1_data)
             .expect("write piece 1 failed");
 
         // Read back pieces
         let read_piece0 = manager
-            .read(id, 0, 0, piece_length as u32)
+            .read(info_hash, 0, 0, piece_length as u32)
             .expect("read piece0 failed");
         assert_eq!(read_piece0.data, piece0_data);
 
         let read_piece1 = manager
-            .read(id, 1, 0, piece_length as u32)
+            .read(info_hash, 1, 0, piece_length as u32)
             .expect("read piece1 failed");
         assert_eq!(read_piece1.data, piece1_data);
 
         // Test partial reads (blocks)
-        let block = manager.read(id, 0, 256, 256).expect("read block failed");
+        let block = manager
+            .read(info_hash, 0, 256, 256)
+            .expect("read block failed");
         assert_eq!(block.data, &piece0_data[256..512]);
 
         // Cleanup
@@ -556,6 +296,8 @@ mod test {
             },
         };
 
+        let info = Arc::new(info);
+
         let torrent = TorrentInfo {
             info,
             announce: "http://localhost".to_string(),
@@ -574,7 +316,7 @@ mod test {
         let (_tx, rx) = mpsc::channel();
         let mut manager = StorageManager::new(download_dir.clone(), rx);
 
-        manager.handle_add_torrent(id, meta);
+        manager.handle_add_torrent(id, meta.info.clone());
 
         // Write pieces individually
         let piece0_data: Vec<u8> = (0..512).map(|i| i as u8).collect();
@@ -633,6 +375,8 @@ mod test {
             },
         };
 
+        let info = Arc::new(info);
+
         let torrent = TorrentInfo {
             info,
             announce: "http://localhost".to_string(),
@@ -645,7 +389,7 @@ mod test {
         };
 
         let id = torrent.info_hash;
-        let meta = Arc::new(torrent.clone());
+        let meta = torrent.info.clone();
 
         let (_tx, rx) = mpsc::channel();
         let mut manager = StorageManager::new(download_dir.clone(), rx);
