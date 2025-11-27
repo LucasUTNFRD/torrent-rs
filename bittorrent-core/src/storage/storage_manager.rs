@@ -6,6 +6,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, mpsc},
     thread::{self},
+    time::Instant,
 };
 
 use crate::storage::open_file;
