@@ -7,7 +7,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, AtomicUsize, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use bittorrent_common::{
@@ -559,6 +559,22 @@ impl Torrent {
                 .retain(|r| *r != BlockInfo::from(request));
         }
 
+        let pids_to_broadcast_cancel: Vec<_> = self
+            .peers
+            .iter()
+            .filter(|(_pid, state)| state.pending_requests.contains(&BlockInfo::from(request)))
+            .map(|(p, _s)| p)
+            .collect();
+
+        for pid in pids_to_broadcast_cancel {
+            debug!("Block {request:?} requested by many peers sending cancel to others");
+            self.send_to_peer(
+                *pid,
+                PeerMessage::SendMessage(Message::Cancel(BlockInfo::from(request))),
+            )
+            .await;
+        }
+
         // TODO: IF OTHER PEER IS ALSO REQUESTING THIS PIECE WE SHOULD SEND CANCEL
         //  AND REMOVEIT from its pending requests
 
@@ -580,11 +596,14 @@ impl Torrent {
         let piece: Arc<[u8]> = piece.into();
 
         let (verification_tx, verification_rx) = oneshot::channel();
+        // let t = Instant::now(); // ANALYZE TIME SPENT VALIDATING
         self.storage
             .verify_piece(torrent_id, piece_index, piece.clone(), verification_tx);
 
         let valid = verification_rx.await.expect("storage actor alive");
-        tracing::debug!("PIECE VALIDATION RECV");
+
+        // let t = t.elapsed();
+        // tracing::info!("PIECE VALIDATION RECV- TOOK {t:?}");
 
         if !valid {
             p.set_piece_as(piece_index as usize, PieceState::NotRequested);
