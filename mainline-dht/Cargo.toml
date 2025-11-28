@@ -1,0 +1,13 @@
+[package]
+name = "mainline-dht"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+crc32c = "0.6.8"
+bencode = { path = "../bencode" }
+tokio.workspace = true
+tracing.workspace = true
+rand.workspace = true
+tracing-subscriber.workspace = true
+bittorrent-common = { path = "../bittorrent-common/" }
