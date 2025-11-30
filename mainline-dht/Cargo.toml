@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-crc32c = "0.6.8"
 bencode = { path = "../bencode" }
+crc = "3.4.0"
 tokio.workspace = true
 tracing.workspace = true
 rand.workspace = true
