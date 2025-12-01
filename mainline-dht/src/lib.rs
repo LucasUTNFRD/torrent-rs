@@ -1,5 +1,7 @@
 pub mod dht;
-mod node_id;
+pub mod error;
+mod message;
+pub mod node_id;
 
 pub fn add(left: u64, right: u64) -> u64 {
     left + right

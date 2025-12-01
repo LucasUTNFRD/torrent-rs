@@ -16,7 +16,7 @@ const CASTAGNOLI: Crc<u32> = Crc::<u32>::new(&CRC_32_ISCSI);
 
 // ----- NODE TYPE ------
 #[derive(Clone, Copy)]
-pub(crate) struct NodeId([u8; 20]);
+pub struct NodeId([u8; 20]);
 
 impl fmt::Debug for NodeId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -44,7 +44,7 @@ impl BitXor for NodeId {
 // Modern bittorrent clients are using certain type of node_id generators
 
 impl NodeId {
-    pub(crate) fn generate_random() -> NodeId {
+    pub fn generate_random() -> NodeId {
         let mut bytes = [0u8; 20];
 
         let mut rng = rand::rng();
@@ -52,6 +52,10 @@ impl NodeId {
         rng.fill(&mut bytes);
 
         Self(bytes)
+    }
+
+    pub fn as_bytes(&self) -> [u8; 20] {
+        self.0
     }
 
     const V4_MASK: [u8; 4] = [0x03, 0x0f, 0x3f, 0xff];
@@ -91,7 +95,7 @@ impl NodeId {
         [b0, b1, b2]
     }
 
-    pub(crate) fn secure_node_id(&mut self, ip: &IpAddr) {
+    pub fn secure_node_id(&mut self, ip: &IpAddr) {
         let mut rng = rand::rng();
 
         let rand_byte: u8 = rng.random();

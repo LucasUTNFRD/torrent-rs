@@ -2,6 +2,7 @@
 name = "mainline-dht"
 version = "0.1.0"
 edition = "2024"
+description = "Simple BitTorrent's Mainline DHT implementation "
 
 [dependencies]
 bencode = { path = "../bencode" }
@@ -11,3 +12,4 @@ tracing.workspace = true
 rand.workspace = true
 tracing-subscriber.workspace = true
 bittorrent-common = { path = "../bittorrent-common/" }
+thiserror.workspace = true
