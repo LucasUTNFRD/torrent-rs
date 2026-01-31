@@ -35,6 +35,12 @@ impl Encode for String {
     }
 }
 
+impl Encode for &str {
+    fn to_bencode(&self) -> Bencode {
+        Bencode::Bytes(self.as_bytes().to_vec())
+    }
+}
+
 impl Encode for i64 {
     fn to_bencode(&self) -> Bencode {
         Bencode::Int(*self)
@@ -99,7 +105,7 @@ impl<T: Encode> Encode for BTreeMap<&str, T> {
 pub trait BencodeBuilder {
     fn new() -> Self;
     fn insert_optional<T: Encode>(&mut self, key: &str, value: &Option<T>) -> &mut Self;
-    fn insert<T: Encode>(&mut self, key: &str, value: &T) -> &mut Self;
+    fn put<T: Encode>(&mut self, key: &str, value: &T) -> &mut Self;
     fn build(self) -> Bencode;
 }
 
@@ -115,7 +121,7 @@ impl BencodeBuilder for BTreeMap<Vec<u8>, Bencode> {
         self
     }
 
-    fn insert<T: Encode>(&mut self, key: &str, value: &T) -> &mut Self {
+    fn put<T: Encode>(&mut self, key: &str, value: &T) -> &mut Self {
         self.insert(key.as_bytes().to_vec(), value.to_bencode());
         self
     }
