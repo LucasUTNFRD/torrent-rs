@@ -1,7 +1,4 @@
-use std::{
-    collections::BTreeMap,
-    net::{IpAddr, SocketAddr},
-};
+use std::{collections::BTreeMap, net::SocketAddr};
 
 use bencode::{Bencode, BencodeBuilder, BencodeDict};
 use mainline_dht::node_id::NodeId;
@@ -22,6 +19,8 @@ async fn main() {
     let socket = UdpSocket::bind("0.0.0.0:0")
         .await
         .expect("failed to bind socket");
+
+    println!("my local socket is {}", socket.local_addr().unwrap());
 
     // Generate a random 20-byte node ID
     let node_id = NodeId::generate_random();
@@ -110,4 +109,4 @@ async fn main() {
 // 1. Bind
 // 2. Ping Bootstrap with Random ID
 // 3. Get IP
-// 4. Generate Secure ID
+// 4. Generate Secure ID following BEP42

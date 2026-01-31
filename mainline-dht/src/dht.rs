@@ -1,10 +1,20 @@
-use std::net::SocketAddr;
+use std::{net::SocketAddr, time::Duration};
 
-use tokio::sync::mpsc;
+use bencode::{Bencode, BencodeDict};
+use tokio::{net::UdpSocket, sync::mpsc};
 
-use crate::{error::DhtError, message::Message, node_id::NodeId};
+use crate::{
+    error::DhtError,
+    message::{Message, Query},
+    node_id::NodeId,
+};
 
-const BOOTSTRAP_NODES: [&str; 1] = ["router.bittorrent.com:6881"];
+pub const DEFAULT_BOOTSTRAP_NODES: [&str; 4] = [
+    "router.bittorrent.com:6881",
+    "dht.transmissionbt.com:6881",
+    "dht.libtorrent.org:25401",
+    "relay.pkarr.org:6881",
+];
 
 // ---- SERVER ----
 pub(crate) enum DhtCommand {}
@@ -15,7 +25,9 @@ pub struct Dht {
 
 impl Dht {
     pub fn new() -> Self {
-        todo!()
+        let (tx, rx) = mpsc::channel(32);
+
+        Self { sender: tx }
     }
 
     // Get peers associated with a torrent infohash.
@@ -35,23 +47,112 @@ impl Dht {
     pub async fn announce_peer() {}
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 pub(crate) struct DhtActor {
+    command_rx: mpsc::Receiver<DhtCommand>,
     node_id: NodeId,
-    listen_addr: SocketAddr,
+    routing_table: RoutingTable,
+    socket: UdpSocket,
+    transaction_id: u16,
 }
 
-pub struct Node {}
+#[derive(Debug)]
+pub(crate) struct RoutingTable {}
+
+enum NodeState {
+    Good,
+    Questionable,
+    Bad,
+}
+
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const DEFAULT_READ_TIMEOUT: Duration = Duration::from_millis(50);
+const DEFAULT_PORT: u16 = 6881;
 
 impl DhtActor {
-    pub fn new(listen_addr: SocketAddr) -> Self {
-        let mut node_id = NodeId::generate_random();
-        node_id.secure_node_id(&listen_addr.ip());
+    pub async fn new(
+        port: Option<u16>,
+        command_rx: mpsc::Receiver<DhtCommand>,
+    ) -> Result<Self, DhtError> {
+        let bind_addr = if let Some(port) = port {
+            format!("0.0.0.0:{port}")
+        } else {
+            format!("0.0.0.0:{DEFAULT_PORT}")
+        };
 
-        Self {
+        let (socket, node_id) =
+            Self::bootstrap(&bind_addr, DEFAULT_BOOTSTRAP_NODES.to_vec()).await?;
+
+        Ok(Self {
+            socket,
             node_id,
-            listen_addr,
-        }
+            command_rx,
+            routing_table: todo!(),
+            transaction_id: 0,
+        })
+    }
+
+    async fn bootstrap(
+        bind_addr: &str,
+        boostrap_node: Vec<&str>,
+    ) -> Result<(UdpSocket, NodeId), DhtError> {
+        let mut socket = UdpSocket::bind(bind_addr).await?;
+
+        let mut node_id = NodeId::generate_random();
+
+        let msg: Message = todo!();
+
+        socket.send_to(&msg.to_bytes(), boostrap_node[0]).await?;
+
+        let mut buffer = [0u8; 1024];
+        let (size, addr) = socket
+            .recv_from(&mut buffer)
+            .await
+            .expect("failed to read from udp socket");
+
+        let response_bytes = &buffer[..size];
+
+        // Decode the bencoded response
+        let bencoded_response =
+            Bencode::decode(response_bytes).expect("failed to decode bencode response");
+
+        println!("\nReceived response from {} ({} bytes)", addr, size);
+
+        let Bencode::Dict(bencode_dict) = bencoded_response else {
+            panic!("invalid bencode response type");
+        };
+
+        let my_socket_addr = if let Some(socket_bytes) = bencode_dict.get_bytes(b"ip")
+            && socket_bytes.len() == 6
+        {
+            let socket_bytes: [u8; 6] = socket_bytes.try_into().unwrap();
+            let ip = std::net::Ipv4Addr::new(
+                socket_bytes[0],
+                socket_bytes[1],
+                socket_bytes[2],
+                socket_bytes[3],
+            );
+            let port = u16::from_be_bytes([socket_bytes[4], socket_bytes[5]]);
+            SocketAddr::new(std::net::IpAddr::V4(ip), port)
+        } else {
+            panic!("ip was not received")
+        };
+
+        let replying_node_id = if let Some(response_dict) = bencode_dict.get_dict(b"r")
+            && let Some(response_node_id) = response_dict.get_bytes(b"id")
+        {
+            let response_node_id: [u8; 20] = response_node_id.try_into().unwrap();
+            response_node_id
+        } else {
+            panic!("node id was not recv")
+        };
+
+        println!("our_socket_addr:{my_socket_addr} ; replying_node_id:{replying_node_id:?}");
+
+        // let mut secure_node_id_for_us = NodeId::generate_random();
+        node_id.secure_node_id(&my_socket_addr.ip());
+
+        Ok((socket, node_id))
     }
 
     pub(crate) fn ping(&mut self) {}
