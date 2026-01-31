@@ -9,8 +9,8 @@ use std::{
     collections::{HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, ToSocketAddrs},
     sync::{
-        atomic::{AtomicU16, Ordering},
         Arc,
+        atomic::{AtomicU16, Ordering},
     },
     time::Duration,
 };
@@ -26,7 +26,7 @@ use crate::{
     message::{CompactNodeInfo, KrpcMessage, MessageBody, Query, Response},
     node::Node,
     node_id::NodeId,
-    routing_table::{RoutingTable, K},
+    routing_table::{K, RoutingTable},
 };
 
 /// Default bootstrap nodes for the BitTorrent DHT.
@@ -51,7 +51,7 @@ const ALPHA: usize = 3;
 // ============================================================================
 
 /// Handle to interact with the DHT node.
-/// 
+///
 /// This is a lightweight handle that can be cloned and used from multiple tasks.
 #[derive(Clone)]
 pub struct Dht {
@@ -61,24 +61,24 @@ pub struct Dht {
 
 impl Dht {
     /// Create a new DHT node bound to the specified port.
-    /// 
+    ///
     /// If no port is specified, binds to port 6881 (default DHT port).
     /// The node is not bootstrapped yet - call `bootstrap()` to join the network.
     pub async fn new(port: Option<u16>) -> Result<Self, DhtError> {
         let port = port.unwrap_or(DEFAULT_PORT);
         let bind_addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port);
-        
+
         let socket = UdpSocket::bind(bind_addr).await?;
         let socket = Arc::new(socket);
-        
+
         // Start with a random node ID (will be replaced with BEP 42 secure ID after bootstrap)
         let initial_id = NodeId::generate_random();
         let node_id = Arc::new(std::sync::RwLock::new(initial_id));
-        
+
         let (command_tx, command_rx) = mpsc::channel(32);
-        
+
         let actor = DhtActor::new(socket, initial_id, command_rx);
-        
+
         // Spawn the actor
         let node_id_clone = node_id.clone();
         tokio::spawn(async move {
@@ -86,17 +86,20 @@ impl Dht {
                 tracing::error!("DHT actor error: {e}");
             }
         });
-        
-        Ok(Dht { command_tx, node_id })
+
+        Ok(Dht {
+            command_tx,
+            node_id,
+        })
     }
 
     /// Bootstrap into the DHT network using default bootstrap nodes.
-    /// 
+    ///
     /// This will:
     /// 1. Ping bootstrap nodes to discover our external IP
     /// 2. Generate a BEP 42 secure node ID
     /// 3. Perform iterative find_node to populate the routing table
-    /// 
+    ///
     /// Returns our node ID after successful bootstrap.
     pub async fn bootstrap(&self) -> Result<NodeId, DhtError> {
         self.bootstrap_with_nodes(&DEFAULT_BOOTSTRAP_NODES).await
@@ -105,7 +108,7 @@ impl Dht {
     /// Bootstrap using custom bootstrap nodes.
     pub async fn bootstrap_with_nodes(&self, nodes: &[&str]) -> Result<NodeId, DhtError> {
         let (resp_tx, resp_rx) = oneshot::channel();
-        
+
         self.command_tx
             .send(DhtCommand::Bootstrap {
                 nodes: nodes.iter().map(|s| s.to_string()).collect(),
@@ -113,22 +116,25 @@ impl Dht {
             })
             .await
             .map_err(|_| DhtError::ChannelClosed)?;
-        
+
         resp_rx.await.map_err(|_| DhtError::ChannelClosed)?
     }
 
     /// Find the K closest nodes to a target ID.
-    /// 
+    ///
     /// Performs an iterative lookup, querying progressively closer nodes
     /// until no closer nodes are found.
     pub async fn find_node(&self, target: NodeId) -> Result<Vec<CompactNodeInfo>, DhtError> {
         let (resp_tx, resp_rx) = oneshot::channel();
-        
+
         self.command_tx
-            .send(DhtCommand::FindNode { target, resp: resp_tx })
+            .send(DhtCommand::FindNode {
+                target,
+                resp: resp_tx,
+            })
             .await
             .map_err(|_| DhtError::ChannelClosed)?;
-        
+
         resp_rx.await.map_err(|_| DhtError::ChannelClosed)?
     }
 
@@ -140,12 +146,12 @@ impl Dht {
     /// Get the number of nodes in our routing table.
     pub async fn routing_table_size(&self) -> Result<usize, DhtError> {
         let (resp_tx, resp_rx) = oneshot::channel();
-        
+
         self.command_tx
             .send(DhtCommand::GetRoutingTableSize { resp: resp_tx })
             .await
             .map_err(|_| DhtError::ChannelClosed)?;
-        
+
         resp_rx.await.map_err(|_| DhtError::ChannelClosed)
     }
 
@@ -199,7 +205,11 @@ struct DhtActor {
 }
 
 impl DhtActor {
-    fn new(socket: Arc<UdpSocket>, node_id: NodeId, command_rx: mpsc::Receiver<DhtCommand>) -> Self {
+    fn new(
+        socket: Arc<UdpSocket>,
+        node_id: NodeId,
+        command_rx: mpsc::Receiver<DhtCommand>,
+    ) -> Self {
         Self {
             socket,
             node_id,
@@ -264,7 +274,10 @@ impl DhtActor {
     // ========================================================================
 
     async fn bootstrap(&mut self, bootstrap_nodes: &[String]) -> Result<NodeId, DhtError> {
-        tracing::info!("Starting DHT bootstrap with {} nodes", bootstrap_nodes.len());
+        tracing::info!(
+            "Starting DHT bootstrap with {} nodes",
+            bootstrap_nodes.len()
+        );
 
         // Resolve bootstrap addresses
         let mut addrs: Vec<SocketAddr> = Vec::new();
@@ -350,16 +363,22 @@ impl DhtActor {
     // Iterative Find Node (Kademlia lookup)
     // ========================================================================
 
-    async fn iterative_find_node(&mut self, target: NodeId) -> Result<Vec<CompactNodeInfo>, DhtError> {
+    async fn iterative_find_node(
+        &mut self,
+        target: NodeId,
+    ) -> Result<Vec<CompactNodeInfo>, DhtError> {
         // Get initial candidates from routing table
         let initial = self.routing_table.get_closest_nodes(&target, K);
-        
+
         if initial.is_empty() {
             tracing::debug!("iterative_find_node: no initial candidates in routing table");
             return Ok(Vec::new());
         }
 
-        tracing::debug!("iterative_find_node: starting with {} candidates", initial.len());
+        tracing::debug!(
+            "iterative_find_node: starting with {} candidates",
+            initial.len()
+        );
 
         // Track all nodes we know about, sorted by distance
         let mut candidates: Vec<CompactNodeInfo> = initial
@@ -372,7 +391,7 @@ impl DhtActor {
 
         // Track which nodes we've queried
         let mut queried: HashSet<NodeId> = HashSet::new();
-        
+
         // Track all nodes we've received
         let mut all_nodes: Vec<CompactNodeInfo> = candidates.clone();
 
@@ -409,12 +428,12 @@ impl DhtActor {
             // Query nodes sequentially (simpler than parallel for minimal impl)
             for node in to_query {
                 queried.insert(node.node_id);
-                
+
                 match self.send_find_node(node.addr, target).await {
                     Ok((msg, _)) => {
                         // Mark node as good
                         self.routing_table.mark_node_good(&node.node_id);
-                        
+
                         // BEP 42 soft enforcement: log warning for non-compliant nodes
                         if let Some(resp_node_id) = msg.get_node_id() {
                             if !resp_node_id.is_node_id_secure(IpAddr::V4(*node.addr.ip())) {
@@ -431,7 +450,7 @@ impl DhtActor {
                                 // Add to routing table
                                 let new_node = Node::new(node_info.node_id, node_info.addr);
                                 self.routing_table.try_add_node(new_node);
-                                
+
                                 // Add to our candidates if not seen before
                                 if !all_nodes.iter().any(|n| n.node_id == node_info.node_id) {
                                     all_nodes.push(node_info.clone());
@@ -483,12 +502,14 @@ impl DhtActor {
         msg: KrpcMessage,
         addr: SocketAddr,
     ) -> Result<(KrpcMessage, SocketAddr), DhtError> {
+        // Why not use directly u16?
         let tx_id = msg.transaction_id.0.clone();
         let bytes = msg.to_bytes();
 
         // Create response channel
         let (resp_tx, mut resp_rx) = oneshot::channel();
-        self.pending.insert(tx_id.clone(), PendingRequest { resp_tx });
+        self.pending
+            .insert(tx_id.clone(), PendingRequest { resp_tx });
 
         // Send the message
         self.socket.send_to(&bytes, addr).await?;
