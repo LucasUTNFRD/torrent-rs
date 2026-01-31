@@ -13,7 +13,7 @@ tokio-util = { version = "0.7.15", features = ["codec"] }
 futures = "0.3.31"
 tracing.workspace = true
 tokio.workspace = true
-rand = "0.9.1"
+rand.workspace = true
 reqwest = "0.12.22"
 url = "2.5.4"
 urlencoding = "2.1.3"

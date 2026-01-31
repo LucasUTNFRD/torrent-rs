@@ -13,3 +13,5 @@ rand.workspace = true
 tracing-subscriber.workspace = true
 bittorrent-common = { path = "../bittorrent-common/" }
 thiserror.workspace = true
+lru = "0.16.2"
+bytes = "1.10.1"

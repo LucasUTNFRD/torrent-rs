@@ -11,7 +11,7 @@ tracing-subscriber.workspace = true
 bittorrent-common = { path = "../bittorrent-common/" }
 async-trait = "0.1"
 thiserror.workspace = true
-rand = "0.9.1"
+rand.workspace = true
 reqwest = "0.12.22"
 url = "2.5.4"
 urlencoding = "2.1.3"

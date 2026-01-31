@@ -5,6 +5,7 @@ members = [
   "bittorrent-common",
   "bittorrent-core",
   "magnet-uri",
+  "mainline-dht",
   "peer-protocol",
   "tracker-client",
 ]
@@ -17,3 +18,4 @@ tokio = { version = "1", features = ["full", "tracing"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 console-subscriber = "0.5.0"
+rand = "0.9.1"
