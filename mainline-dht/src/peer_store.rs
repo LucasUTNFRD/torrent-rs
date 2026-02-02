@@ -77,10 +77,11 @@ impl PeerStore {
         peer_set.cleanup(peer_ttl);
 
         // If at capacity and peer is new, remove oldest
-        if peer_set.peers.len() >= max_peers && !peer_set.peers.contains_key(&peer) {
-            if let Some(oldest) = peer_set.oldest_peer() {
-                peer_set.peers.remove(&oldest);
-            }
+        if peer_set.peers.len() >= max_peers
+            && !peer_set.peers.contains_key(&peer)
+            && let Some(oldest) = peer_set.oldest_peer()
+        {
+            peer_set.peers.remove(&oldest);
         }
 
         // Insert or update the peer
