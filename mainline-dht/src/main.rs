@@ -1,112 +1,88 @@
-use std::{collections::BTreeMap, net::SocketAddr};
+//! Demo application for the BitTorrent Mainline DHT.
+//!
+//! This demonstrates:
+//! 1. Creating a DHT node and bootstrapping into the network
+//! 2. Retrieving peers for a specific infohash from the DHT
+//!
+//! Run with:
+//! cargo run -- EA3849FFD066F77525A6DC41F2119DBD7130B540
 
-use bencode::{Bencode, BencodeBuilder, BencodeDict};
-use mainline_dht::node_id::NodeId;
-use tokio::net::UdpSocket;
+use bittorrent_common::types::InfoHash;
+use clap::Parser;
+use mainline_dht::Dht;
+use std::time::Instant;
+use tracing::Level;
 
-pub const DEFAULT_BOOTSTRAP_NODES: [&str; 4] = [
-    "router.bittorrent.com:6881",
-    "dht.transmissionbt.com:6881",
-    "dht.libtorrent.org:25401",
-    "relay.pkarr.org:6881",
-];
-
-#[tokio::main]
-async fn main() {
-    tracing_subscriber::fmt::init();
-
-    // Bind a UDP socket to any available port
-    let socket = UdpSocket::bind("0.0.0.0:0")
-        .await
-        .expect("failed to bind socket");
-
-    println!("my local socket is {}", socket.local_addr().unwrap());
-
-    // Generate a random 20-byte node ID
-    let node_id = NodeId::generate_random();
-    let node_id_bytes = node_id.as_bytes();
-
-    // ping Query = {"t":"aa", "y":"q", "q":"ping", "a":{"id":"abcdefghij0123456789"}}
-    let mut args = BTreeMap::new();
-    args.insert("id", node_id_bytes.as_slice());
-
-    let mut query = BTreeMap::<Vec<u8>, Bencode>::new();
-    query
-        .put("t", &"aa")
-        .put("y", &"q")
-        .put("q", &"ping")
-        .put("a", &args);
-
-    let ping_query = query.build();
-    let encoded = Bencode::encoder(&ping_query);
-
-    println!("Sending ping query to {}", DEFAULT_BOOTSTRAP_NODES[0]);
-    println!("Encoded message ({} bytes): {:?}", encoded.len(), encoded);
-
-    // Send the ping to the first bootstrap node
-    socket
-        .send_to(&encoded, DEFAULT_BOOTSTRAP_NODES[0])
-        .await
-        .expect("failed to send ping");
-
-    // Wait for response
-    let mut buffer = [0u8; 1024];
-    let (size, addr) = socket
-        .recv_from(&mut buffer)
-        .await
-        .expect("failed to read from udp socket");
-
-    let response_bytes = &buffer[..size];
-
-    println!("\nReceived response from {} ({} bytes)", addr, size);
-
-    // Decode the bencoded response
-    let bencoded_response =
-        Bencode::decode(response_bytes).expect("failed to decode bencode response");
-
-    println!("\nReceived response from {} ({} bytes)", addr, size);
-
-    let Bencode::Dict(bencode_dict) = bencoded_response else {
-        panic!("invalid bencode response type");
-    };
-
-    let my_socket_addr = if let Some(socket_bytes) = bencode_dict.get_bytes(b"ip")
-        && socket_bytes.len() == 6
-    {
-        let socket_bytes: [u8; 6] = socket_bytes.try_into().unwrap();
-        let ip = std::net::Ipv4Addr::new(
-            socket_bytes[0],
-            socket_bytes[1],
-            socket_bytes[2],
-            socket_bytes[3],
-        );
-        let port = u16::from_be_bytes([socket_bytes[4], socket_bytes[5]]);
-        SocketAddr::new(std::net::IpAddr::V4(ip), port)
-    } else {
-        panic!("ip was not received")
-    };
-
-    let replying_node_id = if let Some(response_dict) = bencode_dict.get_dict(b"r")
-        && let Some(response_node_id) = response_dict.get_bytes(b"id")
-    {
-        let response_node_id: [u8; 20] = response_node_id.try_into().unwrap();
-        response_node_id
-    } else {
-        panic!("node id was not recv")
-    };
-
-    println!("our_socket_addr:{my_socket_addr} ; replying_node_id:{replying_node_id:?}");
-
-    let mut secure_node_id_for_us = NodeId::generate_random();
-    secure_node_id_for_us.secure_node_id(&my_socket_addr.ip());
-    println!(
-        "our_socket_addr:{my_socket_addr} ; replying_node_id:{replying_node_id:?}; our_bep42_node_id:{secure_node_id_for_us:?}"
-    );
+#[derive(Parser)]
+#[command(author, version, about, long_about = None)]
+struct Cli {
+    /// info_hash to lookup peers for (hex string)
+    infohash: String,
 }
 
-// NOTE:
-//  Dht::start()
-// 1. Bind
-// 2. Ping Bootstrap with Random ID
-// 3. Get IP
-// 4. Generate Secure ID following BEP42
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt().with_max_level(Level::INFO).init();
+
+    let cli = Cli::parse();
+
+    // To answer your question: Internally we use the 20-byte array (InfoHash).
+    // But for the user interface, a hex string is much more convenient.
+    let info_hash = InfoHash::from_hex(&cli.infohash)
+        .expect("Invalid info_hash: must be a 40-character hex string");
+
+    println!("Creating DHT node...");
+    let dht = Dht::new(None).await?;
+
+    println!("Bootstrapping into the DHT network...");
+    dht.bootstrap().await?;
+    println!("Bootstrap successful. Node ID: {}\n", dht.node_id());
+
+    println!("Looking up peers for info_hash: {} ...", info_hash);
+
+    println!("\n=== DHT QUERY ===");
+    get_peers(&dht, info_hash).await?;
+
+    // In a real application, you might want to run it again or keep the node running
+    // to participate in the network.
+
+    // Graceful shutdown
+    dht.shutdown().await?;
+
+    Ok(())
+}
+
+async fn get_peers(dht: &Dht, info_hash: InfoHash) -> Result<(), Box<dyn std::error::Error>> {
+    let start = Instant::now();
+
+    match dht.get_peers(info_hash).await {
+        Ok(result) => {
+            let elapsed = start.elapsed().as_millis();
+
+            if result.peers.is_empty() {
+                println!("Query finished in {} ms, but no peers were found.", elapsed);
+                println!("Nodes contacted: {}", result.nodes_contacted);
+            } else {
+                println!("Got {} peers in {} ms:", result.peers.len(), elapsed);
+
+                for (i, peer) in result.peers.iter().take(20).enumerate() {
+                    println!("  {:2}. {}", i + 1, peer);
+                }
+
+                if result.peers.len() > 20 {
+                    println!("  ... and {} more peers", result.peers.len() - 20);
+                }
+            }
+
+            println!(
+                "\nNodes with tokens available for announce: {}",
+                result.nodes_with_tokens.len()
+            );
+        }
+        Err(e) => {
+            eprintln!("DHT lookup failed: {}", e);
+        }
+    }
+
+    Ok(())
+}
