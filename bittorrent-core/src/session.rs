@@ -22,8 +22,8 @@ use tokio::{
     task::JoinHandle,
 };
 
-use tracker_client::TrackerHandler;
 use mainline_dht::DhtHandler;
+use tracker_client::TrackerHandler;
 
 pub static CLIENT_ID: Lazy<PeerID> = Lazy::new(PeerID::generate);
 
@@ -166,7 +166,7 @@ impl SessionManager {
                     if let Some(name) = &magnet.display_name {
                         println!("Display Name: {name}");
                     }
-                    
+
                     // Check if we have any way to discover peers
                     if magnet.trackers.is_empty() && dht.is_none() {
                         tracing::warn!(
@@ -174,7 +174,7 @@ impl SessionManager {
                         );
                         continue;
                     }
-                    
+
                     if magnet.trackers.is_empty() {
                         tracing::info!("No trackers specified, will use DHT for peer discovery");
                     }
