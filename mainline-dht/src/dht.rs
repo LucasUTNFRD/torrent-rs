@@ -3,6 +3,8 @@
 //! This module provides the main DHT client with:
 //! - Bootstrap into the DHT network
 //! - Iterative node lookup (find_node)
+//! - Iterative peer lookup (get_peers)
+//! - Announce peer participation (announce_peer)
 //! - Server mode (responding to incoming queries)
 
 use std::{
@@ -15,6 +17,7 @@ use std::{
     time::Duration,
 };
 
+use bittorrent_common::types::InfoHash;
 use tokio::{
     net::UdpSocket,
     sync::{mpsc, oneshot},
@@ -23,10 +26,12 @@ use tokio::{
 
 use crate::{
     error::DhtError,
-    message::{CompactNodeInfo, KrpcMessage, MessageBody, Query, Response},
+    message::{CompactNodeInfo, KrpcMessage, MessageBody, Query, Response, TransactionId},
     node::Node,
     node_id::NodeId,
+    peer_store::PeerStore,
     routing_table::{K, RoutingTable},
+    token::TokenManager,
 };
 
 /// Default bootstrap nodes for the BitTorrent DHT.
@@ -45,6 +50,37 @@ const QUERY_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Number of parallel queries in iterative lookup.
 const ALPHA: usize = 3;
+
+// ============================================================================
+// Result Types
+// ============================================================================
+
+/// Result of a get_peers lookup.
+#[derive(Debug, Clone)]
+pub struct GetPeersResult {
+    /// Peers found for the infohash.
+    pub peers: Vec<SocketAddrV4>,
+    /// Number of nodes that responded.
+    pub nodes_contacted: usize,
+    /// Closest nodes with their tokens (for subsequent announce).
+    pub nodes_with_tokens: Vec<(CompactNodeInfo, Vec<u8>)>,
+}
+
+/// Result of an announce operation.
+#[derive(Debug, Clone)]
+pub struct AnnounceResult {
+    /// Peers discovered during the get_peers phase.
+    pub peers: Vec<SocketAddrV4>,
+    /// Number of nodes that accepted our announce.
+    pub announce_count: usize,
+}
+
+/// Response from DHT operations, matching TrackerResponse pattern.
+#[derive(Debug, Clone)]
+pub struct DhtResponse {
+    /// Peers found for the infohash.
+    pub peers: Vec<SocketAddr>,
+}
 
 // ============================================================================
 // Public API: Dht handle
@@ -138,6 +174,64 @@ impl Dht {
         resp_rx.await.map_err(|_| DhtError::ChannelClosed)?
     }
 
+    /// Find peers for a torrent infohash.
+    ///
+    /// Performs an iterative DHT lookup to discover peers from the network.
+    /// Also returns tokens from responding nodes for use in subsequent announce.
+    pub async fn get_peers(&self, info_hash: InfoHash) -> Result<GetPeersResult, DhtError> {
+        let (resp_tx, resp_rx) = oneshot::channel();
+
+        self.command_tx
+            .send(DhtCommand::GetPeers {
+                info_hash,
+                resp: resp_tx,
+            })
+            .await
+            .map_err(|_| DhtError::ChannelClosed)?;
+
+        resp_rx.await.map_err(|_| DhtError::ChannelClosed)?
+    }
+
+    /// Announce that we are participating in a torrent.
+    ///
+    /// Performs get_peers first to find closest nodes and obtain tokens,
+    /// then announces to those nodes.
+    ///
+    /// Returns peers discovered during the get_peers phase and the number
+    /// of nodes that accepted our announce.
+    pub async fn announce_peer(
+        &self,
+        info_hash: InfoHash,
+        port: u16,
+    ) -> Result<AnnounceResult, DhtError> {
+        self.announce_peer_ext(info_hash, port, false).await
+    }
+
+    /// Announce with implied_port option for NAT traversal.
+    ///
+    /// If `implied_port` is true, receiving nodes will use our DHT UDP port
+    /// as the peer port (useful when behind NAT).
+    pub async fn announce_peer_ext(
+        &self,
+        info_hash: InfoHash,
+        port: u16,
+        implied_port: bool,
+    ) -> Result<AnnounceResult, DhtError> {
+        let (resp_tx, resp_rx) = oneshot::channel();
+
+        self.command_tx
+            .send(DhtCommand::Announce {
+                info_hash,
+                port,
+                implied_port,
+                resp: resp_tx,
+            })
+            .await
+            .map_err(|_| DhtError::ChannelClosed)?;
+
+        resp_rx.await.map_err(|_| DhtError::ChannelClosed)?
+    }
+
     /// Get our current node ID.
     pub fn node_id(&self) -> NodeId {
         *self.node_id.read().unwrap()
@@ -165,6 +259,101 @@ impl Dht {
 }
 
 // ============================================================================
+// Public API: DhtHandler (TrackerHandler-like interface)
+// ============================================================================
+
+/// Lightweight handle for DHT operations.
+///
+/// This follows the same pattern as `TrackerHandler` from tracker-client,
+/// providing a simple interface for peer discovery and announcement.
+#[derive(Clone)]
+pub struct DhtHandler {
+    dht: Dht,
+}
+
+impl DhtHandler {
+    /// Create a new DHT handler.
+    ///
+    /// This creates the DHT node but does NOT bootstrap automatically.
+    /// Call `bootstrap()` before using `get_peers()` or `announce()`.
+    pub async fn new(port: Option<u16>) -> Result<Self, DhtError> {
+        let dht = Dht::new(port).await?;
+        Ok(Self { dht })
+    }
+
+    /// Bootstrap into the DHT network.
+    ///
+    /// Must be called before `get_peers()` or `announce()` to populate
+    /// the routing table.
+    pub async fn bootstrap(&self) -> Result<NodeId, DhtError> {
+        self.dht.bootstrap().await
+    }
+
+    /// Bootstrap using custom bootstrap nodes.
+    pub async fn bootstrap_with_nodes(&self, nodes: &[&str]) -> Result<NodeId, DhtError> {
+        self.dht.bootstrap_with_nodes(nodes).await
+    }
+
+    /// Get peers for a torrent infohash.
+    ///
+    /// Performs an iterative DHT lookup and returns discovered peers.
+    /// Returns a `DhtResponse` matching the `TrackerResponse` pattern.
+    pub async fn get_peers(&self, info_hash: InfoHash) -> Result<DhtResponse, DhtError> {
+        let result = self.dht.get_peers(info_hash).await?;
+
+        Ok(DhtResponse {
+            peers: result.peers.into_iter().map(SocketAddr::V4).collect(),
+        })
+    }
+
+    /// Announce that we're downloading a torrent.
+    ///
+    /// Performs get_peers first to find closest nodes and obtain tokens,
+    /// then announces to those nodes.
+    ///
+    /// Returns peers discovered during the get_peers phase.
+    pub async fn announce(
+        &self,
+        info_hash: InfoHash,
+        port: u16,
+    ) -> Result<DhtResponse, DhtError> {
+        self.announce_ext(info_hash, port, false).await
+    }
+
+    /// Announce with implied_port option for NAT traversal.
+    ///
+    /// If `implied_port` is true, receiving nodes will use our DHT UDP port
+    /// as the peer port (useful when behind NAT).
+    pub async fn announce_ext(
+        &self,
+        info_hash: InfoHash,
+        port: u16,
+        implied_port: bool,
+    ) -> Result<DhtResponse, DhtError> {
+        let result = self.dht.announce_peer_ext(info_hash, port, implied_port).await?;
+
+        Ok(DhtResponse {
+            peers: result.peers.into_iter().map(SocketAddr::V4).collect(),
+        })
+    }
+
+    /// Get our current node ID.
+    pub fn node_id(&self) -> NodeId {
+        self.dht.node_id()
+    }
+
+    /// Get the number of nodes in our routing table.
+    pub async fn routing_table_size(&self) -> Result<usize, DhtError> {
+        self.dht.routing_table_size().await
+    }
+
+    /// Gracefully shutdown the DHT node.
+    pub async fn shutdown(&self) -> Result<(), DhtError> {
+        self.dht.shutdown().await
+    }
+}
+
+// ============================================================================
 // Internal: Commands
 // ============================================================================
 
@@ -177,6 +366,17 @@ enum DhtCommand {
         target: NodeId,
         resp: oneshot::Sender<Result<Vec<CompactNodeInfo>, DhtError>>,
     },
+    GetPeers {
+        info_hash: InfoHash,
+        resp: oneshot::Sender<Result<GetPeersResult, DhtError>>,
+    },
+    Announce {
+        info_hash: InfoHash,
+        port: u16,
+        implied_port: bool,
+        resp: oneshot::Sender<Result<AnnounceResult, DhtError>>,
+    },
+    // Command with logging purposes
     GetRoutingTableSize {
         resp: oneshot::Sender<usize>,
     },
@@ -202,6 +402,10 @@ struct DhtActor {
     command_rx: mpsc::Receiver<DhtCommand>,
     next_tx_id: AtomicU16,
     pending: HashMap<Vec<u8>, PendingRequest>,
+    /// Storage for announced peers.
+    peer_store: PeerStore,
+    /// Token generation and validation.
+    token_manager: TokenManager,
 }
 
 impl DhtActor {
@@ -217,6 +421,8 @@ impl DhtActor {
             command_rx,
             next_tx_id: AtomicU16::new(1),
             pending: HashMap::new(),
+            peer_store: PeerStore::new(),
+            token_manager: TokenManager::new(),
         }
     }
 
@@ -254,6 +460,14 @@ impl DhtActor {
                         }
                         DhtCommand::FindNode { target, resp } => {
                             let result = self.iterative_find_node(target).await;
+                            let _ = resp.send(result);
+                        }
+                        DhtCommand::GetPeers { info_hash, resp } => {
+                            let result = self.iterative_get_peers(info_hash).await;
+                            let _ = resp.send(result);
+                        }
+                        DhtCommand::Announce { info_hash, port, implied_port, resp } => {
+                            let result = self.announce(info_hash, port, implied_port).await;
                             let _ = resp.send(result);
                         }
                         DhtCommand::GetRoutingTableSize { resp } => {
@@ -435,13 +649,13 @@ impl DhtActor {
                         self.routing_table.mark_node_good(&node.node_id);
 
                         // BEP 42 soft enforcement: log warning for non-compliant nodes
-                        if let Some(resp_node_id) = msg.get_node_id() {
-                            if !resp_node_id.is_node_id_secure(IpAddr::V4(*node.addr.ip())) {
-                                tracing::debug!(
-                                    "Non-compliant node ID from {} (soft enforcement)",
-                                    node.addr
-                                );
-                            }
+                        if let Some(resp_node_id) = msg.get_node_id()
+                            && !resp_node_id.is_node_id_secure(IpAddr::V4(*node.addr.ip()))
+                        {
+                            tracing::debug!(
+                                "Non-compliant node ID from {} (soft enforcement)",
+                                node.addr
+                            );
                         }
 
                         // Extract nodes from response
@@ -478,6 +692,202 @@ impl DhtActor {
     }
 
     // ========================================================================
+    // Iterative Get Peers (Kademlia lookup for peers)
+    // ========================================================================
+
+    async fn iterative_get_peers(
+        &mut self,
+        info_hash: InfoHash,
+    ) -> Result<GetPeersResult, DhtError> {
+        let target = NodeId::from(&info_hash);
+
+        // Get initial candidates from routing table
+        let initial = self.routing_table.get_closest_nodes(&target, K);
+
+        if initial.is_empty() {
+            tracing::debug!("iterative_get_peers: no initial candidates in routing table");
+            return Ok(GetPeersResult {
+                peers: Vec::new(),
+                nodes_contacted: 0,
+                nodes_with_tokens: Vec::new(),
+            });
+        }
+
+        tracing::debug!(
+            "iterative_get_peers: starting with {} candidates for {}",
+            initial.len(),
+            info_hash
+        );
+
+        // Track all nodes we know about, sorted by distance
+        let mut candidates: Vec<CompactNodeInfo> = initial
+            .into_iter()
+            .map(|n| CompactNodeInfo {
+                node_id: n.node_id,
+                addr: n.addr,
+            })
+            .collect();
+
+        // Track which nodes we've queried
+        let mut queried: HashSet<NodeId> = HashSet::new();
+
+        // Collect peers from all responses
+        let mut all_peers: Vec<SocketAddrV4> = Vec::new();
+
+        // Track nodes that responded with their tokens (for subsequent announce)
+        let mut nodes_with_tokens: Vec<(CompactNodeInfo, Vec<u8>)> = Vec::new();
+
+        // Maximum iterations to prevent infinite loops
+        let mut iterations = 0;
+        const MAX_ITERATIONS: usize = 5;
+
+        loop {
+            iterations += 1;
+            if iterations > MAX_ITERATIONS {
+                tracing::debug!("iterative_get_peers: max iterations reached");
+                break;
+            }
+
+            // Sort candidates by distance to target
+            candidates.sort_by(|a, b| {
+                let dist_a = a.node_id ^ target;
+                let dist_b = b.node_id ^ target;
+                dist_a.as_bytes().cmp(&dist_b.as_bytes())
+            });
+
+            // Get unqueried candidates (up to ALPHA)
+            let to_query: Vec<_> = candidates
+                .iter()
+                .filter(|n| !queried.contains(&n.node_id))
+                .take(ALPHA)
+                .cloned()
+                .collect();
+
+            if to_query.is_empty() {
+                break;
+            }
+
+            // Query nodes sequentially
+            for node in to_query {
+                queried.insert(node.node_id);
+
+                match self.send_get_peers(node.addr, info_hash).await {
+                    Ok((msg, _)) => {
+                        // Mark node as good
+                        self.routing_table.mark_node_good(&node.node_id);
+
+                        // Extract response data
+                        if let MessageBody::Response(Response::GetPeers {
+                            token,
+                            values,
+                            nodes,
+                            ..
+                        }) = msg.body
+                        {
+                            // Store token for later announce
+                            nodes_with_tokens.push((node.clone(), token));
+
+                            // Collect peers if present
+                            if let Some(peers) = values {
+                                tracing::debug!(
+                                    "Got {} peers from {}",
+                                    peers.len(),
+                                    node.addr
+                                );
+                                all_peers.extend(peers);
+                            }
+
+                            // Add closer nodes to candidates
+                            if let Some(new_nodes) = nodes {
+                                for node_info in new_nodes {
+                                    // Add to routing table
+                                    let new_node = Node::new(node_info.node_id, node_info.addr);
+                                    self.routing_table.try_add_node(new_node);
+
+                                    // Add to candidates if not seen before
+                                    if !queried.contains(&node_info.node_id)
+                                        && !candidates.iter().any(|n| n.node_id == node_info.node_id)
+                                    {
+                                        candidates.push(node_info);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!("get_peers to {} failed: {e}", node.addr);
+                    }
+                }
+            }
+        }
+
+        // Sort nodes_with_tokens by distance and truncate to K
+        nodes_with_tokens.sort_by(|a, b| {
+            let dist_a = a.0.node_id ^ target;
+            let dist_b = b.0.node_id ^ target;
+            dist_a.as_bytes().cmp(&dist_b.as_bytes())
+        });
+        nodes_with_tokens.truncate(K);
+
+        tracing::info!(
+            "iterative_get_peers: found {} peers from {} nodes for {}",
+            all_peers.len(),
+            queried.len(),
+            info_hash
+        );
+
+        Ok(GetPeersResult {
+            peers: all_peers,
+            nodes_contacted: queried.len(),
+            nodes_with_tokens,
+        })
+    }
+
+    // ========================================================================
+    // Announce
+    // ========================================================================
+
+    async fn announce(
+        &mut self,
+        info_hash: InfoHash,
+        port: u16,
+        implied_port: bool,
+    ) -> Result<AnnounceResult, DhtError> {
+        // First, perform get_peers to find closest nodes and get tokens
+        let get_peers_result = self.iterative_get_peers(info_hash).await?;
+
+        let mut announce_count = 0;
+
+        // Announce to the closest nodes that gave us tokens
+        for (node, token) in get_peers_result.nodes_with_tokens.iter() {
+            match self
+                .send_announce_peer(node.addr, info_hash, port, token.clone(), implied_port)
+                .await
+            {
+                Ok(_) => {
+                    announce_count += 1;
+                    tracing::debug!("Successfully announced to {}", node.addr);
+                }
+                Err(e) => {
+                    tracing::debug!("Announce to {} failed: {e}", node.addr);
+                }
+            }
+        }
+
+        tracing::info!(
+            "Announced to {}/{} nodes for {}",
+            announce_count,
+            get_peers_result.nodes_with_tokens.len(),
+            info_hash
+        );
+
+        Ok(AnnounceResult {
+            peers: get_peers_result.peers,
+            announce_count,
+        })
+    }
+
+    // ========================================================================
     // Send queries
     // ========================================================================
 
@@ -494,6 +904,36 @@ impl DhtActor {
     ) -> Result<(KrpcMessage, SocketAddr), DhtError> {
         let tx_id = self.next_transaction_id();
         let msg = KrpcMessage::find_node_query(tx_id, self.node_id, target);
+        self.send_and_wait(msg, SocketAddr::V4(addr)).await
+    }
+
+    async fn send_get_peers(
+        &mut self,
+        addr: SocketAddrV4,
+        info_hash: InfoHash,
+    ) -> Result<(KrpcMessage, SocketAddr), DhtError> {
+        let tx_id = self.next_transaction_id();
+        let msg = KrpcMessage::get_peers_query(tx_id, self.node_id, info_hash);
+        self.send_and_wait(msg, SocketAddr::V4(addr)).await
+    }
+
+    async fn send_announce_peer(
+        &mut self,
+        addr: SocketAddrV4,
+        info_hash: InfoHash,
+        port: u16,
+        token: Vec<u8>,
+        implied_port: bool,
+    ) -> Result<(KrpcMessage, SocketAddr), DhtError> {
+        let tx_id = self.next_transaction_id();
+        let msg = KrpcMessage::announce_peer_query(
+            tx_id,
+            self.node_id,
+            info_hash,
+            port,
+            token,
+            implied_port,
+        );
         self.send_and_wait(msg, SocketAddr::V4(addr)).await
     }
 
@@ -589,7 +1029,7 @@ impl DhtActor {
         }
     }
 
-    async fn handle_query(&self, msg: &KrpcMessage, query: &Query, from: SocketAddr) {
+    async fn handle_query(&mut self, msg: &KrpcMessage, query: &Query, from: SocketAddr) {
         let response = match query {
             Query::Ping { .. } => {
                 KrpcMessage::ping_response(msg.transaction_id.clone(), self.node_id)
@@ -605,11 +1045,109 @@ impl DhtActor {
                     .collect();
                 KrpcMessage::find_node_response(msg.transaction_id.clone(), self.node_id, nodes)
             }
+            Query::GetPeers { info_hash, .. } => {
+                self.handle_get_peers_query(msg.transaction_id.clone(), from, info_hash)
+            }
+            Query::AnnouncePeer {
+                info_hash,
+                port,
+                token,
+                implied_port,
+                ..
+            } => {
+                self.handle_announce_peer_query(
+                    msg.transaction_id.clone(),
+                    from,
+                    *info_hash,
+                    *port,
+                    token,
+                    *implied_port,
+                )
+            }
         };
 
         let bytes = response.to_bytes();
         if let Err(e) = self.socket.send_to(&bytes, from).await {
             tracing::warn!("Failed to send response to {from}: {e}");
         }
+    }
+
+    /// Handle a get_peers query from another node.
+    fn handle_get_peers_query(
+        &mut self,
+        tx_id: TransactionId,
+        from: SocketAddr,
+        info_hash: &InfoHash,
+    ) -> KrpcMessage {
+        let SocketAddr::V4(from_v4) = from else {
+            return KrpcMessage::error_response(
+                tx_id,
+                crate::message::error_codes::SERVER_ERROR,
+                "IPv6 not supported".to_string(),
+            );
+        };
+
+        // Generate token for this IP
+        let token = self.token_manager.generate(from_v4.ip());
+
+        // Check if we have peers for this infohash
+        let peers = self.peer_store.get_peers(info_hash);
+
+        if !peers.is_empty() {
+            tracing::debug!("Returning {} peers for {}", peers.len(), info_hash);
+            KrpcMessage::get_peers_response_with_values(tx_id, self.node_id, token, peers)
+        } else {
+            // Return closest nodes
+            let target = NodeId::from(info_hash);
+            let closest = self.routing_table.get_closest_nodes(&target, K);
+            let nodes: Vec<CompactNodeInfo> = closest
+                .into_iter()
+                .map(|n| CompactNodeInfo {
+                    node_id: n.node_id,
+                    addr: n.addr,
+                })
+                .collect();
+            tracing::debug!("No peers for {}, returning {} closest nodes", info_hash, nodes.len());
+            KrpcMessage::get_peers_response_with_nodes(tx_id, self.node_id, token, nodes)
+        }
+    }
+
+    /// Handle an announce_peer query from another node.
+    fn handle_announce_peer_query(
+        &mut self,
+        tx_id: TransactionId,
+        from: SocketAddr,
+        info_hash: InfoHash,
+        port: u16,
+        token: &[u8],
+        implied_port: bool,
+    ) -> KrpcMessage {
+        let SocketAddr::V4(from_v4) = from else {
+            return KrpcMessage::error_response(
+                tx_id,
+                crate::message::error_codes::SERVER_ERROR,
+                "IPv6 not supported".to_string(),
+            );
+        };
+
+        // Validate token
+        if !self.token_manager.validate(from_v4.ip(), token) {
+            tracing::debug!("Invalid token from {} for announce_peer", from);
+            return KrpcMessage::error_response(
+                tx_id,
+                crate::message::error_codes::PROTOCOL_ERROR,
+                "bad token".to_string(),
+            );
+        }
+
+        // Determine peer address (implied_port uses UDP source port)
+        let peer_port = if implied_port { from_v4.port() } else { port };
+        let peer_addr = SocketAddrV4::new(*from_v4.ip(), peer_port);
+
+        // Store the peer
+        self.peer_store.add_peer(info_hash, peer_addr);
+        tracing::debug!("Stored peer {} for {}", peer_addr, info_hash);
+
+        KrpcMessage::announce_peer_response(tx_id, self.node_id)
     }
 }

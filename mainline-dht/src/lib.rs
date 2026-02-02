@@ -3,6 +3,7 @@
 //! This crate provides a minimal implementation of the BitTorrent DHT protocol,
 //! supporting:
 //! - `ping` and `find_node` queries
+//! - `get_peers` and `announce_peer` queries
 //! - BEP 42 secure node ID generation
 //! - Iterative Kademlia-style node lookup
 //!
@@ -32,10 +33,12 @@ pub mod error;
 pub mod message;
 mod node;
 pub mod node_id;
+mod peer_store;
 mod routing_table;
+mod token;
 
 // Re-export main types for convenience
-pub use dht::Dht;
+pub use dht::{AnnounceResult, Dht, DhtHandler, DhtResponse, GetPeersResult};
 pub use error::DhtError;
 pub use message::CompactNodeInfo;
 pub use node_id::NodeId;

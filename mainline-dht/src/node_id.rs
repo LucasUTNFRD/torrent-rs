@@ -4,6 +4,7 @@ use std::{
     ops::BitXor,
 };
 
+use bittorrent_common::types::InfoHash;
 use crc::{Crc, CRC_32_ISCSI};
 use rand::Rng;
 
@@ -36,6 +37,12 @@ impl fmt::Debug for NodeId {
     }
 }
 
+impl fmt::Display for NodeId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(self, f)
+    }
+}
+
 impl BitXor for NodeId {
     type Output = Self;
     fn bitxor(self, rhs: Self) -> Self::Output {
@@ -46,6 +53,20 @@ impl BitXor for NodeId {
         }
 
         NodeId(result)
+    }
+}
+
+// InfoHash and NodeId are both 20-byte identifiers.
+// This conversion allows using InfoHash for XOR distance calculations in DHT lookups.
+impl From<InfoHash> for NodeId {
+    fn from(info_hash: InfoHash) -> Self {
+        NodeId::from_bytes(*info_hash.as_bytes())
+    }
+}
+
+impl From<&InfoHash> for NodeId {
+    fn from(info_hash: &InfoHash) -> Self {
+        NodeId::from_bytes(*info_hash.as_bytes())
     }
 }
 
