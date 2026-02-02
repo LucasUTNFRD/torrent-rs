@@ -7,7 +7,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, AtomicUsize, Ordering},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use bittorrent_common::{
@@ -26,6 +26,7 @@ use tokio::{
 use tracing::{debug, field::debug, info, instrument, warn};
 use tracker_client::{ClientState, Events, TrackerError, TrackerHandler, TrackerResponse};
 use url::Url;
+use mainline_dht::DhtHandler;
 
 use crate::{
     Storage,
@@ -156,6 +157,7 @@ pub struct Torrent {
     trackers: Vec<Url>,
 
     tracker_client: Arc<TrackerHandler>,
+    dht_client: Option<Arc<DhtHandler>>,
     storage: Arc<Storage>,
 
     metrics: Arc<Metrics>,
@@ -185,6 +187,7 @@ impl Torrent {
     pub fn from_torrent_info(
         torrent_info: TorrentInfo,
         tracker_client: Arc<TrackerHandler>,
+        dht_client: Option<Arc<DhtHandler>>,
         storage: Arc<Storage>,
         shutdown_rx: watch::Receiver<()>,
     ) -> (Self, mpsc::Sender<TorrentMessage>) {
@@ -209,6 +212,7 @@ impl Torrent {
                 state: TorrentState::Leeching,
                 trackers,
                 tracker_client,
+                dht_client,
                 storage,
                 metrics: Arc::new(Metrics::default()),
                 peers: HashMap::default(),
@@ -228,6 +232,7 @@ impl Torrent {
     pub fn from_magnet(
         magnet: Magnet,
         tracker_client: Arc<TrackerHandler>,
+        dht_client: Option<Arc<DhtHandler>>,
         storage: Arc<Storage>,
         shutdown_rx: watch::Receiver<()>,
     ) -> (Self, mpsc::Sender<TorrentMessage>) {
@@ -251,6 +256,7 @@ impl Torrent {
                 state: TorrentState::Leeching,
                 trackers,
                 tracker_client,
+                dht_client,
                 storage,
                 metrics: Arc::new(Metrics::default()),
                 shutdown_rx,
@@ -692,8 +698,8 @@ impl Torrent {
             .await
     }
 
-    // Announce torrent over Tracker
-    // internally creates a dedicated task in charge of periodic announces
+    // Announce torrent over Tracker and DHT
+    // internally creates dedicated tasks in charge of periodic announces
     // it implements max peer control
     fn announce(&self, announce_tx: mpsc::Sender<TrackerResponse>) {
         let client_state = if let Some(info) = self.metadata.info() {
@@ -707,6 +713,7 @@ impl Torrent {
             ClientState::new(0, 0, 0, Events::Started)
         };
 
+        // Spawn tracker announce tasks
         for announce_url in self.trackers.iter() {
             let tracker_client = self.tracker_client.clone();
             let info_hash = self.info_hash;
@@ -732,6 +739,54 @@ impl Torrent {
                     let _ = announce_tx.send(response).await;
 
                     sleep(Duration::from_secs(sleep_duration as u64)).await
+                }
+            });
+        }
+
+        // Spawn DHT discovery task (runs in parallel with tracker announces)
+        if let Some(dht) = self.dht_client.clone() {
+            let info_hash = self.info_hash;
+            let announce_tx = announce_tx.clone();
+            let port = 6881_u16; // TODO: Use actual listening port from session
+
+            tokio::spawn(async move {
+                // DHT re-announce interval (15 minutes as per BEP 5 recommendation)
+                const DHT_ANNOUNCE_INTERVAL: Duration = Duration::from_secs(15 * 60);
+
+                loop {
+                    // Perform DHT announce (get_peers + announce_peer)
+                    match dht.announce(info_hash, port).await {
+                        Ok(response) => {
+                            let peer_count = response.peers.len();
+                            if peer_count > 0 {
+                                tracing::info!(
+                                    "DHT: found {} peers for {}",
+                                    peer_count,
+                                    info_hash
+                                );
+
+                                // Convert DhtResponse to TrackerResponse for unified handling
+                                let tracker_response = TrackerResponse {
+                                    peers: response.peers,
+                                    interval: DHT_ANNOUNCE_INTERVAL.as_secs() as i32,
+                                    leechers: 0,
+                                    seeders: 0,
+                                };
+                                let _ = announce_tx.send(tracker_response).await;
+                            } else {
+                                tracing::debug!(
+                                    "DHT: no peers found for {}, will retry",
+                                    info_hash
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("DHT announce failed for {}: {}", info_hash, e);
+                        }
+                    }
+
+                    // Wait before next DHT announce
+                    sleep(DHT_ANNOUNCE_INTERVAL).await;
                 }
             });
         }

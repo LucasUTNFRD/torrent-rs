@@ -22,8 +22,8 @@ use tokio::{
     task::JoinHandle,
 };
 
-use tracing::warn;
 use tracker_client::TrackerHandler;
+use mainline_dht::DhtHandler;
 
 pub static CLIENT_ID: Lazy<PeerID> = Lazy::new(PeerID::generate);
 
@@ -105,6 +105,27 @@ impl SessionManager {
         let tracker = Arc::new(TrackerHandler::new(*CLIENT_ID));
         let storage = Arc::new(Storage::new());
 
+        // Initialize and bootstrap DHT
+        let dht: Option<Arc<DhtHandler>> = match DhtHandler::new(Some(self.port)).await {
+            Ok(dht) => {
+                tracing::info!("DHT node created, bootstrapping...");
+                match dht.bootstrap().await {
+                    Ok(node_id) => {
+                        tracing::info!("DHT bootstrapped successfully with node ID: {:?}", node_id);
+                        Some(Arc::new(dht))
+                    }
+                    Err(e) => {
+                        tracing::warn!("DHT bootstrap failed: {}, continuing without DHT", e);
+                        None
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to create DHT node: {}, continuing without DHT", e);
+                None
+            }
+        };
+
         let (shutdown_tx, shutdown_rx) = watch::channel(());
 
         self.spawn_tcp_listener();
@@ -118,6 +139,7 @@ impl SessionManager {
                     let (torrent, tx) = Torrent::from_torrent_info(
                         metainfo,
                         tracker.clone(),
+                        dht.clone(),
                         storage.clone(),
                         shutdown_rx.clone(),
                     );
@@ -144,21 +166,26 @@ impl SessionManager {
                     if let Some(name) = &magnet.display_name {
                         println!("Display Name: {name}");
                     }
-                    if magnet.trackers.is_empty() {
+                    
+                    // Check if we have any way to discover peers
+                    if magnet.trackers.is_empty() && dht.is_none() {
                         tracing::warn!(
-                            "No tracker is specfied, client SHOULD use DHT to acquire peers",
+                            "No tracker specified and DHT is not available, cannot acquire peers"
                         );
-                        tracing::warn!("Torrent-RS doest not implement DHT,yet");
                         continue;
+                    }
+                    
+                    if magnet.trackers.is_empty() {
+                        tracing::info!("No trackers specified, will use DHT for peer discovery");
                     }
 
                     println!("Trackers: {:?}", magnet.trackers);
-
                     println!("Peers: {:?}", magnet.peers);
 
                     let (torrent, tx) = Torrent::from_magnet(
                         magnet,
                         tracker.clone(),
+                        dht.clone(),
                         storage.clone(),
                         shutdown_rx.clone(),
                     );
@@ -172,10 +199,12 @@ impl SessionManager {
                     s.insert(info_hash, t_session);
                 }
                 SessionCommand::Shutdown => {
+                    // Signal shutdown to torrents
                     if shutdown_tx.send(()).is_err() {
                         tracing::warn!("No receivers for shutdown signal");
                     }
 
+                    // Wait for torrent handles
                     let handles: Vec<_> = {
                         let mut sessions = self.sessions.write().unwrap();
                         sessions.drain().map(|(_, (_, h))| h).collect()
@@ -186,6 +215,16 @@ impl SessionManager {
                             Ok(Ok(())) => tracing::info!("Session exited cleanly"),
                             Ok(Err(e)) => tracing::warn!(?e, "Session error"),
                             Err(e) => tracing::warn!(?e, "Join error"),
+                        }
+                    }
+
+                    // Shutdown DHT gracefully
+                    if let Some(ref dht) = dht {
+                        tracing::info!("Shutting down DHT...");
+                        if let Err(e) = dht.shutdown().await {
+                            tracing::warn!("DHT shutdown error: {}", e);
+                        } else {
+                            tracing::info!("DHT shutdown complete");
                         }
                     }
 
