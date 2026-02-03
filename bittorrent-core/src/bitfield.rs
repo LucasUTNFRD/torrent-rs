@@ -3,7 +3,7 @@ use std::fmt;
 use bytes::Bytes;
 use thiserror::Error;
 
-const MSB_MASK: u8 = 0b10000000;
+const MSB_MASK: u8 = 0b1000_0000;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum BitfieldError {
@@ -25,7 +25,7 @@ pub struct Bitfield {
 impl fmt::Debug for Bitfield {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Print each byte as 8-bit binary
-        let bits: Vec<String> = self.inner.iter().map(|b| format!("{:08b}", b)).collect();
+        let bits: Vec<String> = self.inner.iter().map(|b| format!("{b:08b}")).collect();
         write!(
             f,
             "Bitfield {{ inner: [{}], num_pieces: {} }}",
@@ -37,7 +37,7 @@ impl fmt::Debug for Bitfield {
 
 impl Bitfield {
     /// Constructs an empty bitfield
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             inner: vec![],
             num_pieces: 0,
@@ -97,7 +97,7 @@ impl Bitfield {
         }
     }
 
-    /// Validate an unchecked bitfield to the expected num_pieces
+    /// Validate an unchecked bitfield to the expected ``num_pieces``
     pub fn validate(&mut self, num_pieces: usize) -> Result<(), BitfieldError> {
         let expected_bytes = num_pieces.div_ceil(8);
 
@@ -134,9 +134,9 @@ impl Bitfield {
         Ok(())
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.num_pieces == 0
-    }
+    // pub const fn is_empty(&self) -> bool {
+    //     self.num_pieces == 0
+    // }
 
     pub fn resize(&mut self, needed: usize) {
         let old_size = self.num_pieces;
@@ -162,7 +162,7 @@ impl Bitfield {
         }
     }
 
-    pub fn size(&self) -> usize {
+    pub const fn size(&self) -> usize {
         self.num_pieces
     }
 

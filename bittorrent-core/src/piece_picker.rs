@@ -146,24 +146,24 @@ impl PieceManager {
         blocks
     }
 
-    pub fn increment_availability(&mut self, update: AvailabilityUpdate) {
+    pub fn increment_availability(&mut self, update: &AvailabilityUpdate) {
         match update {
             AvailabilityUpdate::Bitfield(bitfield) => {
                 for index in bitfield.iter_set() {
                     if let Some(piece) = self.pieces.get_mut(index) {
-                        piece.num_peer += 1
+                        piece.num_peer += 1;
                     }
                 }
             }
             AvailabilityUpdate::Have(index) => {
-                if let Some(piece) = self.pieces.get_mut(index as usize) {
-                    piece.num_peer += 1
+                if let Some(piece) = self.pieces.get_mut(*index as usize) {
+                    piece.num_peer += 1;
                 }
             }
         }
     }
 
-    pub fn decrement_availability(&mut self, update: AvailabilityUpdate) {
+    pub fn decrement_availability(&mut self, update: &AvailabilityUpdate) {
         match update {
             AvailabilityUpdate::Bitfield(bitfield) => {
                 for index in bitfield.iter_set() {
@@ -173,7 +173,7 @@ impl PieceManager {
                 }
             }
             AvailabilityUpdate::Have(index) => {
-                if let Some(piece) = self.pieces.get_mut(index as usize) {
+                if let Some(piece) = self.pieces.get_mut(*index as usize) {
                     piece.num_peer = piece.num_peer.saturating_sub(1);
                 }
             }

@@ -1,4 +1,4 @@
-//! Core types for the BitTorrent daemon API.
+//! Core types for the ``BitTorrent`` daemon API.
 //!
 //! These types are designed to be serializable for future RPC support
 //! and provide a stable interface between the daemon and clients.
@@ -7,9 +7,9 @@ use std::path::PathBuf;
 
 use bittorrent_common::types::InfoHash;
 
-/// Torrent identifier - uses InfoHash for stability across restarts.
+/// Torrent identifier - uses ``InfoHash`` for stability across restarts.
 ///
-/// The InfoHash is the SHA1 hash of the torrent's info dictionary,
+/// The ``InfoHash`` is the SHA1 hash of the torrent's info dictionary,
 /// making it a globally unique and stable identifier.
 pub type TorrentId = InfoHash;
 
@@ -48,7 +48,7 @@ impl std::fmt::Display for TorrentState {
 /// This provides a snapshot of a torrent's current state and progress.
 #[derive(Debug, Clone)]
 pub struct TorrentSummary {
-    /// Unique identifier (InfoHash)
+    /// Unique identifier ``InfoHash``
     pub id: TorrentId,
     /// Display name of the torrent
     pub name: String,

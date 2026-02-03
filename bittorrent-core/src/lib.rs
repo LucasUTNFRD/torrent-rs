@@ -1,6 +1,6 @@
 //! # bittorrent-core
 //!
-//! Core BitTorrent client implementation with DHT and tracker-based peer discovery.
+//! Core ``BitTorrent`` client implementation with DHT and tracker-based peer discovery.
 //!
 //! ## Architecture
 //!
@@ -22,7 +22,7 @@
 //!
 //! - **session**: Entry point. Manages torrents, accepts incoming connections, bootstraps DHT
 //! - **torrent**: Per-torrent state machine handling peers, pieces, and announcements
-//! - **peer**: Peer connection handling and the BitTorrent wire protocol
+//! - **peer**: Peer connection handling and the ``BitTorrent`` wire protocol
 //! - **piece_picker**: Piece selection strategy and block request management
 //! - **storage**: Disk I/O for reading/writing pieces
 //! - **bitfield**: Compact representation of available pieces
