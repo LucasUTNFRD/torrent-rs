@@ -43,7 +43,8 @@ mod piece_picker;
 mod session;
 mod storage;
 mod torrent;
+mod types;
 
-pub use session::Session;
-
+pub use session::{Session, SessionError};
 pub use storage::Storage;
+pub use types::{SessionConfig, SessionStats, TorrentId, TorrentState, TorrentSummary};
