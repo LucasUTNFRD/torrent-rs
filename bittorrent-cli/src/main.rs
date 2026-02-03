@@ -1,11 +1,10 @@
-use bittorrent_core::Session;
+use bittorrent_core::{Session, SessionConfig};
 use clap::Parser;
 use std::path::PathBuf;
-use std::time::Duration;
 use tracing::info;
-use tracing_subscriber::Layer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::Layer;
 
 #[derive(Parser)]
 #[command(name = "bittorrent-cli")]
@@ -56,14 +55,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
     let log_level = tracing::Level::from(args.log_level);
-
-    // let t = tracing_subscriber::fmt()
-    //     .with_max_level(log_level)
-    //     .with_target(false)
-    //     .with_thread_ids(false)
-    //     .with_file(false)
-    //     .with_line_number(true)
-    //     .finish();
 
     tracing_subscriber::registry()
         .with(console_layer)
@@ -120,29 +111,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Save directory: {}", save_dir.display());
     info!("Listening on port: {}", args.port);
 
-    let session = Session::new(args.port, save_dir);
+    let config = SessionConfig {
+        port: args.port,
+        save_path: save_dir,
+        enable_dht: true,
+    };
 
-    if is_magnet {
-        if let Err(e) = session.add_magnet(&args.torrent) {
-            eprintln!("Error adding magnet URI: {}", e);
-            std::process::exit(1);
+    let session = Session::new(config);
+
+    let torrent_id = if is_magnet {
+        match session.add_magnet(&args.torrent).await {
+            Ok(id) => id,
+            Err(e) => {
+                eprintln!("Error adding magnet URI: {}", e);
+                std::process::exit(1);
+            }
         }
-    } else if let Err(e) = session.add_torrent(&args.torrent) {
-        eprintln!("Error adding torrent file: {}", e);
-        std::process::exit(1);
-    }
+    } else {
+        match session.add_torrent(&args.torrent).await {
+            Ok(id) => id,
+            Err(e) => {
+                eprintln!("Error adding torrent file: {}", e);
+                std::process::exit(1);
+            }
+        }
+    };
 
+    println!("Added torrent: {:?}", torrent_id);
     println!("Starting download...");
     println!("Press Ctrl+C to stop");
     println!();
 
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {
-            info!(" Received shutdown signal, stopping session...");
-            session.shutdown();
+    // Wait for shutdown signal
+    tokio::signal::ctrl_c().await?;
 
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
+    info!("Received shutdown signal, stopping session...");
+
+    if let Err(e) = session.shutdown().await {
+        eprintln!("Error during shutdown: {}", e);
     }
 
     Ok(())

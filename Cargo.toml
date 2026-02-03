@@ -4,6 +4,7 @@ members = [
   "bittorrent-cli",
   "bittorrent-common",
   "bittorrent-core",
+  "bittorrent-daemon",
   "magnet-uri",
   "mainline-dht",
   "peer-protocol",

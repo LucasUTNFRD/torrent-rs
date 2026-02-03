@@ -1,0 +1,17 @@
+[package]
+name = "bittorrent-daemon"
+version = "0.1.0"
+edition = "2024"
+description = "BitTorrent daemon - headless torrent client service"
+
+[[bin]]
+name = "btd"
+path = "src/main.rs"
+
+[dependencies]
+bittorrent-core = { path = "../bittorrent-core" }
+bittorrent-common = { path = "../bittorrent-common" }
+tokio = { workspace = true, features = ["signal"] }
+clap = { version = "4", features = ["derive"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
