@@ -5,6 +5,7 @@ members = [
   "bittorrent-common",
   "bittorrent-core",
   "bittorrent-daemon",
+  "bittorrent-remote",
   "magnet-uri",
   "mainline-dht",
   "peer-protocol",

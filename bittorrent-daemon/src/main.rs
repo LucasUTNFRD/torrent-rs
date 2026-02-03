@@ -4,10 +4,14 @@
 //! Designed for server/CLI usage with future IPC support.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use bittorrent_core::{Session, SessionConfig};
 use clap::Parser;
-use tracing::{info, warn};
+use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use tracing::{error, info, warn};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::Layer;
@@ -20,6 +24,10 @@ struct Args {
     /// Listening port for incoming peer connections
     #[arg(short, long, default_value_t = 6881)]
     port: u16,
+
+    /// Port for the IPC server
+    #[arg(long, default_value_t = 6969)]
+    ipc_port: u16,
 
     /// Directory to save downloaded files
     #[arg(short = 'd', long)]
@@ -36,6 +44,98 @@ struct Args {
     /// Torrent files or magnet URIs to add on startup
     #[arg(trailing_var_arg = true)]
     torrents: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(tag = "type")]
+enum IpcCommand {
+    AddTorrent { path: String },
+    AddMagnet { uri: String },
+    ListTorrents,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(tag = "type")]
+enum IpcResponse {
+    Success { message: String },
+    Error { message: String },
+    TorrentList { torrents: Vec<String> },
+}
+
+async fn run_ipc_server(session: Arc<Session>, port: u16) {
+    let addr = format!("127.0.0.1:{}", port);
+    let listener = match TcpListener::bind(&addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            error!("Failed to bind IPC server to {}: {}", addr, e);
+            return;
+        }
+    };
+
+    info!("IPC server listening on {}", addr);
+
+    loop {
+        let (mut socket, _) = match listener.accept().await {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("IPC accept error: {}", e);
+                continue;
+            }
+        };
+
+        let session = session.clone();
+        tokio::spawn(async move {
+            let mut buf = Vec::new();
+            if let Err(e) = socket.read_to_end(&mut buf).await {
+                warn!("IPC read error: {}", e);
+                return;
+            }
+
+            let cmd: IpcCommand = match serde_json::from_slice(&buf) {
+                Ok(c) => c,
+                Err(e) => {
+                    let resp = IpcResponse::Error {
+                        message: format!("Invalid command: {}", e),
+                    };
+                    let _ = socket.write_all(&serde_json::to_vec(&resp).unwrap()).await;
+                    return;
+                }
+            };
+
+            let response = match cmd {
+                IpcCommand::AddTorrent { path } => {
+                    match session.add_torrent(&path).await {
+                        Ok(id) => IpcResponse::Success {
+                            message: format!("Added torrent: {:?}", id),
+                        },
+                        Err(e) => IpcResponse::Error {
+                            message: format!("Failed to add torrent: {}", e),
+                        },
+                    }
+                }
+                IpcCommand::AddMagnet { uri } => {
+                    match session.add_magnet(&uri).await {
+                        Ok(id) => IpcResponse::Success {
+                            message: format!("Added magnet: {:?}", id),
+                        },
+                        Err(e) => IpcResponse::Error {
+                            message: format!("Failed to add magnet: {}", e),
+                        },
+                    }
+                }
+                IpcCommand::ListTorrents => match session.list_torrents().await {
+                    Ok(list) => IpcResponse::TorrentList {
+                        torrents: list.into_iter().map(|t| t.name).collect(),
+                    },
+                    Err(e) => IpcResponse::Error {
+                        message: format!("Failed to list torrents: {}", e),
+                    },
+                },
+            };
+
+            let _ = socket.write_all(&serde_json::to_vec(&response).unwrap()).await;
+        });
+    }
 }
 
 #[derive(Copy, Clone, Debug, clap::ValueEnum)]
@@ -108,7 +208,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Create and start session
-    let session = Session::new(config);
+    let session = Arc::new(Session::new(config));
+
+    // Start IPC server
+    let ipc_session = session.clone();
+    let ipc_port = args.ipc_port;
+    tokio::spawn(async move {
+        run_ipc_server(ipc_session, ipc_port).await;
+    });
 
     // Add any torrents specified on command line
     for torrent in &args.torrents {
