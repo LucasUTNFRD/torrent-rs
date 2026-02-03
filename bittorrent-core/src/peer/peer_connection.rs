@@ -604,11 +604,11 @@ impl Peer<Connected> {
     }
 
     async fn on_interested(&mut self) -> Result<(), ConnectionError> {
-        todo!()
+        todo!("Received interested message")
     }
 
     async fn on_not_interested(&mut self) -> Result<(), ConnectionError> {
-        todo!()
+        todo!("Received not interested message")
     }
 
     // Updates piece availability - Affects which pieces the torrent tries to download next
