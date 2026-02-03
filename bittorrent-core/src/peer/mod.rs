@@ -5,7 +5,7 @@ use bittorrent_common::metainfo::Info;
 use peer_protocol::protocol::{BlockInfo, Message};
 use tokio::{net::TcpStream, sync::mpsc};
 
-use crate::{bitfield::Bitfield, peer::metrics::PeerMetrics};
+use crate::peer::metrics::PeerMetrics;
 
 pub mod peer_connection;
 
@@ -37,7 +37,7 @@ pub trait ConnectTimeout {
 
 #[async_trait]
 impl ConnectTimeout for TcpStream {
-    async fn connect_timeout(addr: &SocketAddr, timeout: Duration) -> tokio::io::Result<TcpStream> {
-        tokio::time::timeout(timeout, async move { TcpStream::connect(addr).await }).await?
+    async fn connect_timeout(addr: &SocketAddr, timeout: Duration) -> tokio::io::Result<Self> {
+        tokio::time::timeout(timeout, async move { Self::connect(addr).await }).await?
     }
 }

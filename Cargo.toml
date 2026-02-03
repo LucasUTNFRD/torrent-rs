@@ -11,6 +11,7 @@ members = [
   "peer-protocol",
   "tracker-client",
 ]
+
 resolver = "2" # Recommended for new workspaces
 
 [workspace.dependencies]

@@ -79,7 +79,7 @@ pub struct Handshaking {
 }
 
 impl Peer<New> {
-    pub fn new(
+    pub const fn new(
         pid: Pid,
         addr: SocketAddr,
         info_hash: InfoHash, //maybe move this into a new_outbound
@@ -192,15 +192,15 @@ enum BitfieldState {
 }
 
 impl BitfieldState {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self::NotReceived
     }
 
-    fn is_received(&self) -> bool {
+    const fn is_received(&self) -> bool {
         !matches!(self, Self::NotReceived)
     }
 
-    fn get_bitfield_mut(&mut self) -> Option<&mut Bitfield> {
+    const fn get_bitfield_mut(&mut self) -> Option<&mut Bitfield> {
         match self {
             Self::NotReceived => None,
             Self::Received(bf) | Self::Validated(bf) => Some(bf),
@@ -290,7 +290,7 @@ impl Peer<Connected> {
         self.have_valid_metadata().await;
 
         if self.state.supports_extended {
-            self.send_extended_handshake().await?
+            self.send_extended_handshake().await?;
         }
 
         let mut heartbeat_ticker = interval(Duration::from_secs(60));
@@ -399,7 +399,7 @@ impl Peer<Connected> {
     // debug message with
     // download speed
     // pipeline utilization
-    fn debug_peer_dowload() {}
+    // fn debug_peer_dowload() {}
 
     async fn handle_msg(&mut self, msg: Message) -> Result<(), ConnectionError> {
         self.state.last_recv_msg = Instant::now();
@@ -417,7 +417,7 @@ impl Peer<Connected> {
             Message::Cancel(block) => self.on_cancel().await?,
             Message::Extended(extended) => match extended {
                 ExtendedMessage::Handshake(handshake) => {
-                    self.on_extended_handshake(handshake).await?
+                    self.on_extended_handshake(handshake).await?;
                 }
                 ExtendedMessage::ExtensionMessage(raw_extended_msg) => {
                     self.on_extension(raw_extended_msg).await?;
@@ -434,7 +434,7 @@ impl Peer<Connected> {
                 if let BitfieldState::Validated(ref mut bitifled) = self.state.bitfield
                     && bitifled.has(piece_index as usize)
                 {
-                    self.state.sink.send(Message::Have { piece_index }).await?
+                    self.state.sink.send(Message::Have { piece_index }).await?;
                 }
             }
             PeerMessage::SendBitfield { bitfield } => todo!(),
@@ -528,7 +528,7 @@ impl Peer<Connected> {
         Ok(())
     }
 
-    /// Request blocks to TorrentSupervisor
+    /// Request blocks to ``TorrentSupervisor``
     async fn request_block(&mut self) -> Result<(), ConnectionError> {
         if self.state.metadata.is_none() {
             return Ok(());
@@ -641,8 +641,7 @@ impl Peer<Connected> {
                     num_pieces - 1
                 );
                 return Err(ConnectionError::Protocol(format!(
-                    "Invalid piece index: {} >= {}",
-                    have_idx, num_pieces
+                    "Invalid piece index: {have_idx} >= {num_pieces}",
                 )));
             }
         } else {
@@ -653,8 +652,7 @@ impl Peer<Connected> {
                     have_idx
                 );
                 return Err(ConnectionError::Protocol(format!(
-                    "Piece index {} exceeds maximum",
-                    have_idx
+                    "Piece index {have_idx} exceeds maximum"
                 )));
             }
         }
@@ -727,12 +725,13 @@ impl Peer<Connected> {
     async fn on_request(&mut self) -> Result<(), ConnectionError> {
         todo!()
     }
+
     async fn on_incoming_piece(&mut self, block: Block) -> Result<(), ConnectionError> {
         self.state.metrics.record_download(block.data.len() as u64);
         let block_info = BlockInfo {
             index: block.index,
             begin: block.begin,
-            length: block.data.len() as u32,
+            length: u32::try_from(block.data.len()).expect("incoming block length > u32::MAX"),
         };
 
         if self.state.outgoing_request.remove(&block_info) {
@@ -816,11 +815,12 @@ impl Peer<Connected> {
             .state
             .remote_extensions
             .get(EXTENSION_NAME_METADATA)
-            .map(|ext| *ext != 0)
-            .unwrap_or(false);
+            .is_some_and(|ext| *ext != 0);
+        // .map()
+        // .unwrap_or(false);
 
         if client_support_metadata_yet {
-            self.request_metadata().await?
+            self.request_metadata().await?;
         }
 
         Ok(())
@@ -930,16 +930,13 @@ impl Peer<Connected> {
 
         // Parse the bencode part to get the message info
         let decoded = Bencode::decode(&payload).map_err(|e| {
-            ConnectionError::Protocol(format!("Failed to decode metadata message: {}", e))
+            ConnectionError::Protocol(format!("Failed to decode metadata message: {e}"))
         })?;
 
-        let dict = match &decoded {
-            Bencode::Dict(dict) => dict,
-            _ => {
-                return Err(ConnectionError::Protocol(
-                    "Metadata message is not a dictionary".to_string(),
-                ));
-            }
+        let Bencode::Dict(dict) = &decoded else {
+            return Err(ConnectionError::Protocol(
+                "Metadata message is not a dictionary".to_string(),
+            ));
         };
 
         let msg_type = dict.get_i64(b"msg_type").ok_or_else(|| {
@@ -969,7 +966,7 @@ impl Peer<Connected> {
                     .send(Message::Extended(ExtendedMessage::ExtensionMessage(
                         raw_message,
                     )))
-                    .await?
+                    .await?;
             }
             DATA_ID => {
                 // Data - peer is sending us metadata
@@ -1022,8 +1019,7 @@ impl Peer<Connected> {
             }
             _ => {
                 return Err(ConnectionError::Protocol(format!(
-                    "Unknown metadata message type: {}",
-                    msg_type
+                    "Unknown metadata message type: {msg_type}"
                 )));
             }
         }

@@ -1,4 +1,4 @@
-//! Session management for the BitTorrent daemon.
+//! Session management for the ``BitTorrent`` daemon.
 //!
 //! The `Session` struct provides the public API for controlling the daemon,
 //! while `SessionManager` runs as a background task handling commands.
@@ -6,7 +6,7 @@
 use std::{
     collections::HashMap,
     path::Path,
-    sync::{Arc, RwLock},
+    sync::{Arc, LazyLock, RwLock},
 };
 
 use bittorrent_common::{
@@ -15,7 +15,6 @@ use bittorrent_common::{
 };
 use bytes::BytesMut;
 use magnet_uri::{Magnet, MagnetError};
-use once_cell::sync::Lazy;
 use peer_protocol::protocol::Handshake;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -37,20 +36,20 @@ use crate::{
 };
 
 /// Global client peer ID, generated once per process.
-pub static CLIENT_ID: Lazy<PeerID> = Lazy::new(PeerID::generate);
+pub static CLIENT_ID: LazyLock<PeerID> = LazyLock::new(PeerID::generate);
 
-/// Handle to a running BitTorrent session.
+/// Handle to a running ``BitTorrent`` session.
 ///
 /// This is the main entry point for interacting with the daemon.
 /// All methods are async and return results via oneshot channels.
 pub struct Session {
-    /// Handle to the background SessionManager task
+    /// Handle to the background ``SessionManager`` task
     pub handle: JoinHandle<()>,
-    /// Channel for sending commands to the SessionManager
+    /// Channel for sending commands to the ``SessionManager``
     tx: UnboundedSender<SessionCommand>,
 }
 
-/// Commands sent from Session to SessionManager.
+/// Commands sent from Session to ``SessionManager``.
 pub enum SessionCommand {
     AddTorrent {
         info: TorrentInfo,
@@ -108,17 +107,18 @@ impl Session {
     /// Create a new session with the given configuration.
     ///
     /// This spawns a background task that manages torrents and handles commands.
+    #[must_use]
     pub fn new(config: SessionConfig) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
 
         let manager = SessionManager::new(config, rx);
         let handle = tokio::task::spawn(async move { manager.start().await });
-        Self { tx, handle }
+        Self { handle, tx }
     }
 
     /// Add a torrent from a .torrent file.
     ///
-    /// Returns the TorrentId (InfoHash) on success.
+    /// Returns the ``TorrentId`` on success.
     pub async fn add_torrent(&self, path: impl AsRef<Path>) -> Result<TorrentId, SessionError> {
         let metainfo = parse_torrent_from_file(path.as_ref())?;
         let (tx, rx) = oneshot::channel();
@@ -133,7 +133,7 @@ impl Session {
 
     /// Add a torrent from a magnet URI.
     ///
-    /// Returns the TorrentId (InfoHash) on success.
+    /// Returns the ``TorrentId``  on success.
     pub async fn add_magnet(&self, uri: impl AsRef<str>) -> Result<TorrentId, SessionError> {
         let magnet = Magnet::parse(uri)?;
         let (tx, rx) = oneshot::channel();
@@ -265,13 +265,23 @@ impl SessionManager {
         while let Some(cmd) = self.rx.recv().await {
             match cmd {
                 SessionCommand::AddTorrent { info, resp } => {
-                    let result =
-                        self.handle_add_torrent(info, &tracker, &dht, &storage, &shutdown_rx);
+                    let result = self.handle_add_torrent(
+                        info,
+                        &tracker,
+                        dht.as_ref(),
+                        &storage,
+                        &shutdown_rx,
+                    );
                     let _ = resp.send(result);
                 }
                 SessionCommand::AddMagnet { magnet, resp } => {
-                    let result =
-                        self.handle_add_magnet(magnet, &tracker, &dht, &storage, &shutdown_rx);
+                    let result = self.handle_add_magnet(
+                        magnet,
+                        &tracker,
+                        dht.as_ref(),
+                        &storage,
+                        &shutdown_rx,
+                    );
                     let _ = resp.send(result);
                 }
                 SessionCommand::RemoveTorrent { id, resp } => {
@@ -287,11 +297,11 @@ impl SessionManager {
                     let _ = resp.send(info);
                 }
                 SessionCommand::GetStats { resp } => {
-                    let stats = self.handle_get_stats(&dht);
+                    let stats = self.handle_get_stats(dht.as_ref());
                     let _ = resp.send(stats);
                 }
                 SessionCommand::Shutdown { resp } => {
-                    let result = self.handle_shutdown(&shutdown_tx, &dht).await;
+                    let result = self.handle_shutdown(&shutdown_tx, dht.as_ref()).await;
                     let _ = resp.send(result);
                     break;
                 }
@@ -303,7 +313,7 @@ impl SessionManager {
         &self,
         metainfo: TorrentInfo,
         tracker: &Arc<TrackerHandler>,
-        dht: &Option<Arc<DhtHandler>>,
+        dht: Option<&Arc<DhtHandler>>,
         storage: &Arc<Storage>,
         shutdown_rx: &watch::Receiver<()>,
     ) -> Result<TorrentId, SessionError> {
@@ -320,12 +330,12 @@ impl SessionManager {
         tracing::info!(%metainfo);
 
         let name = metainfo.info.mode.name().to_string();
-        let size_bytes = metainfo.info.total_size() as u64;
+        let size_bytes = u64::try_from(metainfo.info.total_size()).expect("size is non-negative");
 
         let (torrent, tx) = Torrent::from_torrent_info(
             metainfo,
             tracker.clone(),
-            dht.clone(),
+            dht.cloned(),
             storage.clone(),
             shutdown_rx.clone(),
         );
@@ -351,7 +361,7 @@ impl SessionManager {
         &self,
         magnet: Magnet,
         tracker: &Arc<TrackerHandler>,
-        dht: &Option<Arc<DhtHandler>>,
+        dht: Option<&Arc<DhtHandler>>,
         storage: &Arc<Storage>,
         shutdown_rx: &watch::Receiver<()>,
     ) -> Result<TorrentId, SessionError> {
@@ -384,7 +394,7 @@ impl SessionManager {
         let (torrent, tx) = Torrent::from_magnet(
             magnet,
             tracker.clone(),
-            dht.clone(),
+            dht.cloned(),
             storage.clone(),
             shutdown_rx.clone(),
         );
@@ -467,9 +477,8 @@ impl SessionManager {
         })
     }
 
-    fn handle_get_stats(&self, dht: &Option<Arc<DhtHandler>>) -> SessionStats {
-        let sessions = self.sessions.read().unwrap();
-        let torrent_count = sessions.len();
+    fn handle_get_stats(&self, dht: Option<&Arc<DhtHandler>>) -> SessionStats {
+        let torrent_count = self.sessions.read().unwrap().len();
 
         // TODO: Aggregate actual stats from torrents when Phase 3 is implemented
         SessionStats {
@@ -484,7 +493,7 @@ impl SessionManager {
     async fn handle_shutdown(
         &self,
         shutdown_tx: &watch::Sender<()>,
-        dht: &Option<Arc<DhtHandler>>,
+        dht: Option<&Arc<DhtHandler>>,
     ) -> Result<(), SessionError> {
         // Signal shutdown to all torrents
         if shutdown_tx.send(()).is_err() {
@@ -545,12 +554,9 @@ impl SessionManager {
                         return;
                     }
 
-                    let remote_handshake = match Handshake::from_bytes(&buf) {
-                        Some(hs) => hs,
-                        None => {
-                            tracing::debug!("Failed to parse handshake from {:?}", remote_addr);
-                            return;
-                        }
+                    let Some(remote_handshake) = Handshake::from_bytes(&buf) else {
+                        tracing::debug!("Failed to parse handshake from {:?}", remote_addr);
+                        return;
                     };
 
                     let have_torrent = {
