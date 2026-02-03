@@ -11,7 +11,7 @@ use std::{
     collections::{HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, ToSocketAddrs},
     sync::{
-        Arc,
+        Arc, RwLock,
         atomic::{AtomicU16, Ordering},
     },
     time::Duration,
@@ -312,11 +312,7 @@ impl DhtHandler {
     /// then announces to those nodes.
     ///
     /// Returns peers discovered during the get_peers phase.
-    pub async fn announce(
-        &self,
-        info_hash: InfoHash,
-        port: u16,
-    ) -> Result<DhtResponse, DhtError> {
+    pub async fn announce(&self, info_hash: InfoHash, port: u16) -> Result<DhtResponse, DhtError> {
         self.announce_ext(info_hash, port, false).await
     }
 
@@ -330,7 +326,10 @@ impl DhtHandler {
         port: u16,
         implied_port: bool,
     ) -> Result<DhtResponse, DhtError> {
-        let result = self.dht.announce_peer_ext(info_hash, port, implied_port).await?;
+        let result = self
+            .dht
+            .announce_peer_ext(info_hash, port, implied_port)
+            .await?;
 
         Ok(DhtResponse {
             peers: result.peers.into_iter().map(SocketAddr::V4).collect(),
@@ -399,6 +398,7 @@ struct DhtActor {
     socket: Arc<UdpSocket>,
     node_id: NodeId,
     routing_table: RoutingTable,
+    // Arc<RwLock<RoutingTable>>,
     command_rx: mpsc::Receiver<DhtCommand>,
     next_tx_id: AtomicU16,
     pending: HashMap<Vec<u8>, PendingRequest>,
@@ -417,7 +417,7 @@ impl DhtActor {
         Self {
             socket,
             node_id,
-            routing_table: RoutingTable::new(node_id),
+            routing_table: RoutingTable::new(node_id), // Arc::new(RwLock::new(RoutingTable::new(node_id))),
             command_rx,
             next_tx_id: AtomicU16::new(1),
             pending: HashMap::new(),
@@ -789,11 +789,7 @@ impl DhtActor {
 
                             // Collect peers if present
                             if let Some(peers) = values {
-                                tracing::debug!(
-                                    "Got {} peers from {}",
-                                    peers.len(),
-                                    node.addr
-                                );
+                                tracing::debug!("Got {} peers from {}", peers.len(), node.addr);
                                 all_peers.extend(peers);
                             }
 
@@ -806,7 +802,9 @@ impl DhtActor {
 
                                     // Add to candidates if not seen before
                                     if !queried.contains(&node_info.node_id)
-                                        && !candidates.iter().any(|n| n.node_id == node_info.node_id)
+                                        && !candidates
+                                            .iter()
+                                            .any(|n| n.node_id == node_info.node_id)
                                     {
                                         candidates.push(node_info);
                                     }
@@ -1054,16 +1052,14 @@ impl DhtActor {
                 token,
                 implied_port,
                 ..
-            } => {
-                self.handle_announce_peer_query(
-                    msg.transaction_id.clone(),
-                    from,
-                    *info_hash,
-                    *port,
-                    token,
-                    *implied_port,
-                )
-            }
+            } => self.handle_announce_peer_query(
+                msg.transaction_id.clone(),
+                from,
+                *info_hash,
+                *port,
+                token,
+                *implied_port,
+            ),
         };
 
         let bytes = response.to_bytes();
@@ -1107,7 +1103,11 @@ impl DhtActor {
                     addr: n.addr,
                 })
                 .collect();
-            tracing::debug!("No peers for {}, returning {} closest nodes", info_hash, nodes.len());
+            tracing::debug!(
+                "No peers for {}, returning {} closest nodes",
+                info_hash,
+                nodes.len()
+            );
             KrpcMessage::get_peers_response_with_nodes(tx_id, self.node_id, token, nodes)
         }
     }
