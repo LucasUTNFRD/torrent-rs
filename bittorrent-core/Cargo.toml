@@ -28,8 +28,5 @@ magnet-uri = { path = "../magnet-uri/" }
 mainline-dht = { path = "../mainline-dht/" }
 
 [lints.clippy]
-pedantic = "deny"
-nursery = "deny"
-# [lints.clippy]
-# unwrap_used = "deny"
-# allow-unwrap-in-tests = "allow"
+pedantic = "warn"
+nursery = "warn"

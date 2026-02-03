@@ -10,6 +10,11 @@ build:
 lint:
     cargo clippy --all-targets --workspace -- -D warnings
 
+
+# Run clippy pedantic lints
+lint-pedantic:
+    cargo clippy -- -D clippy::pedantic -D clippy::nursery
+
 # Run all workspace tests
 test:
     cargo test --workspace
