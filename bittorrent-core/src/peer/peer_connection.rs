@@ -415,6 +415,9 @@ impl Peer<Connected> {
             Message::Request(block) => self.on_request().await?,
             Message::Piece(block) => self.on_incoming_piece(block).await?,
             Message::Cancel(block) => self.on_cancel().await?,
+            Message::Port { port } => {
+                todo!("");
+            }
             Message::Extended(extended) => match extended {
                 ExtendedMessage::Handshake(handshake) => {
                     self.on_extended_handshake(handshake).await?
