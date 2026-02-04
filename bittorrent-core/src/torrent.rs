@@ -52,6 +52,9 @@ impl std::fmt::Display for Pid {
 }
 static PEER_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
+/// Maximum number of connected peers allowed at one time
+const MAX_CONNECTED_PEERS: usize = 50;
+
 pub enum PeerSource {
     Inbound {
         stream: TcpStream,
@@ -366,16 +369,22 @@ impl Torrent {
         }
     }
 
-    // TODO: implement a retry mechanism for failed peer
     pub fn add_peer(&mut self, peer: PeerSource) {
+        let peer_addr = *peer.get_addr();
+
         // check if we already are connected to this peer?
-        let already_connected = self.peers.values().any(|p| p.addr == *peer.get_addr());
+        let already_connected = self.peers.values().any(|p| p.addr == peer_addr);
         if already_connected {
             return;
         }
 
-        if self.peers.len() >= 50 {
+        if self.peers.len() >= MAX_CONNECTED_PEERS {
             return;
+        }
+
+        // Remove from retry queue if present (we're trying to connect now)
+        if self.retry_queue.contains(&peer_addr) {
+            self.retry_queue.remove_peer(&peer_addr);
         }
 
         // Create peer info
