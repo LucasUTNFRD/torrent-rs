@@ -324,6 +324,9 @@ impl Torrent {
                     }
 
                 }
+                _ = self.retry_timer.tick() => {
+                    self.process_retry_queue();
+                }
                 // _ = debug_interval.tick() => {
                 //       if let Some(ref piece_manager) = self.piece_mananger {
                 //         piece_manager.debug_print_state();
@@ -706,6 +709,24 @@ impl Torrent {
         }
 
         self.metrics.connected_peers.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    /// Process the retry queue and attempt to reconnect to ready peers
+    fn process_retry_queue(&mut self) {
+        use std::time::Instant;
+
+        let available_slots = MAX_CONNECTED_PEERS.saturating_sub(self.peers.len());
+        if available_slots == 0 {
+            return;
+        }
+
+        let now = Instant::now();
+        let ready_peers = self.retry_queue.get_ready_peers(now);
+
+        for addr in ready_peers.into_iter().take(available_slots) {
+            info!("Retrying connection to peer {}", addr);
+            self.add_peer(PeerSource::Outbound(addr));
+        }
     }
 
     /// Send a message to a specific peer
