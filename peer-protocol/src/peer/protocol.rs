@@ -80,12 +80,14 @@ impl Handshake {
 
     pub const HANDSHAKE_LEN: usize = 68;
     pub const EXTENSION_PROTOCOL_FLAG: u8 = 0x10; // bit 43 (5th bit of 6th byte)
+    pub const DHT_FLAG: u8 = 0x01; // bit 63
 
     pub fn new(peer_id: PeerID, info_hash: InfoHash) -> Self {
         let mut reserved = [0u8; 8];
 
         // Enable extension protocol support
         reserved[5] |= Self::EXTENSION_PROTOCOL_FLAG;
+        reserved[7] |= Self::DHT_FLAG;
 
         Handshake {
             peer_id,
@@ -97,6 +99,10 @@ impl Handshake {
     /// The bit selected for the extension protocol is bit 20 from the right (counting starts at 0). So (reserved_byte[5] & 0x10) is the expression to use for checking if the client supports extended messaging.
     pub fn support_extended_message(&self) -> bool {
         self.reserved[5] & Self::EXTENSION_PROTOCOL_FLAG != 0
+    }
+
+    pub fn support_dht(&self) -> bool {
+        self.reserved[7] & Self::DHT_FLAG != 0
     }
 
     pub fn to_bytes(&self) -> Bytes {
