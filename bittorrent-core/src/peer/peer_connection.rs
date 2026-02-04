@@ -417,6 +417,7 @@ impl Peer<Connected> {
             Message::Cancel(block) => self.on_cancel().await?,
             Message::Port { port } => {
                 // Peers that receive this message should attempt to ping the node on the received port and IP address of the remote peer.
+                tracing::info!("Received PORT message");
                 let node_addr: SocketAddr = SocketAddr::new(self.addr.ip(), port);
                 let _ = self
                     .torrent_tx

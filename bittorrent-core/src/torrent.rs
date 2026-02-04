@@ -264,7 +264,7 @@ impl Torrent {
                 shutdown_rx,
                 peers: HashMap::default(),
                 tx: tx.clone(),
-                rx: rx,
+                rx ,
                 bitfield: Bitfield::new(),
                 piece_mananger: None,
                 // piece_collector: None,
@@ -539,23 +539,16 @@ impl Torrent {
                     warn!(?e);
                 }
             }
-            DhtAddNode { node_addr } => {
+            TorrentMessage::DhtAddNode { node_addr } => {
                 if let Some(dht_client) = self.dht_client.as_ref() {
                     let dht_client = dht_client.clone();
-                    tokio::task::spawn(async move {
-                        if let Err(e) = dht_client.try_add_node(node_addr).await {
-                            warn!(?e);
-                        }
-                    });
+                    tokio::task::spawn(async move { dht_client.try_add_node(node_addr).await });
                 }
             }
         }
+
         Ok(())
     }
-
-    // async fn incoming_have(&self) {
-    //     todo!()
-    // }
 
     async fn incoming_block(&mut self, pid: Pid, block: Block) {
         let piece_index = block.index;

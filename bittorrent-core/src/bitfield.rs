@@ -97,6 +97,10 @@ impl Bitfield {
         }
     }
 
+    pub const fn is_empty(&self) -> bool {
+        self.num_pieces == 0
+    }
+
     /// Validate an unchecked bitfield to the expected ``num_pieces``
     pub fn validate(&mut self, num_pieces: usize) -> Result<(), BitfieldError> {
         let expected_bytes = num_pieces.div_ceil(8);
