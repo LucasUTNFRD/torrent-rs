@@ -11,8 +11,8 @@ use std::{
     collections::{HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, ToSocketAddrs},
     sync::{
-        Arc, RwLock,
         atomic::{AtomicU16, Ordering},
+        Arc, Mutex, RwLock,
     },
     time::Duration,
 };
@@ -391,38 +391,30 @@ struct PendingRequest {
 }
 
 // ============================================================================
-// Internal: DHT Actor
+// Internal: DHT Client (Shared State)
 // ============================================================================
 
-struct DhtActor {
+#[derive(Clone)]
+struct DhtClient {
     socket: Arc<UdpSocket>,
-    node_id: NodeId,
-    routing_table: RoutingTable,
-    // Arc<RwLock<RoutingTable>>,
-    command_rx: mpsc::Receiver<DhtCommand>,
-    next_tx_id: AtomicU16,
-    pending: HashMap<Vec<u8>, PendingRequest>,
-    /// Storage for announced peers.
-    peer_store: PeerStore,
-    /// Token generation and validation.
-    token_manager: TokenManager,
+    node_id_shared: Arc<RwLock<NodeId>>,
+    routing_table: Arc<RwLock<RoutingTable>>,
+    next_tx_id: Arc<AtomicU16>,
+    pending: Arc<Mutex<HashMap<Vec<u8>, PendingRequest>>>,
+    peer_store: Arc<RwLock<PeerStore>>,
+    token_manager: Arc<RwLock<TokenManager>>,
 }
 
-impl DhtActor {
-    fn new(
-        socket: Arc<UdpSocket>,
-        node_id: NodeId,
-        command_rx: mpsc::Receiver<DhtCommand>,
-    ) -> Self {
+impl DhtClient {
+    fn new(socket: Arc<UdpSocket>, initial_id: NodeId) -> Self {
         Self {
             socket,
-            node_id,
-            routing_table: RoutingTable::new(node_id), // Arc::new(RwLock::new(RoutingTable::new(node_id))),
-            command_rx,
-            next_tx_id: AtomicU16::new(1),
-            pending: HashMap::new(),
-            peer_store: PeerStore::new(),
-            token_manager: TokenManager::new(),
+            node_id_shared: Arc::new(RwLock::new(initial_id)),
+            routing_table: Arc::new(RwLock::new(RoutingTable::new(initial_id))),
+            next_tx_id: Arc::new(AtomicU16::new(1)),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            peer_store: Arc::new(RwLock::new(PeerStore::new())),
+            token_manager: Arc::new(RwLock::new(TokenManager::new())),
         }
     }
 
@@ -430,64 +422,11 @@ impl DhtActor {
         self.next_tx_id.fetch_add(1, Ordering::Relaxed)
     }
 
-    async fn run(mut self, shared_node_id: Arc<std::sync::RwLock<NodeId>>) -> Result<(), DhtError> {
-        let mut buf = [0u8; 1500];
-
-        loop {
-            tokio::select! {
-                // Handle incoming UDP packets
-                result = self.socket.recv_from(&mut buf) => {
-                    match result {
-                        Ok((size, from)) => {
-                            self.handle_incoming(&buf[..size], from).await;
-                        }
-                        Err(e) => {
-                            tracing::warn!("UDP recv error: {e}");
-                        }
-                    }
-                }
-
-                // Handle commands from the public API
-                Some(cmd) = self.command_rx.recv() => {
-                    match cmd {
-                        DhtCommand::Bootstrap { nodes, resp } => {
-                            let result = self.bootstrap(&nodes).await;
-                            if result.is_ok() {
-                                // Update the shared node ID
-                                *shared_node_id.write().unwrap() = self.node_id;
-                            }
-                            let _ = resp.send(result);
-                        }
-                        DhtCommand::FindNode { target, resp } => {
-                            let result = self.iterative_find_node(target).await;
-                            let _ = resp.send(result);
-                        }
-                        DhtCommand::GetPeers { info_hash, resp } => {
-                            let result = self.iterative_get_peers(info_hash).await;
-                            let _ = resp.send(result);
-                        }
-                        DhtCommand::Announce { info_hash, port, implied_port, resp } => {
-                            let result = self.announce(info_hash, port, implied_port).await;
-                            let _ = resp.send(result);
-                        }
-                        DhtCommand::GetRoutingTableSize { resp } => {
-                            let _ = resp.send(self.routing_table.node_count());
-                        }
-                        DhtCommand::Shutdown => {
-                            tracing::info!("DHT shutdown requested");
-                            return Ok(());
-                        }
-                    }
-                }
-            }
-        }
+    fn node_id(&self) -> NodeId {
+        *self.node_id_shared.read().unwrap()
     }
 
-    // ========================================================================
-    // Bootstrap
-    // ========================================================================
-
-    async fn bootstrap(&mut self, bootstrap_nodes: &[String]) -> Result<NodeId, DhtError> {
+    async fn bootstrap(&self, bootstrap_nodes: &[String]) -> Result<NodeId, DhtError> {
         tracing::info!(
             "Starting DHT bootstrap with {} nodes",
             bootstrap_nodes.len()
@@ -536,12 +475,19 @@ impl DhtActor {
         }
 
         // Generate BEP 42 secure node ID
+        let mut secure_id = self.node_id();
         if let Some(ip) = external_ip {
-            let mut secure_id = NodeId::generate_random();
+            secure_id = NodeId::generate_random();
             secure_id.secure_node_id(&IpAddr::V4(ip));
-            self.node_id = secure_id;
-            self.routing_table = RoutingTable::new(secure_id);
-            tracing::info!("Generated BEP 42 secure node ID: {:?}", self.node_id);
+            
+            // Update shared node ID
+            *self.node_id_shared.write().unwrap() = secure_id;
+            
+            // Re-create routing table with new ID (or clear it)
+            // Ideally we'd keep the old routing table but update ID? No, distance metric changes.
+            *self.routing_table.write().unwrap() = RoutingTable::new(secure_id);
+            
+            tracing::info!("Generated BEP 42 secure node ID: {:?}", secure_id);
         } else {
             tracing::warn!("Could not discover external IP, using random node ID");
         }
@@ -549,13 +495,13 @@ impl DhtActor {
         // Add the first responding node
         if let Some((node_id, addr)) = first_node {
             let node = Node::new_good(node_id, addr);
-            self.routing_table.try_add_node(node);
+            self.routing_table.write().unwrap().try_add_node(node);
             tracing::info!("Added bootstrap node to routing table");
         }
 
         // Perform iterative find_node on ourselves to populate routing table
         tracing::info!("Starting iterative find_node to populate routing table...");
-        match self.iterative_find_node(self.node_id).await {
+        match self.iterative_find_node(secure_id).await {
             Ok(nodes) => {
                 tracing::info!("Iterative find_node found {} nodes", nodes.len());
             }
@@ -564,38 +510,38 @@ impl DhtActor {
             }
         }
 
-        let node_count = self.routing_table.node_count();
+        let node_count = self.routing_table.read().unwrap().node_count();
         if node_count == 0 {
             return Err(DhtError::BootstrapFailed);
         }
 
         tracing::info!("Bootstrap complete: {} nodes in routing table", node_count);
-        Ok(self.node_id)
+        Ok(secure_id)
     }
 
-    // ========================================================================
-    // Iterative Find Node (Kademlia lookup)
-    // ========================================================================
-
     async fn iterative_find_node(
-        &mut self,
+        &self,
         target: NodeId,
     ) -> Result<Vec<CompactNodeInfo>, DhtError> {
         // Get initial candidates from routing table
-        let initial = self.routing_table.get_closest_nodes(&target, K);
-
-        if initial.is_empty() {
+        let initial_nodes = self
+            .routing_table
+            .read()
+            .unwrap()
+            .get_closest_nodes(&target, K);
+            
+        if initial_nodes.is_empty() {
             tracing::debug!("iterative_find_node: no initial candidates in routing table");
             return Ok(Vec::new());
         }
 
         tracing::debug!(
             "iterative_find_node: starting with {} candidates",
-            initial.len()
+            initial_nodes.len()
         );
 
         // Track all nodes we know about, sorted by distance
-        let mut candidates: Vec<CompactNodeInfo> = initial
+        let mut candidates: Vec<CompactNodeInfo> = initial_nodes
             .into_iter()
             .map(|n| CompactNodeInfo {
                 node_id: n.node_id,
@@ -604,10 +550,10 @@ impl DhtActor {
             .collect();
 
         // Track which nodes we've queried
-        let mut queried: HashSet<NodeId> = HashSet::new();
+        let queried: Arc<RwLock<HashSet<NodeId>>> = Arc::new(RwLock::new(HashSet::new()));
 
         // Track all nodes we've received
-        let mut all_nodes: Vec<CompactNodeInfo> = candidates.clone();
+        let all_nodes = Arc::new(Mutex::new(candidates.clone()));
 
         // Maximum iterations to prevent infinite loops
         let mut iterations = 0;
@@ -630,7 +576,7 @@ impl DhtActor {
             // Get unqueried candidates (up to ALPHA)
             let to_query: Vec<_> = candidates
                 .iter()
-                .filter(|n| !queried.contains(&n.node_id))
+                .filter(|n| !queried.read().unwrap().contains(&n.node_id))
                 .take(ALPHA)
                 .cloned()
                 .collect();
@@ -639,72 +585,76 @@ impl DhtActor {
                 break;
             }
 
-            // Query nodes sequentially (simpler than parallel for minimal impl)
+            // Query nodes in parallel
+            let mut futures = Vec::new();
             for node in to_query {
-                queried.insert(node.node_id);
+                queried.write().unwrap().insert(node.node_id);
+                let client = self.clone();
+                
+                futures.push(tokio::spawn(async move {
+                    (node.clone(), client.send_find_node(node.addr, target).await)
+                }));
+            }
 
-                match self.send_find_node(node.addr, target).await {
-                    Ok((msg, _)) => {
-                        // Mark node as good
-                        self.routing_table.mark_node_good(&node.node_id);
+            let results = futures::future::join_all(futures).await;
 
-                        // BEP 42 soft enforcement: log warning for non-compliant nodes
-                        if let Some(resp_node_id) = msg.get_node_id()
-                            && !resp_node_id.is_node_id_secure(IpAddr::V4(*node.addr.ip()))
-                        {
-                            tracing::debug!(
-                                "Non-compliant node ID from {} (soft enforcement)",
-                                node.addr
-                            );
-                        }
+            for result in results {
+                if let Ok((node, Ok((msg, _)))) = result {
+                     // Mark node as good
+                     self.routing_table.write().unwrap().mark_node_good(&node.node_id);
 
-                        // Extract nodes from response
-                        if let MessageBody::Response(Response::FindNode { nodes, .. }) = msg.body {
-                            for node_info in nodes {
-                                // Add to routing table
-                                let new_node = Node::new(node_info.node_id, node_info.addr);
-                                self.routing_table.try_add_node(new_node);
+                     // BEP 42 soft enforcement: log warning for non-compliant nodes
+                     if let Some(resp_node_id) = msg.get_node_id()
+                         && !resp_node_id.is_node_id_secure(IpAddr::V4(*node.addr.ip()))
+                     {
+                         tracing::debug!(
+                             "Non-compliant node ID from {} (soft enforcement)",
+                             node.addr
+                         );
+                     }
 
-                                // Add to our candidates if not seen before
-                                if !all_nodes.iter().any(|n| n.node_id == node_info.node_id) {
-                                    all_nodes.push(node_info.clone());
-                                    candidates.push(node_info);
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::debug!("find_node to {} failed: {e}", node.addr);
-                    }
+                     // Extract nodes from response
+                     if let MessageBody::Response(Response::FindNode { nodes, .. }) = msg.body {
+                         let mut all_nodes_guard = all_nodes.lock().unwrap();
+                         for node_info in nodes {
+                             // Add to routing table
+                             let new_node = Node::new(node_info.node_id, node_info.addr);
+                             self.routing_table.write().unwrap().try_add_node(new_node);
+
+                             // Add to our candidates if not seen before
+                             if !all_nodes_guard.iter().any(|n| n.node_id == node_info.node_id) {
+                                 all_nodes_guard.push(node_info.clone());
+                                 candidates.push(node_info);
+                             }
+                         }
+                     }
                 }
             }
         }
 
+        let mut all_nodes_vec = all_nodes.lock().unwrap().clone();
+        
         // Return the K closest nodes we found
-        all_nodes.sort_by(|a, b| {
+        all_nodes_vec.sort_by(|a, b| {
             let dist_a = a.node_id ^ target;
             let dist_b = b.node_id ^ target;
             dist_a.as_bytes().cmp(&dist_b.as_bytes())
         });
-        all_nodes.truncate(K);
+        all_nodes_vec.truncate(K);
 
-        Ok(all_nodes)
+        Ok(all_nodes_vec)
     }
 
-    // ========================================================================
-    // Iterative Get Peers (Kademlia lookup for peers)
-    // ========================================================================
-
     async fn iterative_get_peers(
-        &mut self,
+        &self,
         info_hash: InfoHash,
     ) -> Result<GetPeersResult, DhtError> {
         let target = NodeId::from(&info_hash);
 
         // Get initial candidates from routing table
-        let initial = self.routing_table.get_closest_nodes(&target, K);
+        let initial_nodes = self.routing_table.read().unwrap().get_closest_nodes(&target, K);
 
-        if initial.is_empty() {
+        if initial_nodes.is_empty() {
             tracing::debug!("iterative_get_peers: no initial candidates in routing table");
             return Ok(GetPeersResult {
                 peers: Vec::new(),
@@ -715,12 +665,12 @@ impl DhtActor {
 
         tracing::debug!(
             "iterative_get_peers: starting with {} candidates for {}",
-            initial.len(),
+            initial_nodes.len(),
             info_hash
         );
 
         // Track all nodes we know about, sorted by distance
-        let mut candidates: Vec<CompactNodeInfo> = initial
+        let mut candidates: Vec<CompactNodeInfo> = initial_nodes
             .into_iter()
             .map(|n| CompactNodeInfo {
                 node_id: n.node_id,
@@ -729,13 +679,13 @@ impl DhtActor {
             .collect();
 
         // Track which nodes we've queried
-        let mut queried: HashSet<NodeId> = HashSet::new();
+        let queried: Arc<RwLock<HashSet<NodeId>>> = Arc::new(RwLock::new(HashSet::new()));
 
         // Collect peers from all responses
-        let mut all_peers: Vec<SocketAddrV4> = Vec::new();
+        let all_peers = Arc::new(Mutex::new(Vec::new()));
 
         // Track nodes that responded with their tokens (for subsequent announce)
-        let mut nodes_with_tokens: Vec<(CompactNodeInfo, Vec<u8>)> = Vec::new();
+        let nodes_with_tokens = Arc::new(Mutex::new(Vec::new()));
 
         // Maximum iterations to prevent infinite loops
         let mut iterations = 0;
@@ -758,7 +708,7 @@ impl DhtActor {
             // Get unqueried candidates (up to ALPHA)
             let to_query: Vec<_> = candidates
                 .iter()
-                .filter(|n| !queried.contains(&n.node_id))
+                .filter(|n| !queried.read().unwrap().contains(&n.node_id))
                 .take(ALPHA)
                 .cloned()
                 .collect();
@@ -767,86 +717,91 @@ impl DhtActor {
                 break;
             }
 
-            // Query nodes sequentially
+            // Query nodes in parallel
+            let mut futures = Vec::new();
             for node in to_query {
-                queried.insert(node.node_id);
+                queried.write().unwrap().insert(node.node_id);
+                let client = self.clone();
+                futures.push(tokio::spawn(async move {
+                    (node.clone(), client.send_get_peers(node.addr, info_hash).await)
+                }));
+            }
+            
+            let results = futures::future::join_all(futures).await;
 
-                match self.send_get_peers(node.addr, info_hash).await {
-                    Ok((msg, _)) => {
-                        // Mark node as good
-                        self.routing_table.mark_node_good(&node.node_id);
+            for result in results {
+                if let Ok((node, Ok((msg, _)))) = result {
+                     // Mark node as good
+                     self.routing_table.write().unwrap().mark_node_good(&node.node_id);
 
-                        // Extract response data
-                        if let MessageBody::Response(Response::GetPeers {
-                            token,
-                            values,
-                            nodes,
-                            ..
-                        }) = msg.body
-                        {
-                            // Store token for later announce
-                            nodes_with_tokens.push((node.clone(), token));
+                     // Extract response data
+                     if let MessageBody::Response(Response::GetPeers {
+                         token,
+                         values,
+                         nodes,
+                         ..
+                     }) = msg.body
+                     {
+                         // Store token for later announce
+                         nodes_with_tokens.lock().unwrap().push((node.clone(), token));
 
-                            // Collect peers if present
-                            if let Some(peers) = values {
-                                tracing::debug!("Got {} peers from {}", peers.len(), node.addr);
-                                all_peers.extend(peers);
-                            }
+                         // Collect peers if present
+                         if let Some(peers) = values {
+                             tracing::debug!("Got {} peers from {}", peers.len(), node.addr);
+                             all_peers.lock().unwrap().extend(peers);
+                         }
 
-                            // Add closer nodes to candidates
-                            if let Some(new_nodes) = nodes {
-                                for node_info in new_nodes {
-                                    // Add to routing table
-                                    let new_node = Node::new(node_info.node_id, node_info.addr);
-                                    self.routing_table.try_add_node(new_node);
+                         // Add closer nodes to candidates
+                         if let Some(new_nodes) = nodes {
+                             for node_info in new_nodes {
+                                 // Add to routing table
+                                 let new_node = Node::new(node_info.node_id, node_info.addr);
+                                 self.routing_table.write().unwrap().try_add_node(new_node);
 
-                                    // Add to candidates if not seen before
-                                    if !queried.contains(&node_info.node_id)
-                                        && !candidates
-                                            .iter()
-                                            .any(|n| n.node_id == node_info.node_id)
-                                    {
-                                        candidates.push(node_info);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::debug!("get_peers to {} failed: {e}", node.addr);
-                    }
+                                 // Add to candidates if not seen before
+                                 if !queried.read().unwrap().contains(&node_info.node_id)
+                                     && !candidates
+                                         .iter()
+                                         .any(|n| n.node_id == node_info.node_id)
+                                 {
+                                     candidates.push(node_info);
+                                 }
+                             }
+                         }
+                     }
                 }
             }
         }
 
+        let mut nodes_with_tokens_vec = nodes_with_tokens.lock().unwrap().clone();
+        
         // Sort nodes_with_tokens by distance and truncate to K
-        nodes_with_tokens.sort_by(|a, b| {
+        nodes_with_tokens_vec.sort_by(|a, b| {
             let dist_a = a.0.node_id ^ target;
             let dist_b = b.0.node_id ^ target;
             dist_a.as_bytes().cmp(&dist_b.as_bytes())
         });
-        nodes_with_tokens.truncate(K);
+        nodes_with_tokens_vec.truncate(K);
+
+        let all_peers_vec = all_peers.lock().unwrap().clone();
+        let queried_count = queried.read().unwrap().len();
 
         tracing::info!(
             "iterative_get_peers: found {} peers from {} nodes for {}",
-            all_peers.len(),
-            queried.len(),
+            all_peers_vec.len(),
+            queried_count,
             info_hash
         );
 
         Ok(GetPeersResult {
-            peers: all_peers,
-            nodes_contacted: queried.len(),
-            nodes_with_tokens,
+            peers: all_peers_vec,
+            nodes_contacted: queried_count,
+            nodes_with_tokens: nodes_with_tokens_vec,
         })
     }
 
-    // ========================================================================
-    // Announce
-    // ========================================================================
-
     async fn announce(
-        &mut self,
+        &self,
         info_hash: InfoHash,
         port: u16,
         implied_port: bool,
@@ -885,38 +840,34 @@ impl DhtActor {
         })
     }
 
-    // ========================================================================
-    // Send queries
-    // ========================================================================
-
-    async fn ping(&mut self, addr: SocketAddrV4) -> Result<(KrpcMessage, SocketAddr), DhtError> {
+    async fn ping(&self, addr: SocketAddrV4) -> Result<(KrpcMessage, SocketAddr), DhtError> {
         let tx_id = self.next_transaction_id();
-        let msg = KrpcMessage::ping_query(tx_id, self.node_id);
+        let msg = KrpcMessage::ping_query(tx_id, self.node_id());
         self.send_and_wait(msg, SocketAddr::V4(addr)).await
     }
 
     async fn send_find_node(
-        &mut self,
+        &self,
         addr: SocketAddrV4,
         target: NodeId,
     ) -> Result<(KrpcMessage, SocketAddr), DhtError> {
         let tx_id = self.next_transaction_id();
-        let msg = KrpcMessage::find_node_query(tx_id, self.node_id, target);
+        let msg = KrpcMessage::find_node_query(tx_id, self.node_id(), target);
         self.send_and_wait(msg, SocketAddr::V4(addr)).await
     }
 
     async fn send_get_peers(
-        &mut self,
+        &self,
         addr: SocketAddrV4,
         info_hash: InfoHash,
     ) -> Result<(KrpcMessage, SocketAddr), DhtError> {
         let tx_id = self.next_transaction_id();
-        let msg = KrpcMessage::get_peers_query(tx_id, self.node_id, info_hash);
+        let msg = KrpcMessage::get_peers_query(tx_id, self.node_id(), info_hash);
         self.send_and_wait(msg, SocketAddr::V4(addr)).await
     }
 
     async fn send_announce_peer(
-        &mut self,
+        &self,
         addr: SocketAddrV4,
         info_hash: InfoHash,
         port: u16,
@@ -926,7 +877,7 @@ impl DhtActor {
         let tx_id = self.next_transaction_id();
         let msg = KrpcMessage::announce_peer_query(
             tx_id,
-            self.node_id,
+            self.node_id(),
             info_hash,
             port,
             token,
@@ -936,17 +887,18 @@ impl DhtActor {
     }
 
     async fn send_and_wait(
-        &mut self,
+        &self,
         msg: KrpcMessage,
         addr: SocketAddr,
     ) -> Result<(KrpcMessage, SocketAddr), DhtError> {
-        // Why not use directly u16?
         let tx_id = msg.transaction_id.0.clone();
         let bytes = msg.to_bytes();
 
         // Create response channel
         let (resp_tx, mut resp_rx) = oneshot::channel();
         self.pending
+            .lock()
+            .unwrap()
             .insert(tx_id.clone(), PendingRequest { resp_tx });
 
         // Send the message
@@ -959,13 +911,13 @@ impl DhtActor {
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
-                self.pending.remove(&tx_id);
+                self.pending.lock().unwrap().remove(&tx_id);
                 return Err(DhtError::Timeout);
             }
 
             tokio::select! {
                 result = &mut resp_rx => {
-                    self.pending.remove(&tx_id);
+                    self.pending.lock().unwrap().remove(&tx_id);
                     match result {
                         Ok(response) => return Ok((response, addr)),
                         Err(_) => return Err(DhtError::ChannelClosed),
@@ -977,7 +929,7 @@ impl DhtActor {
                             self.handle_incoming(&buf[..size], from).await;
                         }
                         Ok(Err(e)) => {
-                            self.pending.remove(&tx_id);
+                            self.pending.lock().unwrap().remove(&tx_id);
                             return Err(DhtError::Network(e));
                         }
                         Err(_) => {
@@ -989,11 +941,7 @@ impl DhtActor {
         }
     }
 
-    // ========================================================================
-    // Handle incoming messages
-    // ========================================================================
-
-    async fn handle_incoming(&mut self, data: &[u8], from: SocketAddr) {
+    async fn handle_incoming(&self, data: &[u8], from: SocketAddr) {
         let msg = match KrpcMessage::from_bytes(data) {
             Ok(m) => m,
             Err(e) => {
@@ -1013,9 +961,9 @@ impl DhtActor {
                 tracing::debug!(
                     "Received response from {from}, tx_id={:?}, pending_count={}",
                     tx_id,
-                    self.pending.len()
+                    self.pending.lock().unwrap().len()
                 );
-                if let Some(pending) = self.pending.remove(&tx_id) {
+                if let Some(pending) = self.pending.lock().unwrap().remove(&tx_id) {
                     let _ = pending.resp_tx.send(msg);
                 } else {
                     tracing::debug!("Received response for unknown transaction from {from}");
@@ -1027,13 +975,13 @@ impl DhtActor {
         }
     }
 
-    async fn handle_query(&mut self, msg: &KrpcMessage, query: &Query, from: SocketAddr) {
+    async fn handle_query(&self, msg: &KrpcMessage, query: &Query, from: SocketAddr) {
         let response = match query {
             Query::Ping { .. } => {
-                KrpcMessage::ping_response(msg.transaction_id.clone(), self.node_id)
+                KrpcMessage::ping_response(msg.transaction_id.clone(), self.node_id())
             }
             Query::FindNode { target, .. } => {
-                let closest = self.routing_table.get_closest_nodes(target, K);
+                let closest = self.routing_table.read().unwrap().get_closest_nodes(target, K);
                 let nodes: Vec<CompactNodeInfo> = closest
                     .into_iter()
                     .map(|n| CompactNodeInfo {
@@ -1041,7 +989,7 @@ impl DhtActor {
                         addr: n.addr,
                     })
                     .collect();
-                KrpcMessage::find_node_response(msg.transaction_id.clone(), self.node_id, nodes)
+                KrpcMessage::find_node_response(msg.transaction_id.clone(), self.node_id(), nodes)
             }
             Query::GetPeers { info_hash, .. } => {
                 self.handle_get_peers_query(msg.transaction_id.clone(), from, info_hash)
@@ -1068,9 +1016,8 @@ impl DhtActor {
         }
     }
 
-    /// Handle a get_peers query from another node.
     fn handle_get_peers_query(
-        &mut self,
+        &self,
         tx_id: TransactionId,
         from: SocketAddr,
         info_hash: &InfoHash,
@@ -1084,18 +1031,18 @@ impl DhtActor {
         };
 
         // Generate token for this IP
-        let token = self.token_manager.generate(from_v4.ip());
+        let token = self.token_manager.write().unwrap().generate(from_v4.ip());
 
         // Check if we have peers for this infohash
-        let peers = self.peer_store.get_peers(info_hash);
+        let peers = self.peer_store.write().unwrap().get_peers(info_hash);
 
         if !peers.is_empty() {
             tracing::debug!("Returning {} peers for {}", peers.len(), info_hash);
-            KrpcMessage::get_peers_response_with_values(tx_id, self.node_id, token, peers)
+            KrpcMessage::get_peers_response_with_values(tx_id, self.node_id(), token, peers)
         } else {
             // Return closest nodes
             let target = NodeId::from(info_hash);
-            let closest = self.routing_table.get_closest_nodes(&target, K);
+            let closest = self.routing_table.read().unwrap().get_closest_nodes(&target, K);
             let nodes: Vec<CompactNodeInfo> = closest
                 .into_iter()
                 .map(|n| CompactNodeInfo {
@@ -1108,13 +1055,12 @@ impl DhtActor {
                 info_hash,
                 nodes.len()
             );
-            KrpcMessage::get_peers_response_with_nodes(tx_id, self.node_id, token, nodes)
+            KrpcMessage::get_peers_response_with_nodes(tx_id, self.node_id(), token, nodes)
         }
     }
 
-    /// Handle an announce_peer query from another node.
     fn handle_announce_peer_query(
-        &mut self,
+        &self,
         tx_id: TransactionId,
         from: SocketAddr,
         info_hash: InfoHash,
@@ -1131,7 +1077,7 @@ impl DhtActor {
         };
 
         // Validate token
-        if !self.token_manager.validate(from_v4.ip(), token) {
+        if !self.token_manager.write().unwrap().validate(from_v4.ip(), token) {
             tracing::debug!("Invalid token from {} for announce_peer", from);
             return KrpcMessage::error_response(
                 tx_id,
@@ -1145,9 +1091,85 @@ impl DhtActor {
         let peer_addr = SocketAddrV4::new(*from_v4.ip(), peer_port);
 
         // Store the peer
-        self.peer_store.add_peer(info_hash, peer_addr);
+        self.peer_store.write().unwrap().add_peer(info_hash, peer_addr);
         tracing::debug!("Stored peer {} for {}", peer_addr, info_hash);
 
-        KrpcMessage::announce_peer_response(tx_id, self.node_id)
+        KrpcMessage::announce_peer_response(tx_id, self.node_id())
+    }
+}
+
+// ============================================================================
+// Internal: DHT Actor
+// ============================================================================
+
+struct DhtActor {
+    client: DhtClient,
+    command_rx: mpsc::Receiver<DhtCommand>,
+}
+
+impl DhtActor {
+    fn new(
+        socket: Arc<UdpSocket>,
+        node_id: NodeId,
+        command_rx: mpsc::Receiver<DhtCommand>,
+    ) -> Self {
+        Self {
+            client: DhtClient::new(socket, node_id),
+            command_rx,
+        }
+    }
+
+    async fn run(mut self, shared_node_id: Arc<std::sync::RwLock<NodeId>>) -> Result<(), DhtError> {
+        let mut buf = [0u8; 1500];
+
+        loop {
+            tokio::select! {
+                // Handle incoming UDP packets
+                result = self.client.socket.recv_from(&mut buf) => {
+                    match result {
+                        Ok((size, from)) => {
+                            self.client.handle_incoming(&buf[..size], from).await;
+                        }
+                        Err(e) => {
+                            tracing::warn!("UDP recv error: {e}");
+                        }
+                    }
+                }
+
+                // Handle commands from the public API
+                Some(cmd) = self.command_rx.recv() => {
+                    match cmd {
+                        DhtCommand::Bootstrap { nodes, resp } => {
+                            let result = self.client.bootstrap(&nodes).await;
+                            if result.is_ok() {
+                                // Update the shared node ID
+                                *shared_node_id.write().unwrap() = self.client.node_id();
+                            }
+                            let _ = resp.send(result);
+                        }
+                        DhtCommand::FindNode { target, resp } => {
+                            let result = self.client.iterative_find_node(target).await;
+                            let _ = resp.send(result);
+                        }
+                        DhtCommand::GetPeers { info_hash, resp } => {
+                            let result = self.client.iterative_get_peers(info_hash).await;
+                            let _ = resp.send(result);
+                        }
+                        DhtCommand::Announce { info_hash, port, implied_port, resp } => {
+                            let result = self.client.announce(info_hash, port, implied_port).await;
+                            let _ = resp.send(result);
+                        }
+                        DhtCommand::GetRoutingTableSize { resp } => {
+                            let node_count = self.client.routing_table.read().unwrap().node_count();
+                            let _ = resp.send(node_count);
+                        }
+                        DhtCommand::Shutdown => {
+                            tracing::info!("DHT shutdown requested");
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }
     }
 }

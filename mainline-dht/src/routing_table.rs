@@ -112,7 +112,7 @@ impl RoutingTable {
     }
 
     /// Get the K closest nodes to a target ID.
-    pub fn get_closest_nodes(&self, target: &NodeId, k: usize) -> Vec<&Node> {
+    pub fn get_closest_nodes(&self, target: &NodeId, k: usize) -> Vec<Node> {
         // Collect all nodes with their distances
         let mut nodes_with_distance: Vec<_> = self
             .buckets
@@ -121,7 +121,7 @@ impl RoutingTable {
             .filter(|node| node.is_good() || node.is_questionable())
             .map(|node| {
                 let distance = node.node_id ^ *target;
-                (distance, node)
+                (distance, node.clone())
             })
             .collect();
 
