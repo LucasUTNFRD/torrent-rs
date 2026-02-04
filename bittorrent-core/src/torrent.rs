@@ -423,9 +423,9 @@ impl Torrent {
 
     async fn handle_message(&mut self, msg: TorrentMessage) -> Result<(), TorrentError> {
         match msg {
-            TorrentMessage::PeerDisconnected(pid, bitfield) => self.clean_up_peer(pid, bitfield),
+            TorrentMessage::PeerDisconnected(pid, bitfield) => self.clean_up_peer(pid, bitfield, None),
             TorrentMessage::PeerError(pid, err, bitfield) => {
-                self.clean_up_peer(pid, bitfield);
+                self.clean_up_peer(pid, bitfield, Some(err));
             }
             TorrentMessage::Have { pid, piece_idx } => {
                 // let p = self.piece_picker.as_mut().expect("init");
@@ -676,10 +676,20 @@ impl Torrent {
         Ok(())
     }
 
-    fn clean_up_peer(&mut self, pid: Pid, bitfield: Option<Bitfield>) {
+    fn clean_up_peer(&mut self, pid: Pid, bitfield: Option<Bitfield>, error: Option<ConnectionError>) {
         info!("peer disconnected {pid:?}");
 
+        let peer_addr = self.peers.get(&pid).map(|p| p.addr);
+
         let p = self.peers.remove(&pid);
+
+        if let Some(addr) = peer_addr {
+            // Add to retry queue if there was an error
+            if error.is_some() {
+                self.retry_queue.add_failed_peer(addr, error.as_ref());
+                info!("Added peer {} to retry queue", addr);
+            }
+        }
 
         let requests: Vec<_> = p
             .unwrap()
