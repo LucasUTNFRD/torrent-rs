@@ -7,9 +7,9 @@ use tokio::{net::TcpStream, sync::mpsc};
 
 use crate::peer::metrics::PeerMetrics;
 
+pub mod metrics;
 pub mod peer_connection;
 pub mod retry_queue;
-pub mod metrics;
 // Peer related
 
 #[derive(Debug, Clone)]

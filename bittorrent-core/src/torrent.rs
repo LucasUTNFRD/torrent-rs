@@ -274,7 +274,7 @@ impl Torrent {
                 retry_queue: PeerRetryQueue::default(),
                 retry_timer: tokio::time::interval(Duration::from_secs(30)),
                 tx: tx.clone(),
-                rx ,
+                rx,
                 bitfield: Bitfield::new(),
                 piece_mananger: None,
                 // piece_collector: None,
@@ -426,7 +426,9 @@ impl Torrent {
 
     async fn handle_message(&mut self, msg: TorrentMessage) -> Result<(), TorrentError> {
         match msg {
-            TorrentMessage::PeerDisconnected(pid, bitfield) => self.clean_up_peer(pid, bitfield, None),
+            TorrentMessage::PeerDisconnected(pid, bitfield) => {
+                self.clean_up_peer(pid, bitfield, None)
+            }
             TorrentMessage::PeerError(pid, err, bitfield) => {
                 self.clean_up_peer(pid, bitfield, Some(err));
             }
@@ -679,7 +681,12 @@ impl Torrent {
         Ok(())
     }
 
-    fn clean_up_peer(&mut self, pid: Pid, bitfield: Option<Bitfield>, error: Option<ConnectionError>) {
+    fn clean_up_peer(
+        &mut self,
+        pid: Pid,
+        bitfield: Option<Bitfield>,
+        error: Option<ConnectionError>,
+    ) {
         info!("peer disconnected {pid:?}");
 
         let peer_addr = self.peers.get(&pid).map(|p| p.addr);
