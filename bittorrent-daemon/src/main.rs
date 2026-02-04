@@ -12,9 +12,9 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tracing::{error, info, warn};
+use tracing_subscriber::Layer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::Layer;
 
 #[derive(Parser)]
 #[command(name = "btd")]
@@ -103,26 +103,22 @@ async fn run_ipc_server(session: Arc<Session>, port: u16) {
             };
 
             let response = match cmd {
-                IpcCommand::AddTorrent { path } => {
-                    match session.add_torrent(&path).await {
-                        Ok(id) => IpcResponse::Success {
-                            message: format!("Added torrent: {:?}", id),
-                        },
-                        Err(e) => IpcResponse::Error {
-                            message: format!("Failed to add torrent: {}", e),
-                        },
-                    }
-                }
-                IpcCommand::AddMagnet { uri } => {
-                    match session.add_magnet(&uri).await {
-                        Ok(id) => IpcResponse::Success {
-                            message: format!("Added magnet: {:?}", id),
-                        },
-                        Err(e) => IpcResponse::Error {
-                            message: format!("Failed to add magnet: {}", e),
-                        },
-                    }
-                }
+                IpcCommand::AddTorrent { path } => match session.add_torrent(&path).await {
+                    Ok(id) => IpcResponse::Success {
+                        message: format!("Added torrent: {:?}", id),
+                    },
+                    Err(e) => IpcResponse::Error {
+                        message: format!("Failed to add torrent: {}", e),
+                    },
+                },
+                IpcCommand::AddMagnet { uri } => match session.add_magnet(&uri).await {
+                    Ok(id) => IpcResponse::Success {
+                        message: format!("Added magnet: {:?}", id),
+                    },
+                    Err(e) => IpcResponse::Error {
+                        message: format!("Failed to add magnet: {}", e),
+                    },
+                },
                 IpcCommand::ListTorrents => match session.list_torrents().await {
                     Ok(list) => IpcResponse::TorrentList {
                         torrents: list.into_iter().map(|t| t.name).collect(),
@@ -133,7 +129,9 @@ async fn run_ipc_server(session: Arc<Session>, port: u16) {
                 },
             };
 
-            let _ = socket.write_all(&serde_json::to_vec(&response).unwrap()).await;
+            let _ = socket
+                .write_all(&serde_json::to_vec(&response).unwrap())
+                .await;
         });
     }
 }

@@ -2,9 +2,9 @@ use bittorrent_core::{Session, SessionConfig};
 use clap::Parser;
 use std::path::PathBuf;
 use tracing::info;
+use tracing_subscriber::Layer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::Layer;
 
 #[derive(Parser)]
 #[command(name = "bittorrent-cli")]
