@@ -416,7 +416,12 @@ impl Peer<Connected> {
             Message::Piece(block) => self.on_incoming_piece(block).await?,
             Message::Cancel(block) => self.on_cancel().await?,
             Message::Port { port } => {
-                todo!("");
+                // Peers that receive this message should attempt to ping the node on the received port and IP address of the remote peer.
+                let node_addr: SocketAddr = SocketAddr::new(self.addr.ip(), port);
+                let _ = self
+                    .torrent_tx
+                    .send(TorrentMessage::DhtAddNode { node_addr })
+                    .await;
             }
             Message::Extended(extended) => match extended {
                 ExtendedMessage::Handshake(handshake) => {

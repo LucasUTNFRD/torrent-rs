@@ -16,6 +16,7 @@ use bittorrent_common::{
 };
 use bytes::Bytes;
 use magnet_uri::Magnet;
+use mainline_dht::DhtHandler;
 use peer_protocol::protocol::{Block, BlockInfo, Message};
 use thiserror::Error;
 use tokio::{
@@ -26,7 +27,6 @@ use tokio::{
 use tracing::{debug, field::debug, info, instrument, warn};
 use tracker_client::{ClientState, Events, TrackerError, TrackerHandler, TrackerResponse};
 use url::Url;
-use mainline_dht::DhtHandler;
 
 use crate::{
     Storage,
@@ -89,7 +89,9 @@ pub enum TorrentMessage {
     ValidMetadata {
         resp: oneshot::Sender<Option<Arc<Info>>>,
     },
-
+    DhtAddNode {
+        node_addr: SocketAddr,
+    },
     Have {
         pid: Pid,
         piece_idx: u32,
@@ -538,6 +540,16 @@ impl Torrent {
                     warn!(?e);
                 }
             }
+            DhtAddNode { node_addr } => {
+                if let Some(dht_client) = self.dht_client.as_ref() {
+                    let dht_client = dht_client.clone();
+                    tokio::task::spawn(async move {
+                        if let Err(e) = dht_client.try_add_node(node_addr).await {
+                            warn!(?e);
+                        }
+                    });
+                }
+            }
         }
         Ok(())
     }
@@ -759,11 +771,7 @@ impl Torrent {
                         Ok(response) => {
                             let peer_count = response.peers.len();
                             if peer_count > 0 {
-                                tracing::info!(
-                                    "DHT: found {} peers for {}",
-                                    peer_count,
-                                    info_hash
-                                );
+                                tracing::info!("DHT: found {} peers for {}", peer_count, info_hash);
 
                                 // Convert DhtResponse to TrackerResponse for unified handling
                                 let tracker_response = TrackerResponse {

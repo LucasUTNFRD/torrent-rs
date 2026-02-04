@@ -256,6 +256,25 @@ impl Dht {
             .await
             .map_err(|_| DhtError::ChannelClosed)
     }
+
+    /// Try to add a node to the routing table by first pinging it.
+    ///
+    /// This method pings the node at the given address. If the node responds,
+    /// its contact information is added to the routing table according to
+    /// the usual rules (per BEP 0005).
+    pub async fn try_add_node(&self, addr: SocketAddr) -> Result<(), DhtError> {
+        let (resp_tx, resp_rx) = oneshot::channel();
+
+        self.command_tx
+            .send(DhtCommand::TryAddNode {
+                addr,
+                resp: resp_tx,
+            })
+            .await
+            .map_err(|_| DhtError::ChannelClosed)?;
+
+        resp_rx.await.map_err(|_| DhtError::ChannelClosed)?
+    }
 }
 
 // ============================================================================
@@ -312,11 +331,7 @@ impl DhtHandler {
     /// then announces to those nodes.
     ///
     /// Returns peers discovered during the get_peers phase.
-    pub async fn announce(
-        &self,
-        info_hash: InfoHash,
-        port: u16,
-    ) -> Result<DhtResponse, DhtError> {
+    pub async fn announce(&self, info_hash: InfoHash, port: u16) -> Result<DhtResponse, DhtError> {
         self.announce_ext(info_hash, port, false).await
     }
 
@@ -330,7 +345,10 @@ impl DhtHandler {
         port: u16,
         implied_port: bool,
     ) -> Result<DhtResponse, DhtError> {
-        let result = self.dht.announce_peer_ext(info_hash, port, implied_port).await?;
+        let result = self
+            .dht
+            .announce_peer_ext(info_hash, port, implied_port)
+            .await?;
 
         Ok(DhtResponse {
             peers: result.peers.into_iter().map(SocketAddr::V4).collect(),
@@ -340,6 +358,12 @@ impl DhtHandler {
     /// Get our current node ID.
     pub fn node_id(&self) -> NodeId {
         self.dht.node_id()
+    }
+
+    // TODO:
+    //A client using the DHT could receive by the PORT that they should attempt to ping the node on the received port and IP address of the remote peer. If a response to the ping is recieved, the node should attempt to insert the new contact information into their routing table according to the usual rules.
+    pub async fn try_add_node(&self, node_addr: SocketAddr) -> Result<(), DhtError> {
+        self.dht.try_add_node(node_addr).await
     }
 
     /// Get the number of nodes in our routing table.
@@ -379,6 +403,11 @@ enum DhtCommand {
     // Command with logging purposes
     GetRoutingTableSize {
         resp: oneshot::Sender<usize>,
+    },
+    /// Try to add a node by pinging it first, then adding to routing table if responsive.
+    TryAddNode {
+        addr: SocketAddr,
+        resp: oneshot::Sender<Result<(), DhtError>>,
     },
     Shutdown,
 }
@@ -472,6 +501,10 @@ impl DhtActor {
                         }
                         DhtCommand::GetRoutingTableSize { resp } => {
                             let _ = resp.send(self.routing_table.node_count());
+                        }
+                        DhtCommand::TryAddNode { addr, resp } => {
+                            let result = self.try_add_node(addr).await;
+                            let _ = resp.send(result);
                         }
                         DhtCommand::Shutdown => {
                             tracing::info!("DHT shutdown requested");
@@ -789,11 +822,7 @@ impl DhtActor {
 
                             // Collect peers if present
                             if let Some(peers) = values {
-                                tracing::debug!(
-                                    "Got {} peers from {}",
-                                    peers.len(),
-                                    node.addr
-                                );
+                                tracing::debug!("Got {} peers from {}", peers.len(), node.addr);
                                 all_peers.extend(peers);
                             }
 
@@ -806,7 +835,9 @@ impl DhtActor {
 
                                     // Add to candidates if not seen before
                                     if !queried.contains(&node_info.node_id)
-                                        && !candidates.iter().any(|n| n.node_id == node_info.node_id)
+                                        && !candidates
+                                            .iter()
+                                            .any(|n| n.node_id == node_info.node_id)
                                     {
                                         candidates.push(node_info);
                                     }
@@ -1054,16 +1085,14 @@ impl DhtActor {
                 token,
                 implied_port,
                 ..
-            } => {
-                self.handle_announce_peer_query(
-                    msg.transaction_id.clone(),
-                    from,
-                    *info_hash,
-                    *port,
-                    token,
-                    *implied_port,
-                )
-            }
+            } => self.handle_announce_peer_query(
+                msg.transaction_id.clone(),
+                from,
+                *info_hash,
+                *port,
+                token,
+                *implied_port,
+            ),
         };
 
         let bytes = response.to_bytes();
@@ -1107,7 +1136,11 @@ impl DhtActor {
                     addr: n.addr,
                 })
                 .collect();
-            tracing::debug!("No peers for {}, returning {} closest nodes", info_hash, nodes.len());
+            tracing::debug!(
+                "No peers for {}, returning {} closest nodes",
+                info_hash,
+                nodes.len()
+            );
             KrpcMessage::get_peers_response_with_nodes(tx_id, self.node_id, token, nodes)
         }
     }
@@ -1149,5 +1182,54 @@ impl DhtActor {
         tracing::debug!("Stored peer {} for {}", peer_addr, info_hash);
 
         KrpcMessage::announce_peer_response(tx_id, self.node_id)
+    }
+
+    /// Try to add a node to the routing table by pinging it first.
+    ///
+    /// Per BEP 0005: Peers that receive a PORT message should attempt to ping
+    /// the node on the received port and IP address. If a response is received,
+    /// the node should be inserted into the routing table according to the usual rules.
+    async fn try_add_node(&mut self, addr: SocketAddr) -> Result<(), DhtError> {
+        let SocketAddr::V4(addr_v4) = addr else {
+            return Err(DhtError::Network(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "IPv6 not supported",
+            )));
+        };
+
+        tracing::debug!("Attempting to add node {} to routing table", addr);
+
+        // Ping the node to verify it's responsive
+        match self.ping(addr_v4).await {
+            Ok((msg, _)) => {
+                // Extract the node ID from the response
+                if let Some(node_id) = msg.get_node_id() {
+                    // Create a new node marked as good (since it responded)
+                    let node = Node::new_good(node_id, addr_v4);
+
+                    // Add to routing table according to usual rules
+                    if self.routing_table.try_add_node(node) {
+                        tracing::info!("Added node {} ({:?}) to routing table", addr, node_id);
+                        Ok(())
+                    } else {
+                        tracing::debug!(
+                            "Node {} ({:?}) not added (bucket full or same as us)",
+                            addr,
+                            node_id
+                        );
+                        Ok(())
+                    }
+                } else {
+                    tracing::warn!("Ping response from {} missing node ID", addr);
+                    Err(DhtError::InvalidResponse(
+                        "Ping response missing node ID".to_string(),
+                    ))
+                }
+            }
+            Err(e) => {
+                tracing::debug!("Failed to ping node at {}: {}", addr, e);
+                Err(e)
+            }
+        }
     }
 }
