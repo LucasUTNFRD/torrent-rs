@@ -49,7 +49,7 @@ const DEFAULT_PORT: u16 = 6881;
 const QUERY_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Number of parallel queries in iterative lookup.
-const ALPHA: usize = 3;
+const ALPHA: usize = 8;
 
 // ============================================================================
 // Result Types
