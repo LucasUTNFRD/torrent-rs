@@ -36,6 +36,7 @@ use crate::{
         PeerMessage, PeerState,
         metrics::PeerMetrics,
         peer_connection::{ConnectionError, spawn_outgoing_peer},
+        retry_queue::PeerRetryQueue,
     },
     piece_picker::{AvailabilityUpdate, BlockRequest, PieceManager, PieceState},
 };
@@ -164,6 +165,8 @@ pub struct Torrent {
 
     metrics: Arc<Metrics>,
     peers: HashMap<Pid, PeerState>,
+    retry_queue: PeerRetryQueue,
+    retry_timer: tokio::time::Interval,
 
     // channels
     tx: mpsc::Sender<TorrentMessage>,
@@ -218,6 +221,8 @@ impl Torrent {
                 storage,
                 metrics: Arc::new(Metrics::default()),
                 peers: HashMap::default(),
+                retry_queue: PeerRetryQueue::default(),
+                retry_timer: tokio::time::interval(Duration::from_secs(30)),
                 shutdown_rx,
                 tx: tx.clone(),
                 rx,
@@ -263,6 +268,8 @@ impl Torrent {
                 metrics: Arc::new(Metrics::default()),
                 shutdown_rx,
                 peers: HashMap::default(),
+                retry_queue: PeerRetryQueue::default(),
+                retry_timer: tokio::time::interval(Duration::from_secs(30)),
                 tx: tx.clone(),
                 rx ,
                 bitfield: Bitfield::new(),
