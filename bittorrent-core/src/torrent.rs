@@ -89,7 +89,9 @@ pub enum TorrentMessage {
     ValidMetadata {
         resp: oneshot::Sender<Option<Arc<Info>>>,
     },
-
+    DhtAddNode {
+        node_addr: SocketAddr,
+    },
     Have {
         pid: Pid,
         piece_idx: u32,
@@ -535,6 +537,16 @@ impl Torrent {
                 debug!("{:?} rejected metadata request", pid);
                 if let Err(e) = self.metadata.metadata_request_reject(rejected_piece) {
                     warn!(?e);
+                }
+            }
+            DhtAddNode { node_addr } => {
+                if let Some(dht_client) = self.dht_client.as_ref() {
+                    let dht_client = dht_client.clone();
+                    tokio::task::spawn(async move {
+                        if let Err(e) = dht_client.try_add_node(node_addr).await {
+                            warn!(?e);
+                        }
+                    });
                 }
             }
         }

@@ -58,6 +58,7 @@ pub enum Message {
     Piece(Block),
     Cancel(BlockInfo),
     Extended(ExtendedMessage),
+    Port { port: u16 },
 }
 
 #[derive(Debug)]
@@ -80,12 +81,14 @@ impl Handshake {
 
     pub const HANDSHAKE_LEN: usize = 68;
     pub const EXTENSION_PROTOCOL_FLAG: u8 = 0x10; // bit 43 (5th bit of 6th byte)
+    pub const DHT_FLAG: u8 = 0x01; // bit 63
 
     pub fn new(peer_id: PeerID, info_hash: InfoHash) -> Self {
         let mut reserved = [0u8; 8];
 
         // Enable extension protocol support
         reserved[5] |= Self::EXTENSION_PROTOCOL_FLAG;
+        reserved[7] |= Self::DHT_FLAG;
 
         Handshake {
             peer_id,
@@ -97,6 +100,10 @@ impl Handshake {
     /// The bit selected for the extension protocol is bit 20 from the right (counting starts at 0). So (reserved_byte[5] & 0x10) is the expression to use for checking if the client supports extended messaging.
     pub fn support_extended_message(&self) -> bool {
         self.reserved[5] & Self::EXTENSION_PROTOCOL_FLAG != 0
+    }
+
+    pub fn support_dht(&self) -> bool {
+        self.reserved[7] & Self::DHT_FLAG != 0
     }
 
     pub fn to_bytes(&self) -> Bytes {
@@ -138,6 +145,7 @@ enum MessageId {
     Piece = 7,
     Cancel = 8,
     Extended = 20,
+    Port = 9,
 }
 
 impl From<u8> for MessageId {
@@ -152,6 +160,7 @@ impl From<u8> for MessageId {
             k if k == MessageId::Request as u8 => MessageId::Request,
             k if k == MessageId::Piece as u8 => MessageId::Piece,
             k if k == MessageId::Cancel as u8 => Self::Cancel,
+            k if k == MessageId::Port as u8 => Self::Port,
             k if k == MessageId::Extended as u8 => Self::Extended,
             _ => unreachable!(),
         }
@@ -232,6 +241,10 @@ impl Decoder for MessageCodec {
                     begin,
                     length,
                 })
+            }
+            MessageId::Port => {
+                let port = src.get_u16();
+                Message::Port { port }
             }
             MessageId::Extended => {
                 let extension_id = src.try_get_u8()?;
@@ -365,6 +378,12 @@ impl Encoder<Message> for MessageCodec {
                     Ok(())
                 }
             },
+            Message::Port { port } => {
+                dst.put_u32(3u32);
+                dst.put_u8(MessageId::Port as u8);
+                dst.put_u16(port);
+                Ok(())
+            }
         }
     }
 }
@@ -425,5 +444,32 @@ mod tests {
         assert!(decoded.support_extended_message());
         assert_eq!(handshake.peer_id, decoded.peer_id);
         assert_eq!(handshake.info_hash, decoded.info_hash);
+    }
+
+    #[test]
+    fn test_handshake_dht_support() {
+        let peer_id = PeerID::from([3u8; 20]);
+        let info_hash = InfoHash::from([4u8; 20]);
+
+        let handshake = Handshake::new(peer_id, info_hash);
+        assert!(handshake.support_dht());
+
+        let bytes = handshake.to_bytes();
+        let decoded = Handshake::from_bytes(&bytes).unwrap();
+        assert!(decoded.support_dht());
+        assert_eq!(handshake.peer_id, decoded.peer_id);
+        assert_eq!(handshake.info_hash, decoded.info_hash);
+    }
+
+    #[test]
+    fn test_port_message_round_trip() {
+        let msg = Message::Port { port: 6881 };
+        let mut codec = MessageCodec {};
+        let mut buffer = BytesMut::new();
+
+        codec.encode(msg.clone(), &mut buffer).unwrap();
+        let decoded = codec.decode(&mut buffer).unwrap().unwrap();
+
+        assert_eq!(msg, decoded);
     }
 }

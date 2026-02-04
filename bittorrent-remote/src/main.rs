@@ -60,7 +60,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let mut stream = TcpStream::connect(format!("127.0.0.1:{}", cli.port)).await?;
-    
+
     let req = serde_json::to_vec(&command)?;
     stream.write_all(&req).await?;
     stream.shutdown().await?;
