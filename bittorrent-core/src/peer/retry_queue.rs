@@ -140,6 +140,38 @@ impl PeerRetryQueue {
     pub fn mark_success(&mut self, addr: &SocketAddr) {
         self.remove_peer(addr);
     }
+
+    /// Add a peer to the retry queue with a scheduled retry time
+    /// Used when we can't connect due to max peers limit (not a failure)
+    pub fn add_pending_peer(&mut self, addr: SocketAddr, retry_in: Duration) {
+        // Check if we've reached the max queue size
+        if self.peers.len() >= MAX_RETRY_QUEUE_SIZE && !self.peers.contains_key(&addr) {
+            // Remove oldest entry to make room
+            if let Some(oldest) = self
+                .peers
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_attempt)
+                .map(|(addr, _)| *addr)
+            {
+                self.peers.remove(&oldest);
+            }
+        }
+
+        let now = Instant::now();
+
+        // Only add if not already in queue
+        if !self.peers.contains_key(&addr) {
+            let next_retry = now + retry_in;
+            let entry = FailedPeerEntry {
+                addr,
+                failed_attempts: 0,
+                last_attempt: now,
+                next_retry,
+                last_error: None,
+            };
+            self.peers.insert(addr, entry);
+        }
+    }
 }
 
 #[cfg(test)]

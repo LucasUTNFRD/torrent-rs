@@ -7,7 +7,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, AtomicUsize, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use bittorrent_common::{
@@ -319,6 +319,7 @@ impl Torrent {
                     }
                 }
                 Some(announce_msg) = announce_rx.recv() => {
+                    info!("received peers: {:?}",announce_msg.peers);
                     for peer in &announce_msg.peers {
                         self.add_peer(PeerSource::Outbound(*peer));
                     }
@@ -382,6 +383,9 @@ impl Torrent {
         }
 
         if self.peers.len() >= MAX_CONNECTED_PEERS {
+            // Add to retry queue to try again later when peer slots are available
+            self.retry_queue.add_pending_peer(peer_addr, Duration::from_secs(30));
+            info!("MAX PEERS REACHED, queued {} for later retry", peer_addr);
             return;
         }
 
@@ -672,7 +676,7 @@ impl Torrent {
                 .info()
                 .expect("metadata was not successfully constructed");
 
-            tracing::info!("Metadata Info: {:#?}", info);
+            // tracing::info!("Metadata Info: {:#?}", info);
 
             self.broadcast_to_peers(PeerMessage::HaveMetadata(info))
                 .await;
@@ -720,8 +724,6 @@ impl Torrent {
 
     /// Process the retry queue and attempt to reconnect to ready peers
     fn process_retry_queue(&mut self) {
-        use std::time::Instant;
-
         let available_slots = MAX_CONNECTED_PEERS.saturating_sub(self.peers.len());
         if available_slots == 0 {
             return;
@@ -788,6 +790,7 @@ impl Torrent {
 
                     if let Err(e) = response {
                         tracing::warn!("Failed to announce to tracker {}: {}", announce, e);
+                        // TODO: Implement retry mechanism
                         return;
                     }
 
