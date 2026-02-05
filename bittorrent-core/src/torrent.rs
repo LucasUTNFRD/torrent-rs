@@ -539,7 +539,7 @@ impl Torrent {
                     warn!(?e);
                 }
             }
-            DhtAddNode { node_addr } => {
+            TorrentMessage::DhtAddNode { node_addr } => {
                 if let Some(dht_client) = self.dht_client.as_ref() {
                     let dht_client = dht_client.clone();
                     tokio::task::spawn(async move {
