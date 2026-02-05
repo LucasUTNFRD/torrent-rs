@@ -10,7 +10,7 @@ const NUM_BUCKETS: usize = 160;
 
 /// The routing table maintains K-buckets of known nodes.
 /// Each bucket covers a portion of the 160-bit ID space based on XOR distance.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RoutingTable {
     /// Our local node ID - used for distance calculations.
     local_node_id: NodeId,
@@ -18,7 +18,7 @@ pub struct RoutingTable {
     buckets: Vec<Bucket>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Bucket {
     /// Nodes in this bucket, ordered by last seen (oldest first).
     nodes: Vec<Node>,

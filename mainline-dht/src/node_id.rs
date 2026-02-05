@@ -88,6 +88,13 @@ impl NodeId {
         Self(bytes)
     }
 
+    /// Generate a BEP 42 secure node ID for the given IP address.
+    pub fn generate_secure(ip: &IpAddr) -> NodeId {
+        let mut node_id = Self::generate_random();
+        node_id.secure_node_id(ip);
+        node_id
+    }
+
     pub fn as_bytes(&self) -> [u8; 20] {
         self.0
     }

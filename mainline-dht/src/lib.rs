@@ -30,6 +30,7 @@
 
 pub mod dht;
 pub mod error;
+mod krpc_socket;
 pub mod message;
 mod node;
 pub mod node_id;
