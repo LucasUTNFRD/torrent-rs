@@ -273,7 +273,7 @@ mod tests {
     fn mock_dht_tracks_searches() {
         let mock = MockDht::new();
 
-        let info_hash = InfoHash::from_bytes(b"12345678901234567890");
+        let info_hash = InfoHash::new(b"12345678901234567890");
         mock.record_search(info_hash, 6881);
 
         let searches = mock.get_searches();

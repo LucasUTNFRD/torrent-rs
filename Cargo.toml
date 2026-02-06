@@ -10,6 +10,7 @@ members = [
   "mainline-dht",
   "peer-protocol",
   "tracker-client",
+  "tests",
 ]
 
 resolver = "2" # Recommended for new workspaces

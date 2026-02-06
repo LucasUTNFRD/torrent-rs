@@ -24,11 +24,11 @@ async fn dht_bootstraps_from_state_file() {
     
     // Create a DHT state file with bootstrap nodes
     let bootstrap_nodes = vec![
-        CompactNodeInfo {
+        CompactNodeInfo { node_id:
             id: NodeId::generate_random(),
             addr: SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 1), 6881),
         },
-        CompactNodeInfo {
+        CompactNodeInfo { node_id:
             id: NodeId::generate_random(),
             addr: SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 2), 6881),
         },
@@ -75,7 +75,7 @@ async fn dht_stops_bootstrapping_when_healthy() {
     
     // Create state with multiple bootstrap nodes
     let bootstrap_nodes: Vec<_> = (0..10)
-        .map(|i| CompactNodeInfo {
+        .map(|i| CompactNodeInfo { node_id:
             id: NodeId::generate_random(),
             addr: SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, i as u8), 6881),
         })
@@ -153,7 +153,7 @@ async fn dht_announces_torrents() {
     let mock = MockDht::new();
     mock.set_healthy_swarm();
     
-    let info_hash = InfoHash::from_bytes(b"12345678901234567890");
+    let info_hash = InfoHash::new(b"12345678901234567890");
     let port = 6881u16;
     
     // TODO: Initialize DHT
@@ -170,7 +170,7 @@ async fn dht_get_peers_returns_peers() {
     let sandbox = SandboxedTest::new();
     let mock = MockDht::new();
     
-    let info_hash = InfoHash::from_bytes(b"12345678901234567890");
+    let info_hash = InfoHash::new(b"12345678901234567890");
     let expected_peers = vec![
         SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 1), 6881),
         SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 2), 6882),
@@ -276,7 +276,7 @@ async fn dht_handles_concurrent_lookups() {
     let sandbox = SandboxedTest::new();
     
     let info_hashes: Vec<_> = (0..5)
-        .map(|i| InfoHash::from_bytes(&[i as u8; 20]))
+        .map(|i| InfoHash::new(&[i as u8; 20]))
         .collect();
     
     // TODO: Spawn concurrent get_peers for all info_hashes
