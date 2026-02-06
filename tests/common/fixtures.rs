@@ -6,7 +6,6 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use bittorrent_common::metainfo::TorrentInfo;
 use bittorrent_core::{
     Session, SessionConfig, SessionError, TorrentId, TorrentState, TorrentSummary,
 };
@@ -49,7 +48,7 @@ impl SessionTest {
             enable_dht: false, // Disable DHT for tests
         };
         
-        let session = Session::new(config.clone()).await?;
+        let session = Session::new(config.clone());
         
         Ok(Self {
             sandbox,
@@ -69,7 +68,7 @@ impl SessionTest {
             enable_dht: true,
         };
         
-        let session = Session::new(config.clone()).await?;
+        let session = Session::new(config.clone());
         
         Ok(Self {
             sandbox,
@@ -108,12 +107,12 @@ impl TorrentTest {
         Ok(Self { session_test })
     }
 
-    /// Add a torrent to the session
+    /// Add a torrent to the session from a file path
     pub async fn add_torrent(
         &self,
-        info: TorrentInfo,
+        path: impl AsRef<std::path::Path>,
     ) -> Result<TorrentId, SessionError> {
-        self.session_test.session.add_torrent(info).await
+        self.session_test.session.add_torrent(path).await
     }
 
     /// Add a magnet link to the session
@@ -125,7 +124,10 @@ impl TorrentTest {
     }
 
     /// Get torrent summary
-    pub async fn get_torrent(&self, id: TorrentId) -> Option<TorrentSummary> {
+    pub async fn get_torrent(
+        &self,
+        id: TorrentId,
+    ) -> Result<Option<TorrentSummary>, SessionError> {
         self.session_test.session.get_torrent(id).await
     }
 
@@ -137,18 +139,17 @@ impl TorrentTest {
         timeout: Duration,
     ) -> bool {
         let deadline = std::time::Instant::now() + timeout;
-        
+
         loop {
-            if let Some(summary) = self.get_torrent(id).await {
-                if summary.state == state {
-                    return true;
-                }
+            match self.get_torrent(id).await {
+                Ok(Some(summary)) if summary.state == state => return true,
+                _ => {}
             }
-            
+
             if std::time::Instant::now() > deadline {
                 return false;
             }
-            
+
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
@@ -159,17 +160,14 @@ impl TorrentTest {
     }
 }
 
-/// Helper to create a simple torrent info for testing
-pub fn create_test_torrent_info(
-    name: &str,
-    piece_length: usize,
-    pieces_count: usize,
-) -> TorrentInfo {
-    // This is a placeholder - in a real implementation you'd create
-    // a valid TorrentInfo with proper hashes
-    // For now, this serves as a template for test authors
-    unimplemented!("create_test_torrent_info needs to be implemented based on TorrentInfo structure")
-}
+// TODO: Implement helper to create test torrent files
+// pub fn create_test_torrent_info(
+//     name: &str,
+//     piece_length: usize,
+//     pieces_count: usize,
+// ) -> TorrentInfo {
+//     unimplemented!()
+// }
 
 #[cfg(test)]
 mod tests {
