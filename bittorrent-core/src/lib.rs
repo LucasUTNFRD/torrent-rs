@@ -45,6 +45,7 @@ mod storage;
 mod torrent;
 mod types;
 
+pub use bitfield::Bitfield;
 pub use session::{Session, SessionError};
 pub use storage::Storage;
 pub use types::{SessionConfig, SessionStats, TorrentId, TorrentState, TorrentSummary};

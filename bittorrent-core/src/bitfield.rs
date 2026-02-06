@@ -134,9 +134,9 @@ impl Bitfield {
         Ok(())
     }
 
-    // pub const fn is_empty(&self) -> bool {
-    //     self.num_pieces == 0
-    // }
+    pub const fn is_empty(&self) -> bool {
+        self.num_pieces == 0
+    }
 
     pub fn resize(&mut self, needed: usize) {
         let old_size = self.num_pieces;
@@ -313,7 +313,7 @@ mod test {
         assert_eq!(bitfield.inner[0], 0b10000001); // bits 0 and 7
         assert_eq!(bitfield.inner[1], 0b10000000); // bit 8
         assert_eq!(bitfield.inner[2], 0b00010000); // bit 19
-        //
+                                                   //
 
         let mut iter = bitfield.iter_set();
 
