@@ -3,392 +3,165 @@
 //! Tests for the bittorrent-core bitfield implementation covering:
 //! - Basic set/get operations
 //! - Serialization/deserialization
-//! - Bitwise operations (AND, OR, etc.)
 //! - Edge cases and boundary conditions
 
-use bittorrent_core::bitfield::Bitfield;
+use bittorrent_core::Bitfield;
+use bytes::Bytes;
 
 #[test]
-fn test_bitfield_new() {
-    let bf = Bitfield::new(100);
-    assert_eq!(bf.len(), 100);
-    assert!(!bf.all_set());
-    assert!(bf.all_clear());
+fn test_bitfield_with_size() {
+    let bf = Bitfield::with_size(100);
+    assert_eq!(bf.size(), 100);
+    assert!(bf.is_empty() == false);
 }
 
 #[test]
-fn test_bitfield_set_get() {
-    let mut bf = Bitfield::new(100);
+fn test_bitfield_new_empty() {
+    let bf = Bitfield::new();
+    assert_eq!(bf.size(), 0);
+    assert!(bf.is_empty());
+}
+
+#[test]
+fn test_bitfield_set_has() {
+    let mut bf = Bitfield::with_size(100);
 
     // Initially all bits should be 0
-    assert!(!bf.get(0));
-    assert!(!bf.get(50));
-    assert!(!bf.get(99));
+    assert!(!bf.has(0));
+    assert!(!bf.has(50));
+    assert!(!bf.has(99));
 
     // Set some bits
-    bf.set(0, true);
-    bf.set(50, true);
-    bf.set(99, true);
+    bf.set(0);
+    bf.set(50);
+    bf.set(99);
 
     // Verify they're set
-    assert!(bf.get(0));
-    assert!(bf.get(50));
-    assert!(bf.get(99));
+    assert!(bf.has(0));
+    assert!(bf.has(50));
+    assert!(bf.has(99));
 
     // Other bits should still be 0
-    assert!(!bf.get(1));
-    assert!(!bf.get(49));
-    assert!(!bf.get(51));
+    assert!(!bf.has(1));
+    assert!(!bf.has(49));
+    assert!(!bf.has(51));
 }
 
 #[test]
-fn test_bitfield_clear() {
-    let mut bf = Bitfield::new(100);
-
-    bf.set(50, true);
-    assert!(bf.get(50));
-
-    bf.set(50, false);
-    assert!(!bf.get(50));
-}
-
-#[test]
-#[should_panic(expected = "index out of bounds")]
-fn test_bitfield_get_out_of_bounds() {
-    let bf = Bitfield::new(10);
-    let _ = bf.get(10); // Should panic
-}
-
-#[test]
-#[should_panic(expected = "index out of bounds")]
-fn test_bitfield_set_out_of_bounds() {
-    let mut bf = Bitfield::new(10);
-    bf.set(10, true); // Should panic
-}
-
-#[test]
-fn test_bitfield_all_set() {
-    let mut bf = Bitfield::new(8);
-
-    assert!(!bf.all_set());
-
-    // Set all bits
-    for i in 0..8 {
-        bf.set(i, true);
-    }
-
-    assert!(bf.all_set());
-    assert!(!bf.all_clear());
-}
-
-#[test]
-fn test_bitfield_all_clear() {
-    let bf = Bitfield::new(8);
-    assert!(bf.all_clear());
-
-    let mut bf = Bitfield::new(8);
-    bf.set(0, true);
-    assert!(!bf.all_clear());
-}
-
-#[test]
-fn test_bitfield_count_set() {
-    let mut bf = Bitfield::new(100);
-
-    assert_eq!(bf.count_set(), 0);
-
-    bf.set(0, true);
-    bf.set(50, true);
-    bf.set(99, true);
-
-    assert_eq!(bf.count_set(), 3);
-}
-
-#[test]
-fn test_bitfield_from_bytes() {
+fn test_bitfield_from_bytes_checked() {
     // 1000 0000 0100 0000 = bits 0 and 9 set
-    let bytes = vec![0b1000_0000, 0b0100_0000];
-    let bf = Bitfield::from_bytes(bytes, 16);
+    let bytes = Bytes::from(vec![0b1000_0000, 0b0100_0000]);
+    let bf = Bitfield::from_bytes_checked(bytes, 16).unwrap();
 
-    assert!(bf.get(0));
-    assert!(!bf.get(1));
-    assert!(bf.get(9));
-    assert!(!bf.get(10));
+    assert!(bf.has(0));
+    assert!(!bf.has(1));
+    assert!(bf.has(9));
+    assert!(!bf.has(10));
 }
 
 #[test]
-fn test_bitfield_to_bytes() {
-    let mut bf = Bitfield::new(16);
-    bf.set(0, true);
-    bf.set(9, true);
+fn test_bitfield_from_bytes_unchecked_and_validate() {
+    // Receive bitfield from peer before knowing torrent metadata
+    let peer_payload = Bytes::from(vec![0b11110000, 0b10100000]); // 16 bits
+    let mut bitfield = Bitfield::from_bytes_unchecked(peer_payload);
 
-    let bytes = bf.to_bytes();
-    assert_eq!(bytes.len(), 2);
-    assert_eq!(bytes[0], 0b1000_0000);
-    assert_eq!(bytes[1], 0b0100_0000);
+    // At this point we don't know num_pieces
+    assert_eq!(bitfield.size(), 0);
+
+    // Later we learn the torrent has 12 pieces
+    let result = bitfield.validate(12);
+    assert!(result.is_ok());
+    assert_eq!(bitfield.size(), 12);
+
+    // Verify the bits are preserved correctly
+    assert!(bitfield.has(0));
+    assert!(bitfield.has(1));
+    assert!(bitfield.has(2));
+    assert!(bitfield.has(3));
+    assert!(!bitfield.has(4));
+    assert!(!bitfield.has(7));
+    assert!(bitfield.has(8));
+    assert!(!bitfield.has(9));
+    assert!(bitfield.has(10));
+    assert!(!bitfield.has(11));
 }
 
 #[test]
-fn test_bitfield_set_all() {
-    let mut bf = Bitfield::new(100);
+fn test_bitfield_resize() {
+    let mut bf = Bitfield::with_size(8);
+    bf.set(0);
+    bf.set(7);
 
-    assert!(!bf.all_set());
+    // Resize to larger
+    bf.resize(16);
+    assert_eq!(bf.size(), 16);
+    assert!(bf.has(0));
+    assert!(bf.has(7));
+    assert!(!bf.has(8));
+    assert!(!bf.has(15));
 
-    bf.set_all();
+    // Set bit in new range
+    bf.set(15);
+    assert!(bf.has(15));
 
-    assert!(bf.all_set());
-    for i in 0..100 {
-        assert!(bf.get(i), "Bit {} should be set", i);
-    }
+    // Resize to smaller
+    bf.resize(4);
+    assert_eq!(bf.size(), 4);
+    assert!(bf.has(0));
 }
 
 #[test]
-fn test_bitfield_clear_all() {
-    let mut bf = Bitfield::new(100);
+fn test_bitfield_iter_set() {
+    let mut bf = Bitfield::with_size(20);
 
-    bf.set_all();
-    assert!(bf.all_set());
+    // Set specific bits
+    bf.set(0);
+    bf.set(7);
+    bf.set(8);
+    bf.set(19);
 
-    bf.clear_all();
-
-    assert!(bf.all_clear());
-    for i in 0..100 {
-        assert!(!bf.get(i), "Bit {} should be clear", i);
-    }
+    let set_pieces: Vec<usize> = bf.iter_set().collect();
+    assert_eq!(set_pieces, vec![0, 7, 8, 19]);
 }
 
 #[test]
-fn test_bitfield_and() {
-    let mut bf1 = Bitfield::new(16);
-    bf1.set(0, true);
-    bf1.set(1, true);
-    bf1.set(2, true);
-
-    let mut bf2 = Bitfield::new(16);
-    bf2.set(1, true);
-    bf2.set(2, true);
-    bf2.set(3, true);
-
-    let result = bf1.and(&bf2);
-
-    assert!(!result.get(0)); // Only in bf1
-    assert!(result.get(1)); // In both
-    assert!(result.get(2)); // In both
-    assert!(!result.get(3)); // Only in bf2
+fn test_bitfield_error_invalid_length() {
+    let num_pieces = 20;
+    let payload = Bytes::from(vec![0xFF, 0xFF]); // 2 bytes = 16 bits, but need 20 (3 bytes)
+    let result = Bitfield::from_bytes_checked(payload, num_pieces);
+    assert!(result.is_err());
 }
 
 #[test]
-fn test_bitfield_or() {
-    let mut bf1 = Bitfield::new(16);
-    bf1.set(0, true);
-    bf1.set(1, true);
-
-    let mut bf2 = Bitfield::new(16);
-    bf2.set(1, true);
-    bf2.set(2, true);
-
-    let result = bf1.or(&bf2);
-
-    assert!(result.get(0)); // Only in bf1
-    assert!(result.get(1)); // In both
-    assert!(result.get(2)); // Only in bf2
-    assert!(!result.get(3)); // In neither
-}
-
-#[test]
-fn test_bitfield_xor() {
-    let mut bf1 = Bitfield::new(16);
-    bf1.set(0, true);
-    bf1.set(1, true);
-
-    let mut bf2 = Bitfield::new(16);
-    bf2.set(1, true);
-    bf2.set(2, true);
-
-    let result = bf1.xor(&bf2);
-
-    assert!(result.get(0)); // Only in bf1
-    assert!(!result.get(1)); // In both (cancelled out)
-    assert!(result.get(2)); // Only in bf2
-    assert!(!result.get(3)); // In neither
-}
-
-#[test]
-fn test_bitfield_not() {
-    let mut bf = Bitfield::new(8);
-    bf.set(0, true);
-    bf.set(7, true);
-
-    let result = bf.not();
-
-    assert!(!result.get(0));
-    assert!(result.get(1));
-    assert!(result.get(6));
-    assert!(!result.get(7));
-}
-
-#[test]
-fn test_bitfield_interested_pieces() {
-    // We have pieces 0, 1, 2, 5
-    let mut our_pieces = Bitfield::new(8);
-    our_pieces.set(0, true);
-    our_pieces.set(1, true);
-    our_pieces.set(2, true);
-    our_pieces.set(5, true);
-
-    // Peer has pieces 1, 2, 3, 4
-    let mut peer_pieces = Bitfield::new(8);
-    peer_pieces.set(1, true);
-    peer_pieces.set(2, true);
-    peer_pieces.set(3, true);
-    peer_pieces.set(4, true);
-
-    // We're interested in pieces peer has that we don't
-    let interested = peer_pieces.and(&our_pieces.not());
-
-    assert!(!interested.get(0)); // We have it
-    assert!(!interested.get(1)); // We have it
-    assert!(!interested.get(2)); // We have it
-    assert!(interested.get(3)); // We don't have it, peer does
-    assert!(interested.get(4)); // We don't have it, peer does
-    assert!(!interested.get(5)); // We have it, peer doesn't
-}
-
-#[test]
-fn test_bitfield_first_unset() {
-    let mut bf = Bitfield::new(100);
-
-    // All clear, first unset should be 0
-    assert_eq!(bf.first_unset(), Some(0));
-
-    // Set first 50
-    for i in 0..50 {
-        bf.set(i, true);
-    }
-
-    assert_eq!(bf.first_unset(), Some(50));
-
-    // Set all
-    bf.set_all();
-    assert_eq!(bf.first_unset(), None);
-}
-
-#[test]
-fn test_bitfield_next_set() {
-    let mut bf = Bitfield::new(100);
-
-    assert_eq!(bf.next_set(0), None);
-
-    bf.set(10, true);
-    bf.set(20, true);
-    bf.set(30, true);
-
-    assert_eq!(bf.next_set(0), Some(10));
-    assert_eq!(bf.next_set(10), Some(10));
-    assert_eq!(bf.next_set(11), Some(20));
-    assert_eq!(bf.next_set(21), Some(30));
-    assert_eq!(bf.next_set(31), None);
-}
-
-#[test]
-fn test_bitfield_next_unset() {
-    let mut bf = Bitfield::new(100);
-    bf.set_all();
-
-    assert_eq!(bf.next_unset(0), None);
-
-    bf.set(10, false);
-    bf.set(20, false);
-    bf.set(30, false);
-
-    assert_eq!(bf.next_unset(0), Some(10));
-    assert_eq!(bf.next_unset(10), Some(10));
-    assert_eq!(bf.next_unset(11), Some(20));
-    assert_eq!(bf.next_unset(21), Some(30));
-    assert_eq!(bf.next_unset(31), None);
-}
-
-#[test]
-fn test_bitfield_empty() {
-    let bf = Bitfield::new(0);
-    assert_eq!(bf.len(), 0);
-    assert!(bf.all_clear());
-    assert!(bf.all_set()); // Vacuously true for empty bitfield
+fn test_bitfield_error_non_zero_spare_bits() {
+    // Bitfield with non-zero spare bits in last byte
+    let num_pieces = 10; // Need 2 bytes, last byte has 6 spare bits
+    let payload = Bytes::from(vec![0xFF, 0xFF]); // All bits set including spare bits
+    let result = Bitfield::from_bytes_checked(payload, num_pieces);
+    assert!(result.is_err());
 }
 
 #[test]
 fn test_bitfield_single_bit() {
-    let mut bf = Bitfield::new(1);
+    let mut bf = Bitfield::with_size(1);
+    assert!(!bf.has(0));
 
-    assert!(!bf.get(0));
-
-    bf.set(0, true);
-    assert!(bf.get(0));
-    assert!(bf.all_set());
-
-    let bytes = bf.to_bytes();
-    assert_eq!(bytes.len(), 1);
-    assert_eq!(bytes[0], 0b1000_0000);
+    bf.set(0);
+    assert!(bf.has(0));
 }
 
 #[test]
-fn test_bitfield_partial_byte() {
-    // 5 bits in one byte
-    let mut bf = Bitfield::new(5);
-    bf.set(0, true);
-    bf.set(4, true);
+fn test_bitfield_edge_cases() {
+    // Empty bitfield
+    let bf = Bitfield::new();
+    assert!(bf.is_empty());
+    assert_eq!(bf.size(), 0);
 
-    let bytes = bf.to_bytes();
-    assert_eq!(bytes.len(), 1);
-    // Bits are stored MSB first: 1 000 1 000
-    assert_eq!(bytes[0], 0b1000_1000);
-}
+    // Exactly 8 bits
+    let eight = Bitfield::with_size(8);
+    assert_eq!(eight.size(), 8);
 
-#[test]
-fn test_bitfield_clone() {
-    let mut bf1 = Bitfield::new(100);
-    bf1.set(0, true);
-    bf1.set(50, true);
-    bf1.set(99, true);
-
-    let bf2 = bf1.clone();
-
-    // Verify cloned bitfield has same values
-    assert!(bf2.get(0));
-    assert!(bf2.get(50));
-    assert!(bf2.get(99));
-    assert_eq!(bf2.len(), 100);
-
-    // Modifying one shouldn't affect the other
-    bf2.set(1, true);
-    assert!(!bf1.get(1));
-}
-
-#[test]
-fn test_bitfield_equality() {
-    let mut bf1 = Bitfield::new(16);
-    bf1.set(0, true);
-    bf1.set(7, true);
-    bf1.set(15, true);
-
-    let mut bf2 = Bitfield::new(16);
-    bf2.set(0, true);
-    bf2.set(7, true);
-    bf2.set(15, true);
-
-    assert_eq!(bf1, bf2);
-
-    bf2.set(1, true);
-    assert_ne!(bf1, bf2);
-}
-
-#[test]
-fn test_bitfield_inequality_different_sizes() {
-    let mut bf1 = Bitfield::new(8);
-    bf1.set_all();
-
-    let mut bf2 = Bitfield::new(16);
-    bf2.set_all();
-
-    assert_ne!(bf1, bf2);
+    // 9 bits requires 2 bytes
+    let nine = Bitfield::with_size(9);
+    assert_eq!(nine.size(), 9);
 }
