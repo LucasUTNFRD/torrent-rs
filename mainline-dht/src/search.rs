@@ -17,14 +17,13 @@ use tokio::sync::oneshot;
 use crate::{dht::GetPeersResult, message::CompactNodeInfo, node_id::NodeId};
 
 // ============================================================================
-// Constants (matching C implementation dht.c)
+// Constants
 // ============================================================================
 
-/// Maximum in-flight queries per search (like C's DHT_INFLIGHT_QUERIES).
-/// The C code uses 4, but the plan specifies 3 (ALPHA).
-pub const MAX_INFLIGHT_QUERIES: usize = 3;
+/// Maximum in-flight queries per search
+pub const MAX_INFLIGHT_QUERIES: usize = 4;
 
-/// Target number of responses to complete search (like C code's 8 node check).
+/// Target number of responses to complete search.
 pub const TARGET_RESPONSES: usize = 8;
 
 /// Query timeout duration in seconds.
@@ -215,7 +214,6 @@ impl SearchState {
     /// - We've received TARGET_RESPONSES (8) successful responses, OR
     /// - No more candidates to query and nothing in flight
     pub fn should_complete(&self) -> bool {
-        // C code style: 8 successful responses
         if self.responded >= TARGET_RESPONSES {
             return true;
         }
