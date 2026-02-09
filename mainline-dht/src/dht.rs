@@ -14,14 +14,14 @@ use std::{
         Arc,
         atomic::{AtomicU16, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use bittorrent_common::types::InfoHash;
 use tokio::{
     net::UdpSocket,
     sync::{mpsc, oneshot},
-    time::timeout,
+    time::{interval, timeout},
 };
 
 use crate::{
@@ -31,6 +31,9 @@ use crate::{
     node_id::NodeId,
     peer_store::PeerStore,
     routing_table::{K, RoutingTable},
+    search::{
+        CandidateStatus, MAX_INFLIGHT_QUERIES, QUERY_TIMEOUT_SECS, SearchManager, SearchState,
+    },
     token::TokenManager,
 };
 
@@ -435,6 +438,8 @@ struct DhtActor {
     peer_store: PeerStore,
     /// Token generation and validation.
     token_manager: TokenManager,
+    /// Active searches for concurrent query execution.
+    search_manager: SearchManager,
 }
 
 impl DhtActor {
@@ -452,6 +457,7 @@ impl DhtActor {
             pending: HashMap::new(),
             peer_store: PeerStore::new(),
             token_manager: TokenManager::new(),
+            search_manager: SearchManager::new(),
         }
     }
 
@@ -461,6 +467,9 @@ impl DhtActor {
 
     async fn run(mut self, shared_node_id: Arc<std::sync::RwLock<NodeId>>) -> Result<(), DhtError> {
         let mut buf = [0u8; 1500];
+
+        // Interval for checking search timeouts (100ms as per plan)
+        let mut timeout_check_interval = interval(Duration::from_millis(100));
 
         loop {
             tokio::select! {
@@ -492,8 +501,19 @@ impl DhtActor {
                             let _ = resp.send(result);
                         }
                         DhtCommand::GetPeers { info_hash, resp } => {
-                            let result = self.iterative_get_peers(info_hash).await;
-                            let _ = resp.send(result);
+                            // Use the new concurrent search system
+                            // Create a wrapper channel that wraps the result in Ok()
+                            let (inner_tx, inner_rx) = oneshot::channel::<GetPeersResult>();
+
+                            self.start_concurrent_get_peers(info_hash, inner_tx).await;
+
+                            // Spawn a task to forward the result wrapped in Ok()
+                            tokio::spawn(async move {
+                                match inner_rx.await {
+                                    Ok(result) => { let _ = resp.send(Ok(result)); }
+                                    Err(_) => { let _ = resp.send(Err(DhtError::ChannelClosed)); }
+                                }
+                            });
                         }
                         DhtCommand::Announce { info_hash, port, implied_port, resp } => {
                             let result = self.announce(info_hash, port, implied_port).await;
@@ -511,6 +531,11 @@ impl DhtActor {
                             return Ok(());
                         }
                     }
+                }
+
+                // Check for search timeouts periodically
+                _ = timeout_check_interval.tick() => {
+                    self.check_search_timeouts().await;
                 }
             }
         }
@@ -553,7 +578,7 @@ impl DhtActor {
                     // Extract external IP from response
                     if let Some(sender_ip) = msg.sender_ip {
                         external_ip = Some(*sender_ip.ip());
-                        tracing::info!("Discovered external IP: {}", sender_ip.ip());
+                        // tracing::info!("Discovered external IP: {}", sender_ip.ip());
                     }
 
                     // Add the responding node
@@ -727,6 +752,54 @@ impl DhtActor {
     // ========================================================================
     // Iterative Get Peers (Kademlia lookup for peers)
     // ========================================================================
+
+    /// Start a concurrent get_peers search.
+    /// Returns immediately; the result will be sent via the provided channel.
+    async fn start_concurrent_get_peers(
+        &mut self,
+        info_hash: InfoHash,
+        completion_tx: oneshot::Sender<GetPeersResult>,
+    ) {
+        let target = NodeId::from(&info_hash);
+
+        // Get initial candidates from routing table
+        let initial = self.routing_table.get_closest_nodes(&target, K);
+
+        if initial.is_empty() {
+            tracing::debug!("start_concurrent_get_peers: no initial candidates in routing table");
+            let result = GetPeersResult {
+                peers: Vec::new(),
+                nodes_contacted: 0,
+                nodes_with_tokens: Vec::new(),
+            };
+            let _ = completion_tx.send(result);
+            return;
+        }
+
+        tracing::debug!(
+            "start_concurrent_get_peers: starting with {} candidates for {}",
+            initial.len(),
+            info_hash
+        );
+
+        // Create candidates from initial nodes
+        let candidates: Vec<CompactNodeInfo> = initial
+            .into_iter()
+            .map(|n| CompactNodeInfo {
+                node_id: n.node_id,
+                addr: n.addr,
+            })
+            .collect();
+
+        // Create search state
+        let search = SearchState::new(info_hash, candidates, completion_tx);
+
+        // Store search - it will continue in background
+        self.search_manager.start_search(search);
+
+        // Start initial queries (up to MAX_INFLIGHT_QUERIES)
+        self.advance_search(info_hash).await;
+    }
 
     async fn iterative_get_peers(
         &mut self,
@@ -968,6 +1041,239 @@ impl DhtActor {
         self.send_and_wait(msg, SocketAddr::V4(addr)).await
     }
 
+    // ========================================================================
+    // Non-blocking queries for concurrent search
+    // ========================================================================
+
+    /// Send a get_peers query without waiting for a response.
+    /// Returns the transaction ID for tracking.
+    /// Used by the concurrent search system.
+    async fn send_get_peers_query_async(
+        &mut self,
+        addr: SocketAddrV4,
+        info_hash: InfoHash,
+    ) -> Vec<u8> {
+        let tx_id = self.next_transaction_id();
+        let msg = KrpcMessage::get_peers_query(tx_id, self.node_id, info_hash);
+        let tx_id_bytes = msg.transaction_id.0.clone();
+        let bytes = msg.to_bytes();
+
+        // Fire-and-forget UDP send
+        if let Err(e) = self.socket.send_to(&bytes, SocketAddr::V4(addr)).await {
+            tracing::warn!("Failed to send get_peers to {}: {}", addr, e);
+        }
+
+        tx_id_bytes
+    }
+
+    /// Advance a search by sending queries to pending candidates.
+    /// Fills available slots up to MAX_INFLIGHT_QUERIES.
+    async fn advance_search(&mut self, info_hash: InfoHash) {
+        // Get the search and check available slots
+        let Some(search) = self.search_manager.searches.get(&info_hash) else {
+            return;
+        };
+
+        let available_slots = MAX_INFLIGHT_QUERIES.saturating_sub(search.in_flight);
+        if available_slots == 0 {
+            return;
+        }
+
+        // Get pending candidates to query
+        let to_query: Vec<_> = search
+            .get_pending_candidates(available_slots)
+            .iter()
+            .map(|c| (c.node.node_id, c.node.addr))
+            .collect();
+
+        if to_query.is_empty() {
+            return;
+        }
+
+        // Send queries to each candidate
+        for (node_id, addr) in to_query {
+            let tx_id = self.send_get_peers_query_async(addr, info_hash).await;
+
+            // Register the transaction
+            self.search_manager.register_tx(tx_id.clone(), info_hash);
+
+            // Update candidate status
+            if let Some(search) = self.search_manager.searches.get_mut(&info_hash) {
+                search.mark_querying(&node_id, tx_id);
+                search.in_flight += 1;
+            }
+        }
+    }
+
+    /// Check for timed out queries in all active searches.
+    async fn check_search_timeouts(&mut self) {
+        let timeout_duration = Duration::from_secs(QUERY_TIMEOUT_SECS);
+        let now = Instant::now();
+
+        // Collect timed out transactions
+        let mut timed_out: Vec<(InfoHash, Vec<u8>)> = Vec::new();
+
+        for (info_hash, search) in &self.search_manager.searches {
+            for candidate in &search.candidates {
+                if let CandidateStatus::Querying(tx_id) = &candidate.status {
+                    let is_timed_out = candidate
+                        .query_sent_at
+                        .is_some_and(|sent_at| now.duration_since(sent_at) > timeout_duration);
+                    if is_timed_out {
+                        timed_out.push((*info_hash, tx_id.clone()));
+                    }
+                }
+            }
+        }
+
+        // Process timeouts
+        for (info_hash, tx_id) in timed_out {
+            // Remove TX mapping
+            self.search_manager.remove_tx(&tx_id);
+
+            // Mark candidate as failed
+            if let Some(search) = self.search_manager.searches.get_mut(&info_hash) {
+                let was_in_flight = search.mark_failed(&tx_id).is_some();
+                if was_in_flight {
+                    search.in_flight = search.in_flight.saturating_sub(1);
+                    tracing::debug!("Query timed out for search {}", info_hash);
+                }
+            }
+        }
+
+        // Advance searches and check for completion
+        let active_searches: Vec<InfoHash> = self.search_manager.active_searches();
+        for info_hash in active_searches {
+            // First advance the search to fill slots
+            self.advance_search(info_hash).await;
+
+            // Then check if it should complete
+            let should_complete = self
+                .search_manager
+                .searches
+                .get(&info_hash)
+                .map(|s| s.should_complete())
+                .unwrap_or(false);
+
+            if should_complete {
+                self.complete_search(info_hash).await;
+            }
+        }
+    }
+
+    /// Complete a search and send the result.
+    async fn complete_search(&mut self, info_hash: InfoHash) {
+        if let Some(search) = self.search_manager.remove_search(&info_hash) {
+            let elapsed = search.started_at.elapsed();
+            let peer_count = search.peers_found.len();
+            let node_count = search.responded;
+
+            tracing::info!(
+                "Search completed for {}: {} peers from {} nodes in {:?}",
+                info_hash,
+                peer_count,
+                node_count,
+                elapsed
+            );
+
+            let (result, completion_tx) = search.into_result();
+
+            // Send result if channel is still open
+            if let Some(tx) = completion_tx {
+                let _ = tx.send(result);
+            }
+        }
+    }
+
+    /// Handle a get_peers response for an active concurrent search.
+    async fn handle_search_response(&mut self, msg: KrpcMessage, from: SocketAddr) {
+        let tx_id = msg.transaction_id.0.clone();
+
+        // Look up which search this belongs to
+        let Some(info_hash) = self.search_manager.remove_tx(&tx_id) else {
+            // Not a search response, ignore
+            return;
+        };
+
+        // Get the search
+        let Some(search) = self.search_manager.searches.get_mut(&info_hash) else {
+            return;
+        };
+
+        // Mark candidate as responded and decrement in_flight
+        if search.mark_responded(&tx_id).is_some() {
+            search.in_flight = search.in_flight.saturating_sub(1);
+            search.responded += 1;
+        }
+
+        // Process response data
+        if let MessageBody::Response(Response::GetPeers {
+            token,
+            values,
+            nodes,
+            ..
+        }) = msg.body
+        {
+            // Store token for announce
+            let SocketAddr::V4(from_v4) = from else {
+                return;
+            };
+
+            // Find the candidate that responded and add to nodes_with_tokens
+            if let Some(candidate) = search
+                .candidates
+                .iter()
+                .find(|c| matches!(&c.status, CandidateStatus::Responded) && c.node.addr == from_v4)
+            {
+                search
+                    .nodes_with_tokens
+                    .push((candidate.node.clone(), token));
+            }
+
+            // Collect peers (deduplicated via HashSet)
+            if let Some(peers) = values {
+                for peer in peers {
+                    search.peers_found.insert(peer);
+                }
+                tracing::debug!(
+                    "Got {} peers from {} for {}",
+                    search.peers_found.len(),
+                    from,
+                    info_hash
+                );
+            }
+
+            // Add closer nodes to candidates
+            if let Some(new_nodes) = nodes {
+                // Add to routing table
+                for node_info in &new_nodes {
+                    let new_node = Node::new(node_info.node_id, node_info.addr);
+                    self.routing_table.try_add_node(new_node);
+                }
+
+                // Add to search candidates
+                if let Some(search) = self.search_manager.searches.get_mut(&info_hash) {
+                    search.add_candidates(new_nodes);
+                }
+            }
+        }
+
+        // Check if search should complete
+        let should_complete = self
+            .search_manager
+            .searches
+            .get(&info_hash)
+            .map(|s| s.should_complete())
+            .unwrap_or(false);
+
+        if should_complete {
+            self.complete_search(info_hash).await;
+        } else {
+            // Continue search - fill available slots
+            self.advance_search(info_hash).await;
+        }
+    }
+
     async fn send_and_wait(
         &mut self,
         msg: KrpcMessage,
@@ -1048,7 +1354,12 @@ impl DhtActor {
                     tx_id,
                     self.pending.len()
                 );
-                if let Some(pending) = self.pending.remove(&tx_id) {
+
+                // Check if this is a response for an active concurrent search
+                if self.search_manager.lookup_tx(&tx_id).is_some() {
+                    self.handle_search_response(msg, from).await;
+                } else if let Some(pending) = self.pending.remove(&tx_id) {
+                    // Legacy path: send to pending channel (used by send_and_wait)
                     let _ = pending.resp_tx.send(msg);
                 } else {
                     tracing::debug!("Received response for unknown transaction from {from}");
