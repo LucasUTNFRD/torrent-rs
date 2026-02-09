@@ -1060,3 +1060,29 @@ pub fn spawn_outgoing_peer(
         }
     });
 }
+
+/// Spawn a peer task for an inbound connection (handshake already completed by session)
+pub fn spawn_inbound_peer(
+    pid: Pid,
+    addr: SocketAddr,
+    stream: TcpStream,
+    supports_extended: bool,
+    info_hash: InfoHash,
+    torrent_tx: mpsc::Sender<TorrentMessage>,
+    cmd_rx: mpsc::Receiver<PeerMessage>,
+) {
+    tokio::spawn(async move {
+        let peer: Peer<Connected> = Peer {
+            state: Connected::new(stream, supports_extended),
+            addr,
+            torrent_tx,
+            cmd_rx,
+            info_hash,
+            pid,
+        };
+
+        if let Err(e) = peer.start().await {
+            warn!(?e, "Inbound peer error");
+        }
+    });
+}

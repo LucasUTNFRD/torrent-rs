@@ -35,7 +35,7 @@ use crate::{
     peer::{
         PeerMessage, PeerState,
         metrics::PeerMetrics,
-        peer_connection::{ConnectionError, spawn_outgoing_peer},
+        peer_connection::{ConnectionError, spawn_inbound_peer, spawn_outgoing_peer},
     },
     piece_picker::{AvailabilityUpdate, BlockRequest, PieceManager, PieceState},
 };
@@ -131,6 +131,12 @@ pub enum TorrentMessage {
     RejectedMetadataRequest {
         pid: Pid,
         rejected_piece: u32,
+    },
+    /// Inbound peer connection (peer found us and wants to connect)
+    InboundPeer {
+        stream: TcpStream,
+        remote_addr: SocketAddr,
+        supports_ext: bool,
     },
 }
 
@@ -264,7 +270,7 @@ impl Torrent {
                 shutdown_rx,
                 peers: HashMap::default(),
                 tx: tx.clone(),
-                rx: rx,
+                rx,
                 bitfield: Bitfield::new(),
                 piece_mananger: None,
                 // piece_collector: None,
@@ -377,7 +383,8 @@ impl Torrent {
 
         let (peer_tx, peer_rx) = mpsc::channel(64);
 
-        info!("connecting to {}", peer.get_addr());
+        let peer_addr = *peer.get_addr();
+        info!("connecting to {}", peer_addr);
 
         self.metrics.connected_peers.fetch_add(1, Ordering::Relaxed);
         match peer {
@@ -385,7 +392,15 @@ impl Torrent {
                 stream,
                 remote_addr,
                 supports_ext,
-            } => todo!(),
+            } => spawn_inbound_peer(
+                peer_id,
+                remote_addr,
+                stream,
+                supports_ext,
+                self.info_hash,
+                self.tx.clone(),
+                peer_rx,
+            ),
             PeerSource::Outbound(remote_addr) => spawn_outgoing_peer(
                 peer_id,
                 remote_addr,
@@ -396,7 +411,7 @@ impl Torrent {
         }
 
         let peer = PeerState {
-            addr: *peer.get_addr(),
+            addr: peer_addr,
             tx: peer_tx,
             metrics: PeerMetrics::new(),
             pending_requests: Vec::new(),
@@ -548,6 +563,18 @@ impl Torrent {
                         }
                     });
                 }
+            }
+            TorrentMessage::InboundPeer {
+                stream,
+                remote_addr,
+                supports_ext,
+            } => {
+                info!("Received inbound peer connection from {}", remote_addr);
+                self.add_peer(PeerSource::Inbound {
+                    stream,
+                    remote_addr,
+                    supports_ext,
+                });
             }
         }
         Ok(())

@@ -6,7 +6,7 @@ use std::{
 };
 
 use bittorrent_common::types::InfoHash;
-use crc::{Crc, CRC_32_ISCSI};
+use crc::{CRC_32_ISCSI, Crc};
 use rand::Rng;
 
 const CASTAGNOLI: Crc<u32> = Crc::<u32>::new(&CRC_32_ISCSI);
@@ -277,7 +277,7 @@ impl NodeId {
 
 #[cfg(test)]
 mod test {
-    use crate::node_id::{is_local_ipv4, NodeId};
+    use crate::node_id::{NodeId, is_local_ipv4};
     use std::net::Ipv4Addr;
 
     #[test]

@@ -71,7 +71,7 @@ pub struct DhtConfig {
 impl Default for DhtConfig {
     fn default() -> Self {
         Self {
-            id_file_path: None,  // Default: no persistence
+            id_file_path: None, // Default: no persistence
             port: DEFAULT_PORT,
         }
     }
@@ -170,8 +170,11 @@ impl Dht {
                     id
                 }
                 Err(e) => {
-                    tracing::warn!("Failed to load node ID from {}: {}, generating new", 
-                        path.display(), e);
+                    tracing::warn!(
+                        "Failed to load node ID from {}: {}, generating new",
+                        path.display(),
+                        e
+                    );
                     NodeId::generate_random()
                 }
             }
