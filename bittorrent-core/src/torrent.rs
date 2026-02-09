@@ -383,7 +383,8 @@ impl Torrent {
 
         let (peer_tx, peer_rx) = mpsc::channel(64);
 
-        info!("connecting to {}", peer.get_addr());
+        let peer_addr = peer.get_addr().clone();
+        info!("connecting to {}", peer_addr);
 
         self.metrics.connected_peers.fetch_add(1, Ordering::Relaxed);
         match peer {
@@ -410,7 +411,7 @@ impl Torrent {
         }
 
         let peer = PeerState {
-            addr: *peer.get_addr(),
+            addr: peer_addr,
             tx: peer_tx,
             metrics: PeerMetrics::new(),
             pending_requests: Vec::new(),
