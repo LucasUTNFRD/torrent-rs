@@ -29,4 +29,7 @@ pub enum DhtError {
 
     #[error("Shutdown requested")]
     Shutdown,
+
+    #[error("{0}")]
+    Other(String),
 }
