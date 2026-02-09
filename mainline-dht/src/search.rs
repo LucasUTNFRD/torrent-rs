@@ -1,7 +1,7 @@
 //! Search state management for concurrent DHT queries.
 //!
 //! This module implements parallel query execution for DHT searches,
-//! It supports up to 3 concurrent in-flight queries per search (ALPHA) and
+//! It supports up to 4 concurrent in-flight queries per search (ALPHA) and
 //! completes searches when 8 nodes have successfully responded.
 
 use std::{
