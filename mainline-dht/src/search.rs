@@ -1,7 +1,6 @@
 //! Search state management for concurrent DHT queries.
 //!
 //! This module implements parallel query execution for DHT searches,
-//! matching the concurrency model from the reference C implementation (dht.c).
 //! It supports up to 3 concurrent in-flight queries per search (ALPHA) and
 //! completes searches when 8 nodes have successfully responded.
 
