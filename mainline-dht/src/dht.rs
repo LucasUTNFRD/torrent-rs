@@ -182,7 +182,7 @@ impl Dht {
         let node_id = Arc::new(std::sync::RwLock::new(initial_id));
         let (command_tx, command_rx) = mpsc::channel(32);
 
-        let actor = DhtActor::new(socket, initial_id, command_rx);
+        let actor = DhtActor::new(socket, initial_id, command_rx, config.id_file_path.clone());
 
         let node_id_clone = node_id.clone();
         tokio::spawn(async move {
@@ -519,6 +519,8 @@ struct DhtActor {
     token_manager: TokenManager,
     /// Active searches for concurrent query execution.
     search_manager: SearchManager,
+    /// Path to store the node ID file for persistence.
+    id_file_path: Option<PathBuf>,
 }
 
 impl DhtActor {
@@ -526,6 +528,7 @@ impl DhtActor {
         socket: Arc<UdpSocket>,
         node_id: NodeId,
         command_rx: mpsc::Receiver<DhtCommand>,
+        id_file_path: Option<PathBuf>,
     ) -> Self {
         Self {
             socket,
@@ -537,6 +540,7 @@ impl DhtActor {
             peer_store: PeerStore::new(),
             token_manager: TokenManager::new(),
             search_manager: SearchManager::new(),
+            id_file_path,
         }
     }
 
@@ -672,13 +676,33 @@ impl DhtActor {
             }
         }
 
-        // Generate BEP 42 secure node ID
+        // Check/update BEP 42 secure node ID
         if let Some(ip) = external_ip {
-            let mut secure_id = NodeId::generate_random();
-            secure_id.secure_node_id(&IpAddr::V4(ip));
-            self.node_id = secure_id;
-            self.routing_table = RoutingTable::new(secure_id);
-            tracing::info!("Generated BEP 42 secure node ID: {:?}", self.node_id);
+            let ip_addr = IpAddr::V4(ip);
+
+            // Check if our current ID is already BEP 42 compliant for this IP
+            if self.node_id.is_node_id_secure(ip_addr) {
+                tracing::info!(
+                    "Reusing existing BEP 42 compliant node ID: {:?}",
+                    self.node_id
+                );
+            } else {
+                // IP changed or no valid ID - generate new BEP 42 ID
+                let mut secure_id = NodeId::generate_random();
+                secure_id.secure_node_id(&ip_addr);
+                self.node_id = secure_id;
+                self.routing_table = RoutingTable::new(secure_id);
+                tracing::info!("Generated new BEP 42 secure node ID: {:?}", self.node_id);
+
+                // Save the new ID if persistence is enabled
+                if let Some(ref path) = self.id_file_path {
+                    if let Err(e) = self.node_id.save(path) {
+                        tracing::warn!("Failed to save node ID to {}: {}", path.display(), e);
+                    } else {
+                        tracing::info!("Saved new BEP 42 node ID to {}", path.display());
+                    }
+                }
+            }
         } else {
             tracing::warn!("Could not discover external IP, using random node ID");
         }
