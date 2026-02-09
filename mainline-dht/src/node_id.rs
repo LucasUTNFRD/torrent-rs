@@ -1,11 +1,12 @@
 use std::{
-    fmt,
+    fmt, fs, io,
     net::{IpAddr, Ipv4Addr},
     ops::BitXor,
+    path::Path,
 };
 
 use bittorrent_common::types::InfoHash;
-use crc::{CRC_32_ISCSI, Crc};
+use crc::{Crc, CRC_32_ISCSI};
 use rand::Rng;
 
 const CASTAGNOLI: Crc<u32> = Crc::<u32>::new(&CRC_32_ISCSI);
@@ -240,11 +241,43 @@ impl NodeId {
             && self.0[1] == expected_b1
             && (self.0[2] & 0xf8) == expected_b2_top5
     }
+
+    /// Load node ID from a file, or generate a new one if file doesn't exist
+    pub fn load_or_generate(path: &Path) -> io::Result<Self> {
+        if path.exists() {
+            let bytes = fs::read(path)?;
+            if bytes.len() == 20 {
+                let mut arr = [0u8; 20];
+                arr.copy_from_slice(&bytes);
+                Ok(NodeId(arr))
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Invalid node ID file: expected 20 bytes",
+                ))
+            }
+        } else {
+            // Generate new ID and save it
+            let id = Self::generate_random();
+            id.save(path)?;
+            Ok(id)
+        }
+    }
+
+    /// Save node ID to a file
+    pub fn save(&self, path: &Path) -> io::Result<()> {
+        // Create parent directories if needed
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, &self.0)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod test {
-    use crate::node_id::{NodeId, is_local_ipv4};
+    use crate::node_id::{is_local_ipv4, NodeId};
     use std::net::Ipv4Addr;
 
     #[test]
@@ -369,5 +402,79 @@ mod test {
         assert!(random_id.is_node_id_secure_v4(&Ipv4Addr::new(192, 168, 1, 1)));
         assert!(random_id.is_node_id_secure_v4(&Ipv4Addr::new(10, 0, 0, 1)));
         assert!(random_id.is_node_id_secure_v4(&Ipv4Addr::new(127, 0, 0, 1)));
+    }
+
+    #[test]
+    fn test_save_and_load_node_id() {
+        use std::env::temp_dir;
+
+        // Create a temporary file path
+        let temp_path = temp_dir().join("test_node_id_persistence.tmp");
+
+        // Clean up any existing test file
+        let _ = std::fs::remove_file(&temp_path);
+
+        // Generate and save a node ID
+        let id1 = NodeId::generate_random();
+        id1.save(&temp_path).expect("Failed to save node ID");
+
+        // Load the node ID back
+        let id2 = NodeId::load_or_generate(&temp_path).expect("Failed to load node ID");
+
+        // They should be equal
+        assert_eq!(
+            id1.as_bytes(),
+            id2.as_bytes(),
+            "Loaded ID should match saved ID"
+        );
+
+        // Clean up
+        let _ = std::fs::remove_file(&temp_path);
+    }
+
+    #[test]
+    fn test_load_or_generate_creates_new_if_missing() {
+        use std::env::temp_dir;
+
+        // Create a temporary file path that doesn't exist
+        let temp_path = temp_dir().join("test_node_id_new.tmp");
+
+        // Clean up any existing test file
+        let _ = std::fs::remove_file(&temp_path);
+
+        // Should generate a new ID since file doesn't exist
+        let id = NodeId::load_or_generate(&temp_path).expect("Failed to load or generate node ID");
+
+        // Verify the file was created
+        assert!(temp_path.exists(), "ID file should be created");
+
+        // Load it again - should get the same ID
+        let id2 = NodeId::load_or_generate(&temp_path).expect("Failed to load node ID");
+        assert_eq!(
+            id.as_bytes(),
+            id2.as_bytes(),
+            "Loaded ID should match generated ID"
+        );
+
+        // Clean up
+        let _ = std::fs::remove_file(&temp_path);
+    }
+
+    #[test]
+    fn test_load_invalid_file_size() {
+        use std::env::temp_dir;
+
+        // Create a temporary file with invalid size
+        let temp_path = temp_dir().join("test_node_id_invalid.tmp");
+
+        // Write invalid data (not 20 bytes)
+        std::fs::write(&temp_path, &[1, 2, 3, 4, 5]).expect("Failed to write test file");
+
+        // Should fail with InvalidData error
+        let result = NodeId::load_or_generate(&temp_path);
+        assert!(result.is_err(), "Should fail for invalid file size");
+
+        // Clean up
+        let _ = std::fs::remove_file(&temp_path);
     }
 }

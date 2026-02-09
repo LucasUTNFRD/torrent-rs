@@ -10,6 +10,7 @@
 use std::{
     collections::{HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, ToSocketAddrs},
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicU16, Ordering},
@@ -53,6 +54,48 @@ const QUERY_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Number of parallel queries in iterative lookup.
 const ALPHA: usize = 3;
+
+// ============================================================================
+// Configuration
+// ============================================================================
+
+/// Configuration for DHT node ID persistence
+#[derive(Debug, Clone)]
+pub struct DhtConfig {
+    /// Path to store the node ID file. If None, generates random ID on each start
+    pub id_file_path: Option<PathBuf>,
+    /// Network port to bind to
+    pub port: u16,
+}
+
+impl Default for DhtConfig {
+    fn default() -> Self {
+        Self {
+            id_file_path: None,  // Default: no persistence
+            port: DEFAULT_PORT,
+        }
+    }
+}
+
+impl DhtConfig {
+    /// Create a config with default persistence in the user's config directory
+    ///
+    /// On Linux: ~/.config/mainline-dht/node.id
+    /// On macOS: ~/Library/Application Support/mainline-dht/node.id  
+    /// On Windows: %APPDATA%/mainline-dht/node.id
+    pub fn with_default_persistence(port: u16) -> Result<Self, DhtError> {
+        let project_dirs = directories::ProjectDirs::from("com", "mainline", "mainline-dht")
+            .ok_or_else(|| DhtError::Other("Could not determine config directory".to_string()))?;
+
+        let config_dir = project_dirs.config_dir();
+        let id_path = config_dir.join("node.id");
+
+        Ok(Self {
+            id_file_path: Some(id_path),
+            port,
+        })
+    }
+}
 
 // ============================================================================
 // Result Types
@@ -103,22 +146,44 @@ impl Dht {
     ///
     /// If no port is specified, binds to port 6881 (default DHT port).
     /// The node is not bootstrapped yet - call `bootstrap()` to join the network.
+    ///
+    /// Uses default configuration (random ID on each start, no persistence).
     pub async fn new(port: Option<u16>) -> Result<Self, DhtError> {
-        let port = port.unwrap_or(DEFAULT_PORT);
-        let bind_addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port);
+        let config = DhtConfig {
+            port: port.unwrap_or(DEFAULT_PORT),
+            ..Default::default()
+        };
+        Self::with_config(config).await
+    }
 
+    /// Create a new DHT node with full configuration
+    pub async fn with_config(config: DhtConfig) -> Result<Self, DhtError> {
+        let bind_addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, config.port);
         let socket = UdpSocket::bind(bind_addr).await?;
         let socket = Arc::new(socket);
 
-        // Start with a random node ID (will be replaced with BEP 42 secure ID after bootstrap)
-        let initial_id = NodeId::generate_random();
-        let node_id = Arc::new(std::sync::RwLock::new(initial_id));
+        // Load or generate node ID
+        let initial_id = if let Some(ref path) = config.id_file_path {
+            match NodeId::load_or_generate(path) {
+                Ok(id) => {
+                    tracing::info!("Loaded node ID from {}", path.display());
+                    id
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to load node ID from {}: {}, generating new", 
+                        path.display(), e);
+                    NodeId::generate_random()
+                }
+            }
+        } else {
+            NodeId::generate_random()
+        };
 
+        let node_id = Arc::new(std::sync::RwLock::new(initial_id));
         let (command_tx, command_rx) = mpsc::channel(32);
 
-        let actor = DhtActor::new(socket, initial_id, command_rx);
+        let actor = DhtActor::new(socket, initial_id, command_rx, config.id_file_path.clone());
 
-        // Spawn the actor
         let node_id_clone = node_id.clone();
         tokio::spawn(async move {
             if let Err(e) = actor.run(node_id_clone).await {
@@ -298,8 +363,22 @@ impl DhtHandler {
     ///
     /// This creates the DHT node but does NOT bootstrap automatically.
     /// Call `bootstrap()` before using `get_peers()` or `announce()`.
+    ///
+    /// Uses default configuration (random ID on each start, no persistence).
     pub async fn new(port: Option<u16>) -> Result<Self, DhtError> {
-        let dht = Dht::new(port).await?;
+        let config = DhtConfig {
+            port: port.unwrap_or(DEFAULT_PORT),
+            ..Default::default()
+        };
+        Self::with_config(config).await
+    }
+
+    /// Create a new DHT handler with full configuration.
+    ///
+    /// This creates the DHT node but does NOT bootstrap automatically.
+    /// Call `bootstrap()` before using `get_peers()` or `announce()`.
+    pub async fn with_config(config: DhtConfig) -> Result<Self, DhtError> {
+        let dht = Dht::with_config(config).await?;
         Ok(Self { dht })
     }
 
@@ -440,6 +519,8 @@ struct DhtActor {
     token_manager: TokenManager,
     /// Active searches for concurrent query execution.
     search_manager: SearchManager,
+    /// Path to store the node ID file for persistence.
+    id_file_path: Option<PathBuf>,
 }
 
 impl DhtActor {
@@ -447,6 +528,7 @@ impl DhtActor {
         socket: Arc<UdpSocket>,
         node_id: NodeId,
         command_rx: mpsc::Receiver<DhtCommand>,
+        id_file_path: Option<PathBuf>,
     ) -> Self {
         Self {
             socket,
@@ -458,6 +540,7 @@ impl DhtActor {
             peer_store: PeerStore::new(),
             token_manager: TokenManager::new(),
             search_manager: SearchManager::new(),
+            id_file_path,
         }
     }
 
@@ -593,13 +676,33 @@ impl DhtActor {
             }
         }
 
-        // Generate BEP 42 secure node ID
+        // Check/update BEP 42 secure node ID
         if let Some(ip) = external_ip {
-            let mut secure_id = NodeId::generate_random();
-            secure_id.secure_node_id(&IpAddr::V4(ip));
-            self.node_id = secure_id;
-            self.routing_table = RoutingTable::new(secure_id);
-            tracing::info!("Generated BEP 42 secure node ID: {:?}", self.node_id);
+            let ip_addr = IpAddr::V4(ip);
+
+            // Check if our current ID is already BEP 42 compliant for this IP
+            if self.node_id.is_node_id_secure(ip_addr) {
+                tracing::info!(
+                    "Reusing existing BEP 42 compliant node ID: {:?}",
+                    self.node_id
+                );
+            } else {
+                // IP changed or no valid ID - generate new BEP 42 ID
+                let mut secure_id = NodeId::generate_random();
+                secure_id.secure_node_id(&ip_addr);
+                self.node_id = secure_id;
+                self.routing_table = RoutingTable::new(secure_id);
+                tracing::info!("Generated new BEP 42 secure node ID: {:?}", self.node_id);
+
+                // Save the new ID if persistence is enabled
+                if let Some(ref path) = self.id_file_path {
+                    if let Err(e) = self.node_id.save(path) {
+                        tracing::warn!("Failed to save node ID to {}: {}", path.display(), e);
+                    } else {
+                        tracing::info!("Saved new BEP 42 node ID to {}", path.display());
+                    }
+                }
+            }
         } else {
             tracing::warn!("Could not discover external IP, using random node ID");
         }

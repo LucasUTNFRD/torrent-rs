@@ -9,7 +9,8 @@
 
 use bittorrent_common::types::InfoHash;
 use clap::Parser;
-use mainline_dht::Dht;
+use mainline_dht::{Dht, DhtConfig};
+use std::path::PathBuf;
 use std::time::Instant;
 use tracing::Level;
 
@@ -18,6 +19,10 @@ use tracing::Level;
 struct Cli {
     /// info_hash to lookup peers for (hex string)
     infohash: String,
+
+    /// Path to node ID file (persists identity across restarts)
+    #[arg(short = 'i', long, default_value = None)]
+    id_file: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -32,7 +37,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .expect("Invalid info_hash: must be a 40-character hex string");
 
     println!("Creating DHT node...");
-    let dht = Dht::new(None).await?;
+    let config = if let Some(id_path) = cli.id_file {
+        DhtConfig {
+            id_file_path: Some(id_path),
+            port: 6881,
+        }
+    } else {
+        DhtConfig::with_default_persistence(6881)?
+    };
+
+    let dht = Dht::with_config(config).await?;
 
     println!("Bootstrapping into the DHT network...");
     dht.bootstrap().await?;
