@@ -14,14 +14,14 @@ use std::{
         Arc,
         atomic::{AtomicU16, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use bittorrent_common::types::InfoHash;
 use tokio::{
     net::UdpSocket,
     sync::{mpsc, oneshot},
-    time::timeout,
+    time::{timeout, interval},
 };
 
 use crate::{
@@ -31,6 +31,7 @@ use crate::{
     node_id::NodeId,
     peer_store::PeerStore,
     routing_table::{K, RoutingTable},
+    search::{SearchManager, SearchState, CandidateStatus, MAX_INFLIGHT_QUERIES, TARGET_RESPONSES, QUERY_TIMEOUT_SECS},
     token::TokenManager,
 };
 
@@ -435,6 +436,8 @@ struct DhtActor {
     peer_store: PeerStore,
     /// Token generation and validation.
     token_manager: TokenManager,
+    /// Active searches for concurrent query execution.
+    search_manager: SearchManager,
 }
 
 impl DhtActor {
@@ -452,6 +455,7 @@ impl DhtActor {
             pending: HashMap::new(),
             peer_store: PeerStore::new(),
             token_manager: TokenManager::new(),
+            search_manager: SearchManager::new(),
         }
     }
 
@@ -553,7 +557,7 @@ impl DhtActor {
                     // Extract external IP from response
                     if let Some(sender_ip) = msg.sender_ip {
                         external_ip = Some(*sender_ip.ip());
-                        tracing::info!("Discovered external IP: {}", sender_ip.ip());
+                        // tracing::info!("Discovered external IP: {}", sender_ip.ip());
                     }
 
                     // Add the responding node
