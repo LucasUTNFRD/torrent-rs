@@ -339,7 +339,8 @@ mod tests {
 
     #[test]
     fn test_search_state_creation() {
-        let info_hash = InfoHash::new([0xab; 20]);
+        // Use target 0x00... so that XOR distance equals node ID
+        let info_hash = InfoHash::new([0u8; 20]);
         let nodes = vec![make_node(1), make_node(5), make_node(2)];
         let (tx, _rx) = oneshot::channel();
 
@@ -348,7 +349,7 @@ mod tests {
         assert_eq!(search.candidates.len(), 3);
         assert_eq!(search.in_flight, 0);
         assert_eq!(search.responded, 0);
-        // Should be sorted by distance
+        // Should be sorted by distance (with target=0, distance = node_id)
         assert_eq!(search.candidates[0].node.node_id.as_bytes()[19], 1);
         assert_eq!(search.candidates[1].node.node_id.as_bytes()[19], 2);
         assert_eq!(search.candidates[2].node.node_id.as_bytes()[19], 5);
