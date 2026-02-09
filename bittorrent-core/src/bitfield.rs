@@ -373,7 +373,7 @@ mod test {
     fn test_edge_cases() {
         // Empty bitfield
         let bitfield = Bitfield::new();
-        assert!(bitfield.is_empty());
+        assert!(bitfield.inner.is_empty());
         assert_eq!(bitfield.size(), 0);
 
         // Single bit
