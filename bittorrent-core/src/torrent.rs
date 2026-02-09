@@ -383,7 +383,7 @@ impl Torrent {
 
         let (peer_tx, peer_rx) = mpsc::channel(64);
 
-        let peer_addr = peer.get_addr().clone();
+        let peer_addr = *peer.get_addr();
         info!("connecting to {}", peer_addr);
 
         self.metrics.connected_peers.fetch_add(1, Ordering::Relaxed);
