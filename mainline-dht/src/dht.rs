@@ -21,7 +21,7 @@ use bittorrent_common::types::InfoHash;
 use tokio::{
     net::UdpSocket,
     sync::{mpsc, oneshot},
-    time::{timeout, interval},
+    time::{interval, timeout},
 };
 
 use crate::{
@@ -31,7 +31,9 @@ use crate::{
     node_id::NodeId,
     peer_store::PeerStore,
     routing_table::{K, RoutingTable},
-    search::{SearchManager, SearchState, CandidateStatus, MAX_INFLIGHT_QUERIES, QUERY_TIMEOUT_SECS},
+    search::{
+        CandidateStatus, MAX_INFLIGHT_QUERIES, QUERY_TIMEOUT_SECS, SearchManager, SearchState,
+    },
     token::TokenManager,
 };
 
@@ -465,7 +467,7 @@ impl DhtActor {
 
     async fn run(mut self, shared_node_id: Arc<std::sync::RwLock<NodeId>>) -> Result<(), DhtError> {
         let mut buf = [0u8; 1500];
-        
+
         // Interval for checking search timeouts (100ms as per plan)
         let mut timeout_check_interval = interval(Duration::from_millis(100));
 
@@ -502,9 +504,9 @@ impl DhtActor {
                             // Use the new concurrent search system
                             // Create a wrapper channel that wraps the result in Ok()
                             let (inner_tx, inner_rx) = oneshot::channel::<GetPeersResult>();
-                            
+
                             self.start_concurrent_get_peers(info_hash, inner_tx).await;
-                            
+
                             // Spawn a task to forward the result wrapped in Ok()
                             tokio::spawn(async move {
                                 match inner_rx.await {
@@ -530,7 +532,7 @@ impl DhtActor {
                         }
                     }
                 }
-                
+
                 // Check for search timeouts periodically
                 _ = timeout_check_interval.tick() => {
                     self.check_search_timeouts().await;
@@ -1114,10 +1116,11 @@ impl DhtActor {
         for (info_hash, search) in &self.search_manager.searches {
             for candidate in &search.candidates {
                 if let CandidateStatus::Querying(tx_id) = &candidate.status {
-                    if let Some(sent_at) = candidate.query_sent_at {
-                        if now.duration_since(sent_at) > timeout_duration {
-                            timed_out.push((*info_hash, tx_id.clone()));
-                        }
+                    let is_timed_out = candidate
+                        .query_sent_at
+                        .is_some_and(|sent_at| now.duration_since(sent_at) > timeout_duration);
+                    if is_timed_out {
+                        timed_out.push((*info_hash, tx_id.clone()));
                     }
                 }
             }
@@ -1130,7 +1133,8 @@ impl DhtActor {
 
             // Mark candidate as failed
             if let Some(search) = self.search_manager.searches.get_mut(&info_hash) {
-                if search.mark_failed(&tx_id).is_some() {
+                let was_in_flight = search.mark_failed(&tx_id).is_some();
+                if was_in_flight {
                     search.in_flight = search.in_flight.saturating_sub(1);
                     tracing::debug!("Query timed out for search {}", info_hash);
                 }
@@ -1216,9 +1220,11 @@ impl DhtActor {
             };
 
             // Find the candidate that responded and add to nodes_with_tokens
-            if let Some(candidate) = search.candidates.iter().find(|c| {
-                matches!(&c.status, CandidateStatus::Responded) && c.node.addr == from_v4
-            }) {
+            if let Some(candidate) = search
+                .candidates
+                .iter()
+                .find(|c| matches!(&c.status, CandidateStatus::Responded) && c.node.addr == from_v4)
+            {
                 search
                     .nodes_with_tokens
                     .push((candidate.node.clone(), token));
