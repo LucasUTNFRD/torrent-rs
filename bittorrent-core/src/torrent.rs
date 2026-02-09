@@ -132,6 +132,12 @@ pub enum TorrentMessage {
         pid: Pid,
         rejected_piece: u32,
     },
+    /// Inbound peer connection (peer found us and wants to connect)
+    InboundPeer {
+        stream: TcpStream,
+        remote_addr: SocketAddr,
+        supports_ext: bool,
+    },
 }
 
 //
@@ -264,7 +270,7 @@ impl Torrent {
                 shutdown_rx,
                 peers: HashMap::default(),
                 tx: tx.clone(),
-                rx: rx,
+                rx,
                 bitfield: Bitfield::new(),
                 piece_mananger: None,
                 // piece_collector: None,
@@ -548,6 +554,18 @@ impl Torrent {
                         }
                     });
                 }
+            }
+            TorrentMessage::InboundPeer {
+                stream,
+                remote_addr,
+                supports_ext,
+            } => {
+                info!("Received inbound peer connection from {}", remote_addr);
+                self.add_peer(PeerSource::Inbound {
+                    stream,
+                    remote_addr,
+                    supports_ext,
+                });
             }
         }
         Ok(())
