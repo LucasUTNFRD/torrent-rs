@@ -584,7 +584,7 @@ impl SessionManager {
                         return;
                     }
 
-                    let _supports_ext = remote_handshake.support_extended_message();
+                    let supports_ext = remote_handshake.support_extended_message();
 
                     tracing::info!(
                         "Incoming peer connection from {:?} for {:?}",
@@ -592,8 +592,24 @@ impl SessionManager {
                         remote_handshake.info_hash
                     );
 
-                    // TODO: Forward connection to the appropriate torrent
-                    // This requires adding an InboundPeer message to TorrentMessage
+                    // Forward connection to the appropriate torrent
+                    let torrent_tx = {
+                        sessions
+                            .read()
+                            .unwrap()
+                            .get(&remote_handshake.info_hash)
+                            .map(|entry| entry.tx.clone())
+                    };
+
+                    if let Some(tx) = torrent_tx {
+                        let _ = tx
+                            .send(TorrentMessage::InboundPeer {
+                                stream,
+                                remote_addr,
+                                supports_ext,
+                            })
+                            .await;
+                    }
                 });
             }
         });
