@@ -31,7 +31,7 @@ use crate::{
     node_id::NodeId,
     peer_store::PeerStore,
     routing_table::{K, RoutingTable},
-    search::{SearchManager, SearchState, CandidateStatus, MAX_INFLIGHT_QUERIES, TARGET_RESPONSES, QUERY_TIMEOUT_SECS},
+    search::{SearchManager, SearchState, CandidateStatus, MAX_INFLIGHT_QUERIES, QUERY_TIMEOUT_SECS},
     token::TokenManager,
 };
 
@@ -465,6 +465,9 @@ impl DhtActor {
 
     async fn run(mut self, shared_node_id: Arc<std::sync::RwLock<NodeId>>) -> Result<(), DhtError> {
         let mut buf = [0u8; 1500];
+        
+        // Interval for checking search timeouts (100ms as per plan)
+        let mut timeout_check_interval = interval(Duration::from_millis(100));
 
         loop {
             tokio::select! {
@@ -496,8 +499,19 @@ impl DhtActor {
                             let _ = resp.send(result);
                         }
                         DhtCommand::GetPeers { info_hash, resp } => {
-                            let result = self.iterative_get_peers(info_hash).await;
-                            let _ = resp.send(result);
+                            // Use the new concurrent search system
+                            // Create a wrapper channel that wraps the result in Ok()
+                            let (inner_tx, inner_rx) = oneshot::channel::<GetPeersResult>();
+                            
+                            self.start_concurrent_get_peers(info_hash, inner_tx).await;
+                            
+                            // Spawn a task to forward the result wrapped in Ok()
+                            tokio::spawn(async move {
+                                match inner_rx.await {
+                                    Ok(result) => { let _ = resp.send(Ok(result)); }
+                                    Err(_) => { let _ = resp.send(Err(DhtError::ChannelClosed)); }
+                                }
+                            });
                         }
                         DhtCommand::Announce { info_hash, port, implied_port, resp } => {
                             let result = self.announce(info_hash, port, implied_port).await;
@@ -515,6 +529,11 @@ impl DhtActor {
                             return Ok(());
                         }
                     }
+                }
+                
+                // Check for search timeouts periodically
+                _ = timeout_check_interval.tick() => {
+                    self.check_search_timeouts().await;
                 }
             }
         }
@@ -731,6 +750,54 @@ impl DhtActor {
     // ========================================================================
     // Iterative Get Peers (Kademlia lookup for peers)
     // ========================================================================
+
+    /// Start a concurrent get_peers search.
+    /// Returns immediately; the result will be sent via the provided channel.
+    async fn start_concurrent_get_peers(
+        &mut self,
+        info_hash: InfoHash,
+        completion_tx: oneshot::Sender<GetPeersResult>,
+    ) {
+        let target = NodeId::from(&info_hash);
+
+        // Get initial candidates from routing table
+        let initial = self.routing_table.get_closest_nodes(&target, K);
+
+        if initial.is_empty() {
+            tracing::debug!("start_concurrent_get_peers: no initial candidates in routing table");
+            let result = GetPeersResult {
+                peers: Vec::new(),
+                nodes_contacted: 0,
+                nodes_with_tokens: Vec::new(),
+            };
+            let _ = completion_tx.send(result);
+            return;
+        }
+
+        tracing::debug!(
+            "start_concurrent_get_peers: starting with {} candidates for {}",
+            initial.len(),
+            info_hash
+        );
+
+        // Create candidates from initial nodes
+        let candidates: Vec<CompactNodeInfo> = initial
+            .into_iter()
+            .map(|n| CompactNodeInfo {
+                node_id: n.node_id,
+                addr: n.addr,
+            })
+            .collect();
+
+        // Create search state
+        let search = SearchState::new(info_hash, candidates, completion_tx);
+
+        // Store search - it will continue in background
+        self.search_manager.start_search(search);
+
+        // Start initial queries (up to MAX_INFLIGHT_QUERIES)
+        self.advance_search(info_hash).await;
+    }
 
     async fn iterative_get_peers(
         &mut self,
