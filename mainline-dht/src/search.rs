@@ -230,12 +230,13 @@ impl SearchState {
     }
 
     /// Build the final result.
-    pub fn into_result(self) -> GetPeersResult {
-        GetPeersResult {
+    pub fn into_result(self) -> (GetPeersResult, Option<oneshot::Sender<GetPeersResult>>) {
+        let result = GetPeersResult {
             peers: self.peers_found.into_iter().collect(),
             nodes_contacted: self.responded,
             nodes_with_tokens: self.nodes_with_tokens,
-        }
+        };
+        (result, self.completion_tx)
     }
 }
 
