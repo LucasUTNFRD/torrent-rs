@@ -1114,6 +1114,93 @@ impl DhtActor {
         }
     }
 
+    /// Handle a get_peers response for an active concurrent search.
+    async fn handle_search_response(&mut self, msg: KrpcMessage, from: SocketAddr) {
+        let tx_id = msg.transaction_id.0.clone();
+
+        // Look up which search this belongs to
+        let Some(info_hash) = self.search_manager.remove_tx(&tx_id) else {
+            // Not a search response, ignore
+            return;
+        };
+
+        // Get the search
+        let Some(search) = self.search_manager.searches.get_mut(&info_hash) else {
+            return;
+        };
+
+        // Mark candidate as responded and decrement in_flight
+        if search.mark_responded(&tx_id).is_some() {
+            search.in_flight = search.in_flight.saturating_sub(1);
+            search.responded += 1;
+        }
+
+        // Process response data
+        if let MessageBody::Response(Response::GetPeers {
+            token,
+            values,
+            nodes,
+            ..
+        }) = msg.body
+        {
+            // Store token for announce
+            let SocketAddr::V4(from_v4) = from else {
+                return;
+            };
+
+            // Find the candidate that responded and add to nodes_with_tokens
+            if let Some(candidate) = search.candidates.iter().find(|c| {
+                matches!(&c.status, CandidateStatus::Responded) && c.node.addr == from_v4
+            }) {
+                search
+                    .nodes_with_tokens
+                    .push((candidate.node.clone(), token));
+            }
+
+            // Collect peers (deduplicated via HashSet)
+            if let Some(peers) = values {
+                for peer in peers {
+                    search.peers_found.insert(peer);
+                }
+                tracing::debug!(
+                    "Got {} peers from {} for {}",
+                    search.peers_found.len(),
+                    from,
+                    info_hash
+                );
+            }
+
+            // Add closer nodes to candidates
+            if let Some(new_nodes) = nodes {
+                // Add to routing table
+                for node_info in &new_nodes {
+                    let new_node = Node::new(node_info.node_id, node_info.addr);
+                    self.routing_table.try_add_node(new_node);
+                }
+
+                // Add to search candidates
+                if let Some(search) = self.search_manager.searches.get_mut(&info_hash) {
+                    search.add_candidates(new_nodes);
+                }
+            }
+        }
+
+        // Check if search should complete
+        let should_complete = self
+            .search_manager
+            .searches
+            .get(&info_hash)
+            .map(|s| s.should_complete())
+            .unwrap_or(false);
+
+        if should_complete {
+            self.complete_search(info_hash).await;
+        } else {
+            // Continue search - fill available slots
+            self.advance_search(info_hash).await;
+        }
+    }
+
     async fn send_and_wait(
         &mut self,
         msg: KrpcMessage,
@@ -1194,7 +1281,12 @@ impl DhtActor {
                     tx_id,
                     self.pending.len()
                 );
-                if let Some(pending) = self.pending.remove(&tx_id) {
+
+                // Check if this is a response for an active concurrent search
+                if self.search_manager.lookup_tx(&tx_id).is_some() {
+                    self.handle_search_response(msg, from).await;
+                } else if let Some(pending) = self.pending.remove(&tx_id) {
+                    // Legacy path: send to pending channel (used by send_and_wait)
                     let _ = pending.resp_tx.send(msg);
                 } else {
                     tracing::debug!("Received response for unknown transaction from {from}");
