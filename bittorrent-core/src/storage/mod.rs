@@ -207,29 +207,30 @@ mod test {
 
         let state = StorageState::new(download_dir.clone());
         state.add_torrent(info_hash, info);
+        let cache = state.get_torrent(&info_hash).unwrap();
 
         let piece0_data: Vec<u8> = (0..piece_length).map(|i| i as u8).collect();
         let piece1_data: Vec<u8> = (0..piece_length).map(|i| (i + 128) as u8).collect();
 
         state
-            .write(info_hash, 0, &piece0_data)
+            .write(&cache, 0, &piece0_data)
             .expect("write piece 0 failed");
         state
-            .write(info_hash, 1, &piece1_data)
+            .write(&cache, 1, &piece1_data)
             .expect("write piece 1 failed");
 
         let read_piece0 = state
-            .read(info_hash, 0, 0, piece_length as u32)
+            .read(&cache, 0, 0, piece_length as u32)
             .expect("read piece0 failed");
         assert_eq!(read_piece0.data, piece0_data);
 
         let read_piece1 = state
-            .read(info_hash, 1, 0, piece_length as u32)
+            .read(&cache, 1, 0, piece_length as u32)
             .expect("read piece1 failed");
         assert_eq!(read_piece1.data, piece1_data);
 
         let block = state
-            .read(info_hash, 0, 256, 256)
+            .read(&cache, 0, 256, 256)
             .expect("read block failed");
         assert_eq!(block.data, &piece0_data[256..512]);
 
@@ -271,31 +272,32 @@ mod test {
 
         let state = StorageState::new(download_dir.clone());
         state.add_torrent(id, info);
+        let cache = state.get_torrent(&id).unwrap();
 
         let piece0_data: Vec<u8> = (0..512).map(|i| i as u8).collect();
         let piece1_data: Vec<u8> = (0..512).map(|i| (i + 100) as u8).collect();
         let piece2_data: Vec<u8> = (0..76).map(|i| (i + 200) as u8).collect();
 
         state
-            .write(id, 0, &piece0_data)
+            .write(&cache, 0, &piece0_data)
             .expect("write piece 0 failed");
         state
-            .write(id, 1, &piece1_data)
+            .write(&cache, 1, &piece1_data)
             .expect("write piece 1 failed");
         state
-            .write(id, 2, &piece2_data)
+            .write(&cache, 2, &piece2_data)
             .expect("write piece 2 failed");
 
-        let read_p0 = state.read(id, 0, 0, 512).expect("read p0 failed");
+        let read_p0 = state.read(&cache, 0, 0, 512).expect("read p0 failed");
         assert_eq!(read_p0.data, piece0_data);
 
-        let read_p1 = state.read(id, 1, 0, 512).expect("read p1 failed");
+        let read_p1 = state.read(&cache, 1, 0, 512).expect("read p1 failed");
         assert_eq!(read_p1.data, piece1_data);
 
-        let read_p2 = state.read(id, 2, 0, 76).expect("read p2 failed");
+        let read_p2 = state.read(&cache, 2, 0, 76).expect("read p2 failed");
         assert_eq!(read_p2.data, piece2_data);
 
-        let spanning_block = state.read(id, 1, 88, 100).expect("spanning read failed");
+        let spanning_block = state.read(&cache, 1, 88, 100).expect("spanning read failed");
         assert_eq!(spanning_block.data.len(), 100);
 
         fs::remove_dir_all(&download_dir).unwrap();
@@ -321,6 +323,7 @@ mod test {
 
         let state = StorageState::new(download_dir.clone());
         state.add_torrent(id, info);
+        let cache = state.get_torrent(&id).unwrap();
 
         // Initial state: no file handles cached
         assert_eq!(
@@ -339,7 +342,7 @@ mod test {
 
         // First write should open and cache the file handle
         let data = vec![42u8; 512];
-        state.write(id, 0, &data).expect("write failed");
+        state.write(&cache, 0, &data).expect("write failed");
         assert_eq!(
             state
                 .torrents
@@ -355,7 +358,7 @@ mod test {
         );
 
         // Subsequent operations should reuse the cached handle
-        state.write(id, 1, &data).expect("second write failed");
+        state.write(&cache, 1, &data).expect("second write failed");
         assert_eq!(
             state
                 .torrents
@@ -370,7 +373,7 @@ mod test {
             1
         );
 
-        let _read_data = state.read(id, 0, 0, 256).expect("read failed");
+        let _read_data = state.read(&cache, 0, 0, 256).expect("read failed");
         assert_eq!(
             state
                 .torrents
