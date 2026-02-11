@@ -247,7 +247,11 @@ impl StorageManager {
                     self.storage.add_torrent(info_hash, meta);
                 }
                 StorageMessage::RemoveTorrent { id } => {
-                    self.storage.torrents.write().unwrap().remove(&id);
+                    // self.storage
+                    let storage = self.storage.clone();
+                    tokio::task::spawn_blocking(move || {
+                        storage.torrents.write().unwrap().remove(&id);
+                    });
                 }
                 StorageMessage::Read {
                     id,
@@ -256,18 +260,23 @@ impl StorageManager {
                     length,
                     block_rx,
                 } => {
-                    let data = self.storage.read(id, piece_index, begin, length);
-                    let _ = block_rx.send(data);
+                    let storage = self.storage.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let data = storage.read(id, piece_index, begin, length);
+                        let _ = block_rx.send(data);
+                    });
                 }
                 StorageMessage::Write {
                     info_hash,
                     piece,
                     data,
                 } => {
-                    // TODO: return error to session
-                    if let Err(e) = self.storage.write(info_hash, piece, &data) {
-                        tracing::error!(?e);
-                    }
+                    let storage = self.storage.clone();
+                    tokio::task::spawn_blocking(move || {
+                        if let Err(e) = storage.write(info_hash, piece, &data) {
+                            tracing::error!(?e);
+                        }
+                    });
                 }
                 StorageMessage::Verify {
                     info_hash,

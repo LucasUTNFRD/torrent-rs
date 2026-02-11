@@ -5,7 +5,6 @@ use std::{
     io,
     path::{Path, PathBuf},
     sync::Arc,
-    thread::{self},
 };
 
 use bittorrent_common::{metainfo::Info, types::InfoHash};
@@ -74,19 +73,19 @@ impl Storage {
     }
 
     pub fn with_download_dir(download_dir: PathBuf) -> Self {
-        let (tx, rx) = mpsc::channel(256);
+        // TODO(step 6): proper backpressure -- callers use try_send() which
+        // silently drops messages when the channel is full.  For now, size the
+        // buffer large enough that we don't hit this in normal operation.
+        let (tx, rx) = mpsc::channel(1024);
 
         let manager = StorageManager::new(download_dir, rx);
-        let builder = thread::Builder::new().name("Storage handler".to_string());
-        builder
-            .spawn(|| manager.start())
-            .expect("Failed to spawn from thread builder");
+        tokio::spawn(manager.start());
 
         Self { tx }
     }
 
     pub fn add_torrent(&self, info_hash: InfoHash, torrent: Arc<Info>) {
-        let _ = self.tx.send(StorageMessage::AddTorrent {
+        let _ = self.tx.try_send(StorageMessage::AddTorrent {
             info_hash,
             meta: torrent,
         });
@@ -96,7 +95,7 @@ impl Storage {
     pub fn remove_torrent(&self, torrent_id: InfoHash) {
         let _ = self
             .tx
-            .send(StorageMessage::RemoveTorrent { id: torrent_id });
+            .try_send(StorageMessage::RemoveTorrent { id: torrent_id });
     }
 
     pub fn verify_piece(
@@ -106,7 +105,7 @@ impl Storage {
         piece_data: Arc<[u8]>,
         verification_tx: oneshot::Sender<bool>,
     ) {
-        let _ = self.tx.send(StorageMessage::Verify {
+        let _ = self.tx.try_send(StorageMessage::Verify {
             info_hash,
             piece: piece_index,
             data: piece_data,
@@ -115,7 +114,7 @@ impl Storage {
     }
 
     pub fn write_piece(&self, info_hash: InfoHash, piece_index: u32, piece_data: Arc<[u8]>) {
-        let _ = self.tx.send(StorageMessage::Write {
+        let _ = self.tx.try_send(StorageMessage::Write {
             info_hash,
             piece: piece_index,
             data: piece_data,
@@ -128,7 +127,7 @@ impl Storage {
         block_info: BlockInfo,
         block_rx: oneshot::Sender<Result<Block, io::Error>>,
     ) {
-        let _ = self.tx.send(StorageMessage::Read {
+        let _ = self.tx.try_send(StorageMessage::Read {
             id: torrent_id,
             piece_index: block_info.index,
             begin: block_info.begin,

@@ -376,10 +376,10 @@ fn latency_report() {
         "Verify latency -- downloading (head-of-line blocking)",
         &counts,
         |n| {
-            let env = setup_env(n);
             let latencies: Arc<Mutex<Vec<Duration>>> = Arc::new(Mutex::new(Vec::new()));
 
             rt.block_on(async {
+                let env = setup_env(n);
                 let mut handles = Vec::new();
                 for (info_hash, pieces_data) in &env.setups {
                     let storage = env.storage.clone();
@@ -405,10 +405,10 @@ fn latency_report() {
         "Read latency -- seeding (head-of-line blocking, warm page cache)",
         &counts,
         |n| {
-            let env = setup_env(n);
             let latencies: Arc<Mutex<Vec<Duration>>> = Arc::new(Mutex::new(Vec::new()));
 
             rt.block_on(async {
+                let env = setup_env(n);
                 seed_all_pieces(&env).await;
 
                 let mut handles = Vec::new();
