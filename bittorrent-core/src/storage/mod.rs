@@ -229,9 +229,7 @@ mod test {
             .expect("read piece1 failed");
         assert_eq!(read_piece1.data, piece1_data);
 
-        let block = state
-            .read(&cache, 0, 256, 256)
-            .expect("read block failed");
+        let block = state.read(&cache, 0, 256, 256).expect("read block failed");
         assert_eq!(block.data, &piece0_data[256..512]);
 
         fs::remove_dir_all(&download_dir).unwrap();
@@ -297,7 +295,9 @@ mod test {
         let read_p2 = state.read(&cache, 2, 0, 76).expect("read p2 failed");
         assert_eq!(read_p2.data, piece2_data);
 
-        let spanning_block = state.read(&cache, 1, 88, 100).expect("spanning read failed");
+        let spanning_block = state
+            .read(&cache, 1, 88, 100)
+            .expect("spanning read failed");
         assert_eq!(spanning_block.data.len(), 100);
 
         fs::remove_dir_all(&download_dir).unwrap();
