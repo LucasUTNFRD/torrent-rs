@@ -27,7 +27,7 @@ pub struct StorageManager {
 
 pub(crate) struct StorageState {
     pub download_dir: PathBuf,
-    pub torrents: RwLock<HashMap<InfoHash, TorrentCache>>,
+    pub torrents: RwLock<HashMap<InfoHash, Arc<TorrentCache>>>,
 }
 
 pub struct TorrentCache {
@@ -45,16 +45,16 @@ impl StorageState {
         }
     }
 
-    pub fn write(&self, info_hash: InfoHash, piece_index: u32, data: &[u8]) -> io::Result<()> {
-        let (files, piece_length) = {
-            let torrent_map = self.torrents.read().unwrap();
-            let cache = torrent_map.get(&info_hash).unwrap();
+    /// Look up a torrent by info hash, returning a cloned `Arc` so the caller
+    /// keeps the `TorrentCache` alive even if the entry is concurrently removed
+    /// from the map.
+    pub fn get_torrent(&self, info_hash: &InfoHash) -> Option<Arc<TorrentCache>> {
+        self.torrents.read().unwrap().get(info_hash).map(Arc::clone)
+    }
 
-            (
-                Arc::clone(&cache.files),
-                cache.metainfo.piece_length as usize,
-            )
-        };
+    pub fn write(&self, cache: &TorrentCache, piece_index: u32, data: &[u8]) -> io::Result<()> {
+        let files = Arc::clone(&cache.files);
+        let piece_length = cache.metainfo.piece_length as usize;
 
         // Calculate the global byte offset for this piece
         let mut global_offset = piece_index as usize * piece_length;
@@ -71,7 +71,7 @@ impl StorageState {
             }
 
             // Get or open the file handle
-            let file = self.get_or_open_file(info_hash, &file_info.path)?;
+            let file = self.get_or_open_file(cache, &file_info.path)?;
 
             // Calculate how much we can write to this file
             let start_in_file = global_offset;
@@ -103,18 +103,13 @@ impl StorageState {
 
     pub fn read(
         &self,
-        info_hash: InfoHash,
+        cache: &TorrentCache,
         piece_index: u32,
         begin: u32,
         length: u32,
     ) -> io::Result<Block> {
-        // First, collect the file information we need
-        let (files, piece_length) = {
-            let torrent_map = self.torrents.read().unwrap();
-
-            let cache = torrent_map.get(&info_hash).unwrap();
-            (cache.files.clone(), cache.metainfo.piece_length as usize)
-        };
+        let files = Arc::clone(&cache.files);
+        let piece_length = cache.metainfo.piece_length as usize;
 
         // Calculate global byte offset for this read
         let mut global_offset = (piece_index as usize * piece_length) + begin as usize;
@@ -133,7 +128,7 @@ impl StorageState {
             }
 
             // Get or open the file handle
-            let file = self.get_or_open_file(info_hash, &file_info.path)?;
+            let file = self.get_or_open_file(cache, &file_info.path)?;
 
             // Calculate how much we can read from this file
             let start_in_file = global_offset;
@@ -171,16 +166,8 @@ impl StorageState {
         })
     }
 
-    fn get_or_open_file(&self, info_hash: InfoHash, file_path: &Path) -> io::Result<Arc<File>> {
-        // Read lock on the torrent map -- we're looking up an existing entry,
-        // not inserting/removing a torrent.  Multiple threads can do this
-        // concurrently for different (or the same) torrent.
-        let torrents = self.torrents.read().unwrap();
-        let cache = torrents
-            .get(&info_hash)
-            .expect("Torrent registered by storage");
-
-        // Now lock the per-torrent file handle cache.  This is the only
+    fn get_or_open_file(&self, cache: &TorrentCache, file_path: &Path) -> io::Result<Arc<File>> {
+        // Lock the per-torrent file handle cache.  This is the only
         // Mutex -- its critical section is tiny (HashMap lookup + possible insert).
         // The actual I/O happens AFTER we release this lock, on the Arc<File>.
         let mut handles = cache.file_handles.lock().unwrap();
@@ -223,11 +210,11 @@ impl StorageState {
 
         self.torrents.write().unwrap().insert(
             info_hash,
-            TorrentCache {
+            Arc::new(TorrentCache {
                 metainfo: meta,
                 files: files.into_boxed_slice().into(),
                 file_handles: Mutex::new(HashMap::new()),
-            },
+            }),
         );
     }
 }
@@ -247,11 +234,12 @@ impl StorageManager {
                     self.storage.add_torrent(info_hash, meta);
                 }
                 StorageMessage::RemoveTorrent { id } => {
-                    // self.storage
-                    let storage = self.storage.clone();
-                    tokio::task::spawn_blocking(move || {
-                        storage.torrents.write().unwrap().remove(&id);
-                    });
+                    // Run inline -- the write lock is O(1) and does not perform
+                    // I/O, so it won't block the event loop appreciably.
+                    // Running inline guarantees removal is ordered with respect
+                    // to subsequent messages so we don't need to coordinate with
+                    // in-flight spawned tasks.
+                    self.storage.torrents.write().unwrap().remove(&id);
                 }
                 StorageMessage::Read {
                     id,
@@ -260,9 +248,19 @@ impl StorageManager {
                     length,
                     block_rx,
                 } => {
+                    // Snapshot the Arc<TorrentCache> *before* spawning so the
+                    // cache stays alive even if RemoveTorrent runs before the
+                    // blocking task acquires the lock.
+                    let Some(cache) = self.storage.get_torrent(&id) else {
+                        let _ = block_rx.send(Err(io::Error::new(
+                            io::ErrorKind::NotFound,
+                            "torrent not registered",
+                        )));
+                        continue;
+                    };
                     let storage = self.storage.clone();
                     tokio::task::spawn_blocking(move || {
-                        let data = storage.read(id, piece_index, begin, length);
+                        let data = storage.read(&cache, piece_index, begin, length);
                         let _ = block_rx.send(data);
                     });
                 }
@@ -271,9 +269,13 @@ impl StorageManager {
                     piece,
                     data,
                 } => {
+                    let Some(cache) = self.storage.get_torrent(&info_hash) else {
+                        tracing::error!("write to non-registered torrent {info_hash:?}");
+                        continue;
+                    };
                     let storage = self.storage.clone();
                     tokio::task::spawn_blocking(move || {
-                        if let Err(e) = storage.write(info_hash, piece, &data) {
+                        if let Err(e) = storage.write(&cache, piece, &data) {
                             tracing::error!(?e);
                         }
                     });
@@ -284,16 +286,16 @@ impl StorageManager {
                     data,
                     verification_tx,
                 } => {
-                    let expected_piece_hash = self
-                        .storage
-                        .torrents
-                        .read()
-                        .unwrap()
-                        .get(&info_hash)
-                        .expect("piece verification of a non-registered torrent")
-                        .metainfo
-                        .get_piece_hash(piece as usize)
-                        .copied();
+                    let Some(cache) = self.storage.get_torrent(&info_hash) else {
+                        tracing::error!(
+                            "piece verification of a non-registered torrent {info_hash:?}"
+                        );
+                        let _ = verification_tx.send(false);
+                        continue;
+                    };
+
+                    let expected_piece_hash =
+                        cache.metainfo.get_piece_hash(piece as usize).copied();
 
                     if let Some(expected) = expected_piece_hash {
                         let mut hasher = Sha1::new();
