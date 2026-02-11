@@ -4,7 +4,7 @@ use std::{
     io,
     os::unix::fs::FileExt,
     path::{Path, PathBuf},
-    sync::{Arc, mpsc},
+    sync::{Arc, Mutex, RwLock},
 };
 
 use crate::storage::open_file;
@@ -18,122 +18,40 @@ use bittorrent_common::{
 use bytes::BytesMut;
 use peer_protocol::protocol::Block;
 use sha1::{Digest, Sha1};
+use tokio::sync::mpsc;
 
 pub struct StorageManager {
+    storage: Arc<StorageState>,
+    pub rx: tokio::sync::mpsc::Receiver<StorageMessage>,
+}
+
+pub(crate) struct StorageState {
     pub download_dir: PathBuf,
-    pub torrents: HashMap<InfoHash, Cache>,
-    pub rx: mpsc::Receiver<StorageMessage>,
+    pub torrents: RwLock<HashMap<InfoHash, TorrentCache>>,
 }
 
-pub struct Cache {
+pub struct TorrentCache {
     pub metainfo: Arc<Info>,
-    pub files: Vec<FileInfo>,
-    pub file_handles: HashMap<PathBuf, File>,
+    pub files: Arc<[FileInfo]>,
+    // Because pread()/pwrite() (used by FileExt::read_exact_at / write_all_at) are atomic -- they don't modify the file descriptor's internal seek position. Multiple threads can safely do positional I/O on the same File concurrently. Arc<File> lets us hand out a clone of the file handle to a spawn_blocking closure without holding the Mutex during the actual I/O.
+    pub file_handles: Mutex<HashMap<PathBuf, Arc<File>>>,
 }
 
-impl StorageManager {
-    pub fn new(download_dir: PathBuf, rx: mpsc::Receiver<StorageMessage>) -> Self {
+impl StorageState {
+    pub fn new(download_dir: PathBuf) -> Self {
         Self {
             download_dir,
-            rx,
-            torrents: HashMap::new(),
+            torrents: RwLock::new(HashMap::default()),
         }
     }
 
-    pub fn handle_add_torrent(&mut self, info_hash: InfoHash, meta: Arc<Info>) {
-        let files = meta.files();
-
-        for fi in &files {
-            let full_path = self.download_dir.join(&fi.path);
-
-            if let Some(parent) = full_path.parent()
-                && let Err(e) = std::fs::create_dir_all(parent)
-            {
-                eprintln!("storage: failed to create directory {parent:#?}: {e}");
-            }
-        }
-
-        self.torrents.insert(
-            info_hash,
-            Cache {
-                metainfo: meta,
-                files,
-                file_handles: HashMap::new(),
-            },
-        );
-    }
-
-    pub fn start(mut self) {
-        while let Ok(msg) = self.rx.recv() {
-            match msg {
-                StorageMessage::AddTorrent { info_hash, meta } => {
-                    self.handle_add_torrent(info_hash, meta);
-                }
-                StorageMessage::RemoveTorrent { id } => {
-                    self.torrents.remove(&id);
-                }
-                StorageMessage::Read {
-                    id,
-                    piece_index,
-                    begin,
-                    length,
-                    block_rx,
-                } => {
-                    let data = self.read(id, piece_index, begin, length);
-                    let _ = block_rx.send(data);
-                }
-                StorageMessage::Write {
-                    info_hash,
-                    piece,
-                    data,
-                } => {
-                    // TODO: return error to peer
-                    if let Err(e) = self.write(info_hash, piece, &data) {
-                        tracing::error!(?e);
-                    }
-                }
-                StorageMessage::Verify {
-                    info_hash,
-                    piece,
-                    data,
-                    verification_tx,
-                } => {
-                    let expected_piece_hash = self
-                        .torrents
-                        .get(&info_hash)
-                        .expect("peice verification of a non registered torrent")
-                        .metainfo
-                        .get_piece_hash(piece as usize);
-
-                    match expected_piece_hash {
-                        Some(expected_piece_hash) => {
-                            let mut hasher = Sha1::new();
-                            hasher.update(data);
-                            let piece_hash: [u8; 20] = hasher.finalize().into();
-
-                            let matches = piece_hash == *expected_piece_hash;
-                            if verification_tx.send(matches).is_err() {
-                                tracing::error!("failed to send verification to peer");
-                            };
-                        }
-                        None => {
-                            if verification_tx.send(false).is_err() {
-                                tracing::error!("failed to send verification to peer");
-                            };
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    pub fn write(&mut self, info_hash: InfoHash, piece_index: u32, data: &[u8]) -> io::Result<()> {
-        // First, collect the file information we need
+    pub fn write(&self, info_hash: InfoHash, piece_index: u32, data: &[u8]) -> io::Result<()> {
         let (files, piece_length) = {
-            let cache = self.torrents.get(&info_hash).unwrap();
+            let torrent_map = self.torrents.read().unwrap();
+            let cache = torrent_map.get(&info_hash).unwrap();
+
             (
-                // TODO: Remove this clone
-                cache.files.clone(),
+                Arc::clone(&cache.files),
                 cache.metainfo.piece_length as usize,
             )
         };
@@ -143,7 +61,7 @@ impl StorageManager {
         let mut remaining_data = data;
 
         // Iterate through files to find where to start writing
-        for file_info in &files {
+        for file_info in files.iter() {
             let file_len = file_info.length as usize;
 
             // If this entire file is before our starting offset, skip it
@@ -184,7 +102,7 @@ impl StorageManager {
     }
 
     pub fn read(
-        &mut self,
+        &self,
         info_hash: InfoHash,
         piece_index: u32,
         begin: u32,
@@ -192,7 +110,9 @@ impl StorageManager {
     ) -> io::Result<Block> {
         // First, collect the file information we need
         let (files, piece_length) = {
-            let cache = self.torrents.get(&info_hash).unwrap();
+            let torrent_map = self.torrents.read().unwrap();
+
+            let cache = torrent_map.get(&info_hash).unwrap();
             (cache.files.clone(), cache.metainfo.piece_length as usize)
         };
 
@@ -203,7 +123,7 @@ impl StorageManager {
         let mut bytes_read = 0;
 
         // Iterate through files to find where to start reading
-        for file_info in &files {
+        for file_info in files.iter() {
             let file_len = file_info.length as usize;
 
             // If this entire file is before our starting offset, skip it
@@ -251,14 +171,27 @@ impl StorageManager {
         })
     }
 
-    fn get_or_open_file(&mut self, info_hash: InfoHash, file_path: &Path) -> io::Result<&mut File> {
-        let cache = self.torrents.get_mut(&info_hash).unwrap();
+    fn get_or_open_file(&self, info_hash: InfoHash, file_path: &Path) -> io::Result<Arc<File>> {
+        // Read lock on the torrent map -- we're looking up an existing entry,
+        // not inserting/removing a torrent.  Multiple threads can do this
+        // concurrently for different (or the same) torrent.
+        let torrents = self.torrents.read().unwrap();
+        let cache = torrents
+            .get(&info_hash)
+            .expect("Torrent registered by storage");
 
-        // On first access for this torrent, ensure parents exist for all files.
-        // This is more efficient than creating directories on every write/read,
-        // and it also covers tests that insert Cache directly (bypassing AddTorrent).
-        if cache.file_handles.is_empty() {
-            for fi in &cache.files {
+        // Now lock the per-torrent file handle cache.  This is the only
+        // Mutex -- its critical section is tiny (HashMap lookup + possible insert).
+        // The actual I/O happens AFTER we release this lock, on the Arc<File>.
+        let mut handles = cache.file_handles.lock().unwrap();
+
+        if let Some(file) = handles.get(file_path) {
+            return Ok(Arc::clone(file));
+        }
+
+        // First file opened for this torrent: ensure parent dirs exist.
+        if handles.is_empty() {
+            for fi in cache.files.iter() {
                 let full_path = self.download_dir.join(&fi.path);
                 if let Some(parent) = full_path.parent() {
                     std::fs::create_dir_all(parent)?;
@@ -266,12 +199,107 @@ impl StorageManager {
             }
         }
 
-        if !cache.file_handles.contains_key(file_path) {
-            let full_path = self.download_dir.join(file_path);
-            let file = open_file(&full_path)?;
-            cache.file_handles.insert(file_path.to_path_buf(), file);
+        let full_path = self.download_dir.join(file_path);
+        let file = Arc::new(open_file(&full_path)?);
+        handles.insert(file_path.to_path_buf(), Arc::clone(&file));
+        Ok(file)
+    }
+
+    pub fn add_torrent(&self, info_hash: InfoHash, meta: Arc<Info>) {
+        let files = meta.files();
+
+        for fi in &files {
+            let full_path = self.download_dir.join(&fi.path);
+
+            if let Some(parent) = full_path.parent()
+                && let Err(e) = std::fs::create_dir_all(parent)
+            {
+                eprintln!(
+                    "storage: failed to create directory {:}: {e}",
+                    parent.display()
+                );
+            }
         }
 
-        Ok(cache.file_handles.get_mut(file_path).unwrap())
+        self.torrents.write().unwrap().insert(
+            info_hash,
+            TorrentCache {
+                metainfo: meta,
+                files: files.into_boxed_slice().into(),
+                file_handles: Mutex::new(HashMap::new()),
+            },
+        );
+    }
+}
+
+impl StorageManager {
+    pub fn new(download_dir: PathBuf, rx: mpsc::Receiver<StorageMessage>) -> Self {
+        Self {
+            rx,
+            storage: Arc::new(StorageState::new(download_dir)),
+        }
+    }
+
+    pub async fn start(mut self) {
+        while let Some(msg) = self.rx.recv().await {
+            match msg {
+                StorageMessage::AddTorrent { info_hash, meta } => {
+                    self.storage.add_torrent(info_hash, meta);
+                }
+                StorageMessage::RemoveTorrent { id } => {
+                    self.storage.torrents.write().unwrap().remove(&id);
+                }
+                StorageMessage::Read {
+                    id,
+                    piece_index,
+                    begin,
+                    length,
+                    block_rx,
+                } => {
+                    let data = self.storage.read(id, piece_index, begin, length);
+                    let _ = block_rx.send(data);
+                }
+                StorageMessage::Write {
+                    info_hash,
+                    piece,
+                    data,
+                } => {
+                    // TODO: return error to session
+                    if let Err(e) = self.storage.write(info_hash, piece, &data) {
+                        tracing::error!(?e);
+                    }
+                }
+                StorageMessage::Verify {
+                    info_hash,
+                    piece,
+                    data,
+                    verification_tx,
+                } => {
+                    let expected_piece_hash = self
+                        .storage
+                        .torrents
+                        .read()
+                        .unwrap()
+                        .get(&info_hash)
+                        .expect("piece verification of a non-registered torrent")
+                        .metainfo
+                        .get_piece_hash(piece as usize)
+                        .copied();
+
+                    if let Some(expected) = expected_piece_hash {
+                        let mut hasher = Sha1::new();
+                        hasher.update(data);
+                        let piece_hash: [u8; 20] = hasher.finalize().into();
+
+                        let matches = piece_hash == expected;
+                        if verification_tx.send(matches).is_err() {
+                            tracing::error!("failed to send verification to peer");
+                        }
+                    } else {
+                        let _ = verification_tx.send(false);
+                    }
+                }
+            }
+        }
     }
 }
