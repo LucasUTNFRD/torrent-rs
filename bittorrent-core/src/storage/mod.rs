@@ -69,10 +69,13 @@ impl Default for Storage {
 
 impl Storage {
     pub fn new() -> Self {
-        let (tx, rx) = mpsc::channel();
-        // const BASE_DIR: &str = "$HOME/Downloads/Torrents/";
+        Self::with_download_dir(get_download_dir())
+    }
 
-        let manager = StorageManager::new(get_download_dir(), rx);
+    pub fn with_download_dir(download_dir: PathBuf) -> Self {
+        let (tx, rx) = mpsc::channel();
+
+        let manager = StorageManager::new(download_dir, rx);
         let builder = thread::Builder::new().name("Storage handler".to_string());
         builder
             .spawn(|| manager.start())
@@ -147,7 +150,7 @@ fn open_file(path: &Path) -> io::Result<File> {
 
         if let Some(dir) = create_dir {
             std::fs::create_dir_all(dir)?;
-        };
+        }
     }
     OpenOptions::new()
         .write(true)
@@ -220,7 +223,7 @@ mod test {
         };
 
         let info_hash = torrent.info_hash;
-        let meta = torrent.info.clone();
+        let meta = torrent.info;
 
         // Prepare StorageManager (rx never used in test)
         let (_tx, rx) = mpsc::channel();

@@ -5,8 +5,6 @@ use std::{
     os::unix::fs::FileExt,
     path::{Path, PathBuf},
     sync::{Arc, mpsc},
-    thread::{self},
-    time::Instant,
 };
 
 use crate::storage::open_file;
@@ -51,7 +49,7 @@ impl StorageManager {
             if let Some(parent) = full_path.parent()
                 && let Err(e) = std::fs::create_dir_all(parent)
             {
-                eprintln!("storage: failed to create directory {:?}: {}", parent, e);
+                eprintln!("storage: failed to create directory {parent:#?}: {e}");
             }
         }
 
@@ -66,16 +64,15 @@ impl StorageManager {
     }
 
     pub fn start(mut self) {
-        use super::StorageMessage::*;
         while let Ok(msg) = self.rx.recv() {
             match msg {
-                AddTorrent { info_hash, meta } => {
+                StorageMessage::AddTorrent { info_hash, meta } => {
                     self.handle_add_torrent(info_hash, meta);
                 }
-                RemoveTorrent { id } => {
+                StorageMessage::RemoveTorrent { id } => {
                     self.torrents.remove(&id);
                 }
-                Read {
+                StorageMessage::Read {
                     id,
                     piece_index,
                     begin,
@@ -85,7 +82,7 @@ impl StorageManager {
                     let data = self.read(id, piece_index, begin, length);
                     let _ = block_rx.send(data);
                 }
-                Write {
+                StorageMessage::Write {
                     info_hash,
                     piece,
                     data,
@@ -95,7 +92,7 @@ impl StorageManager {
                         tracing::error!(?e);
                     }
                 }
-                Verify {
+                StorageMessage::Verify {
                     info_hash,
                     piece,
                     data,
