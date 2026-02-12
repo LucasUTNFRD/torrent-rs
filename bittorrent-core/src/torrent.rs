@@ -372,7 +372,8 @@ impl Torrent {
             return;
         }
 
-        if self.peers.len() >= 50 {
+        if self.peers.len() >= 500 {
+            // TODO: This is silently discarding peers we NEED a retry-mechanism
             return;
         }
 

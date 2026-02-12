@@ -1105,7 +1105,7 @@ pub fn spawn_outgoing_peer(
         .await;
 
         if let Err(e) = result {
-            warn!(?e);
+            warn!(peer = %addr, error = %e, "Outgoing peer connection failed");
         }
     });
 }
