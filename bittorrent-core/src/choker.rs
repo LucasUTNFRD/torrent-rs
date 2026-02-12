@@ -117,6 +117,44 @@ impl Choker {
     pub fn unchoked_peers(&self) -> &HashSet<Pid> {
         &self.unchoked_peers
     }
+
+    /// Periodic re-evaluation of unchoke decisions.
+    /// Implements round-robin rotation of upload slots.
+    /// Returns (peers_to_choke, peers_to_unchoke) to apply changes.
+    pub fn re_evaluate_unchokes(&mut self) -> (Vec<Pid>, Vec<Pid>) {
+        let mut to_choke = Vec::new();
+        let mut to_unchoke = Vec::new();
+
+        // Only rotate if we have more interested peers than slots
+        if self.interested_peers.len() <= self.upload_slots {
+            return (to_choke, to_unchoke);
+        }
+
+        // Find the first unchoked peer to rotate out (oldest)
+        if let Some(rotate_out) = self.unchoked_peers.iter().copied().next() {
+            // Find the next interested peer in queue to rotate in
+            if let Some(rotate_in) = self.interested_queue.pop_front() {
+                // Verify rotate_in is still interested
+                if self.interested_peers.contains(&rotate_in) {
+                    to_choke.push(rotate_out);
+                    to_unchoke.push(rotate_in);
+
+                    self.unchoked_peers.remove(&rotate_out);
+                    self.unchoked_peers.insert(rotate_in);
+
+                    // Put the rotated out peer back in the queue
+                    if self.interested_peers.contains(&rotate_out) {
+                        self.interested_queue.push_back(rotate_out);
+                    }
+                } else {
+                    // rotate_in lost interest, try next
+                    self.interested_queue.push_back(rotate_out);
+                }
+            }
+        }
+
+        (to_choke, to_unchoke)
+    }
 }
 
 #[cfg(test)]
@@ -197,5 +235,64 @@ mod tests {
         assert!(choker.is_unchoked(pid1));
         assert!(!choker.is_unchoked(pid2));
         assert!(choker.is_unchoked(pid3)); // Should get the slot
+    }
+
+    #[test]
+    fn test_periodic_re_evaluate() {
+        let mut choker = Choker::new(2);
+
+        let pid1 = Pid(1);
+        let pid2 = Pid(2);
+        let pid3 = Pid(3);
+
+        // Three peers interested, only 2 slots
+        choker.on_peer_interested(pid1);
+        choker.on_peer_interested(pid2);
+        choker.on_peer_interested(pid3); // Queued
+
+        assert!(choker.is_unchoked(pid1));
+        assert!(choker.is_unchoked(pid2));
+        assert!(!choker.is_unchoked(pid3));
+
+        // Periodic re-evaluation should rotate slots
+        let (to_choke, to_unchoke) = choker.re_evaluate_unchokes();
+
+        // One peer should be choked and one unchoked
+        assert_eq!(to_choke.len(), 1);
+        assert_eq!(to_unchoke.len(), 1);
+
+        // pid3 should now be unchoked
+        assert!(choker.is_unchoked(pid3));
+
+        // One of pid1 or pid2 should be choked
+        let choked_count = [!choker.is_unchoked(pid1), !choker.is_unchoked(pid2)]
+            .iter()
+            .filter(|&&x| x)
+            .count();
+        assert_eq!(choked_count, 1);
+    }
+
+    #[test]
+    fn test_re_evaluate_no_rotation_when_under_limit() {
+        let mut choker = Choker::new(4);
+
+        let pid1 = Pid(1);
+        let pid2 = Pid(2);
+
+        // Two peers interested, 4 slots available
+        choker.on_peer_interested(pid1);
+        choker.on_peer_interested(pid2);
+
+        assert!(choker.is_unchoked(pid1));
+        assert!(choker.is_unchoked(pid2));
+
+        // No rotation needed since we have more slots than peers
+        let (to_choke, to_unchoke) = choker.re_evaluate_unchokes();
+
+        assert!(to_choke.is_empty());
+        assert!(to_unchoke.is_empty());
+
+        assert!(choker.is_unchoked(pid1));
+        assert!(choker.is_unchoked(pid2));
     }
 }
