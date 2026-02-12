@@ -83,7 +83,8 @@ impl Choker {
     }
 
     /// Called when a peer disconnects
-    pub fn on_peer_disconnected(&mut self, pid: Pid) {
+    /// Returns the peer ID that was unchoked to fill the slot (if any)
+    pub fn on_peer_disconnected(&mut self, pid: Pid) -> Option<Pid> {
         self.interested_peers.remove(&pid);
         self.interested_queue.retain(|&p| p != pid);
 
@@ -94,10 +95,11 @@ impl Choker {
             while let Some(next_pid) = self.interested_queue.pop_front() {
                 if self.interested_peers.contains(&next_pid) {
                     self.unchoked_peers.insert(next_pid);
-                    break;
+                    return Some(next_pid);
                 }
             }
         }
+        None
     }
 
     /// Returns true if the peer is currently unchoked
@@ -229,12 +231,31 @@ mod tests {
         choker.on_peer_interested(pid2);
         choker.on_peer_interested(pid3); // Queued
 
-        // pid2 disconnects
-        choker.on_peer_disconnected(pid2);
+        // pid2 disconnects - should return pid3 as the peer to unchoke
+        let unchoked = choker.on_peer_disconnected(pid2);
+        assert_eq!(unchoked, Some(pid3));
 
         assert!(choker.is_unchoked(pid1));
         assert!(!choker.is_unchoked(pid2));
         assert!(choker.is_unchoked(pid3)); // Should get the slot
+    }
+
+    #[test]
+    fn test_disconnect_no_queue() {
+        let mut choker = Choker::new(2);
+
+        let pid1 = Pid(1);
+        let pid2 = Pid(2);
+
+        choker.on_peer_interested(pid1);
+        choker.on_peer_interested(pid2);
+
+        // pid2 disconnects - no one in queue to fill slot
+        let unchoked = choker.on_peer_disconnected(pid2);
+        assert_eq!(unchoked, None);
+
+        assert!(choker.is_unchoked(pid1));
+        assert!(!choker.is_unchoked(pid2));
     }
 
     #[test]
