@@ -529,6 +529,7 @@ impl Peer<Connected> {
     }
     async fn on_choke(&mut self) -> Result<(), ConnectionError> {
         debug!("RECV CHOKE");
+        self.state.peer_choked = true;
         Ok(())
     }
     async fn on_unchoke(&mut self) -> Result<(), ConnectionError> {
