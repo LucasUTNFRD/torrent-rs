@@ -1,47 +1,66 @@
-use core::panic;
 use std::{
     env,
     fs::{File, OpenOptions},
     io,
     path::{Path, PathBuf},
-    sync::{Arc, mpsc},
-    thread::{self},
+    sync::Arc,
 };
 
 use bittorrent_common::{metainfo::Info, types::InfoHash};
 use peer_protocol::protocol::{Block, BlockInfo};
-use sha1::Digest;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::storage::storage_manager::StorageManager;
 
 mod storage_manager;
 
+/// Errors that can occur during storage operations.
+#[derive(Debug, thiserror::Error)]
+pub enum StorageError {
+    #[error("Storage channel closed")]
+    ChannelClosed,
+    #[error("Torrent not found: {0}")]
+    TorrentNotFound(InfoHash),
+    #[error("Piece index out of bounds: {0}")]
+    PieceNotFound(u32),
+    #[error("I/O error: {0}")]
+    Io(#[from] io::Error),
+}
+
+impl From<mpsc::error::SendError<StorageMessage>> for StorageError {
+    fn from(_: mpsc::error::SendError<StorageMessage>) -> Self {
+        StorageError::ChannelClosed
+    }
+}
+
 pub enum StorageMessage {
     AddTorrent {
         info_hash: InfoHash,
         meta: Arc<Info>,
+        result_tx: oneshot::Sender<Result<(), StorageError>>,
     },
-    #[allow(dead_code)]
-    RemoveTorrent { id: InfoHash },
-    #[allow(dead_code)]
+    RemoveTorrent {
+        id: InfoHash,
+        result_tx: oneshot::Sender<Result<(), StorageError>>,
+    },
     Read {
         id: InfoHash,
         piece_index: u32,
         begin: u32,
         length: u32,
-        block_rx: oneshot::Sender<Result<Block, io::Error>>,
+        result_tx: oneshot::Sender<Result<Block, StorageError>>,
     },
     Write {
         info_hash: InfoHash,
         piece: u32,
         data: Arc<[u8]>,
+        result_tx: oneshot::Sender<Result<(), StorageError>>,
     },
     Verify {
         info_hash: InfoHash,
         piece: u32,
         data: Arc<[u8]>,
-        verification_tx: oneshot::Sender<bool>,
+        result_tx: oneshot::Sender<Result<bool, StorageError>>,
     },
 }
 
@@ -50,15 +69,15 @@ pub struct Storage {
 }
 
 fn get_download_dir() -> PathBuf {
-    match env::var_os("HOME") {
-        Some(home) => {
+    env::var_os("HOME").map_or_else(
+        || panic!("$HOME not set"),
+        |home| {
             let mut p = PathBuf::from(home);
             p.push("Downloads");
             p.push("Torrents");
             p
-        }
-        None => panic!("$HOME not set"),
-    }
+        },
+    )
 }
 
 impl Default for Storage {
@@ -68,70 +87,128 @@ impl Default for Storage {
 }
 
 impl Storage {
+    #[must_use]
     pub fn new() -> Self {
-        let (tx, rx) = mpsc::channel();
-        // const BASE_DIR: &str = "$HOME/Downloads/Torrents/";
+        Self::with_download_dir(get_download_dir())
+    }
 
-        let manager = StorageManager::new(get_download_dir(), rx);
-        let builder = thread::Builder::new().name("Storage handler".to_string());
-        builder
-            .spawn(|| manager.start())
-            .expect("Failed to spawn from thread builder");
+    pub fn with_download_dir(download_dir: PathBuf) -> Self {
+        let (tx, rx) = mpsc::channel(1024);
+
+        let manager = StorageManager::new(download_dir, rx);
+        tokio::spawn(manager.start());
 
         Self { tx }
     }
 
-    pub fn add_torrent(&self, info_hash: InfoHash, torrent: Arc<Info>) {
-        let _ = self.tx.send(StorageMessage::AddTorrent {
-            info_hash,
-            meta: torrent,
-        });
+    /// Register a torrent with the storage system.
+    ///
+    /// # Errors
+    /// Returns `StorageError::ChannelClosed` if the storage actor has shut down.
+    pub async fn add_torrent(
+        &self,
+        info_hash: InfoHash,
+        torrent: Arc<Info>,
+    ) -> Result<(), StorageError> {
+        let (result_tx, result_rx) = oneshot::channel();
+        self.tx
+            .send(StorageMessage::AddTorrent {
+                info_hash,
+                meta: torrent,
+                result_tx,
+            })
+            .await?;
+        result_rx.await.map_err(|_| StorageError::ChannelClosed)?
     }
 
+    /// Remove a torrent from storage.
+    ///
+    /// # Errors
+    /// Returns `StorageError::ChannelClosed` if the storage actor has shut down.
     #[allow(dead_code)]
-    pub fn remove_torrent(&self, torrent_id: InfoHash) {
-        let _ = self
-            .tx
-            .send(StorageMessage::RemoveTorrent { id: torrent_id });
+    pub async fn remove_torrent(&self, torrent_id: InfoHash) -> Result<(), StorageError> {
+        let (result_tx, result_rx) = oneshot::channel();
+        self.tx
+            .send(StorageMessage::RemoveTorrent {
+                id: torrent_id,
+                result_tx,
+            })
+            .await?;
+        result_rx.await.map_err(|_| StorageError::ChannelClosed)?
     }
 
-    pub fn verify_piece(
+    /// Verify a piece against its expected hash.
+    ///
+    /// # Errors
+    /// - `StorageError::TorrentNotFound` if torrent not registered
+    /// - `StorageError::PieceNotFound` if piece index out of bounds
+    /// - `StorageError::ChannelClosed` if storage actor shut down
+    ///
+    /// Returns `Ok(true)` if piece is valid, `Ok(false)` if hash mismatch.
+    pub async fn verify_piece(
         &self,
         info_hash: InfoHash,
         piece_index: u32,
         piece_data: Arc<[u8]>,
-        verification_tx: oneshot::Sender<bool>,
-    ) {
-        let _ = self.tx.send(StorageMessage::Verify {
-            info_hash,
-            piece: piece_index,
-            data: piece_data,
-            verification_tx,
-        });
+    ) -> Result<bool, StorageError> {
+        let (result_tx, result_rx) = oneshot::channel();
+        self.tx
+            .send(StorageMessage::Verify {
+                info_hash,
+                piece: piece_index,
+                data: piece_data,
+                result_tx,
+            })
+            .await?;
+        result_rx.await.map_err(|_| StorageError::ChannelClosed)?
     }
 
-    pub fn write_piece(&self, info_hash: InfoHash, piece_index: u32, piece_data: Arc<[u8]>) {
-        let _ = self.tx.send(StorageMessage::Write {
-            info_hash,
-            piece: piece_index,
-            data: piece_data,
-        });
+    /// Write a piece to disk.
+    ///
+    /// # Errors
+    /// - `StorageError::TorrentNotFound` if torrent not registered
+    /// - `StorageError::Io` if disk write fails
+    /// - `StorageError::ChannelClosed` if storage actor shut down
+    pub async fn write_piece(
+        &self,
+        info_hash: InfoHash,
+        piece_index: u32,
+        piece_data: Arc<[u8]>,
+    ) -> Result<(), StorageError> {
+        let (result_tx, result_rx) = oneshot::channel();
+        self.tx
+            .send(StorageMessage::Write {
+                info_hash,
+                piece: piece_index,
+                data: piece_data,
+                result_tx,
+            })
+            .await?;
+        result_rx.await.map_err(|_| StorageError::ChannelClosed)?
     }
 
-    #[allow(dead_code)]
-    pub fn read_block(
+    /// Read a block from disk.
+    ///
+    /// # Errors
+    /// - `StorageError::TorrentNotFound` if torrent not registered
+    /// - `StorageError::Io` if disk read fails
+    /// - `StorageError::ChannelClosed` if storage actor shut down
+    pub async fn read_block(
         &self,
         torrent_id: InfoHash,
         block_info: BlockInfo,
-        block_rx: oneshot::Sender<Result<Block, io::Error>>,
-    ) {
-        let _ = self.tx.send(StorageMessage::Read {
-            id: torrent_id,
-            piece_index: block_info.index,
-            begin: block_info.begin,
-            length: block_info.length,
-            block_rx,
-        });
+    ) -> Result<Block, StorageError> {
+        let (result_tx, result_rx) = oneshot::channel();
+        self.tx
+            .send(StorageMessage::Read {
+                id: torrent_id,
+                piece_index: block_info.index,
+                begin: block_info.begin,
+                length: block_info.length,
+                result_tx,
+            })
+            .await?;
+        result_rx.await.map_err(|_| StorageError::ChannelClosed)?
     }
 }
 
@@ -147,7 +224,7 @@ fn open_file(path: &Path) -> io::Result<File> {
 
         if let Some(dir) = create_dir {
             std::fs::create_dir_all(dir)?;
-        };
+        }
     }
     OpenOptions::new()
         .write(true)
@@ -162,18 +239,16 @@ mod test {
     use std::{
         env, fs,
         path::PathBuf,
-        sync::{Arc, mpsc},
+        sync::Arc,
         time::{SystemTime, UNIX_EPOCH},
     };
 
     use bittorrent_common::{
-        metainfo::{self, FileInfo, Info, TorrentInfo},
+        metainfo::{self, FileInfo, Info},
         types::InfoHash,
     };
 
-    use crate::storage::StorageManager;
-
-    // use super::*;
+    use crate::storage::storage_manager::StorageState;
 
     fn unique_temp_dir(prefix: &str) -> PathBuf {
         let now = SystemTime::now()
@@ -185,17 +260,15 @@ mod test {
 
     #[test]
     fn test_read_and_write_single_file_mode() {
-        // Setup a temporary download directory
         let download_dir = unique_temp_dir("bt_storage_single");
         fs::create_dir_all(&download_dir).unwrap();
 
-        // Construct a simple single-file TorrentInfo
         let piece_length = 512i64;
-        let total_length = 1024i64; // two pieces
+        let total_length = 1024i64;
         let num_pieces = (total_length as f64 / piece_length as f64).ceil() as usize;
         let pieces = vec![[0u8; 20]; num_pieces];
 
-        let info = Info {
+        let info = Arc::new(Info {
             piece_length,
             pieces,
             private: None,
@@ -204,72 +277,45 @@ mod test {
                 length: total_length,
                 md5sum: None,
             },
-        };
+        });
 
-        let info = Arc::new(info);
+        let info_hash = InfoHash::new([0u8; 20]);
 
-        let torrent = TorrentInfo {
-            info,
-            announce: "http://localhost".to_string(),
-            announce_list: None,
-            creation_date: None,
-            comment: None,
-            created_by: None,
-            encoding: None,
-            info_hash: InfoHash::new([0u8; 20]),
-        };
+        let state = StorageState::new(download_dir.clone());
+        state.add_torrent(info_hash, info);
+        let cache = state.get_torrent(&info_hash).unwrap();
 
-        let info_hash = torrent.info_hash;
-        let meta = torrent.info.clone();
-
-        // Prepare StorageManager (rx never used in test)
-        let (_tx, rx) = mpsc::channel();
-        let mut manager = StorageManager::new(download_dir.clone(), rx);
-
-        // Insert torrent into manager cache
-        manager.handle_add_torrent(info_hash, meta);
-
-        // Prepare test data for each piece
         let piece0_data: Vec<u8> = (0..piece_length).map(|i| i as u8).collect();
         let piece1_data: Vec<u8> = (0..piece_length).map(|i| (i + 128) as u8).collect();
 
-        // Write pieces individually (this is the correct usage)
-        manager
-            .write(info_hash, 0, &piece0_data)
+        state
+            .write(&cache, 0, &piece0_data)
             .expect("write piece 0 failed");
-
-        manager
-            .write(info_hash, 1, &piece1_data)
+        state
+            .write(&cache, 1, &piece1_data)
             .expect("write piece 1 failed");
 
-        // Read back pieces
-        let read_piece0 = manager
-            .read(info_hash, 0, 0, piece_length as u32)
+        let read_piece0 = state
+            .read(&cache, 0, 0, piece_length as u32)
             .expect("read piece0 failed");
         assert_eq!(read_piece0.data, piece0_data);
 
-        let read_piece1 = manager
-            .read(info_hash, 1, 0, piece_length as u32)
+        let read_piece1 = state
+            .read(&cache, 1, 0, piece_length as u32)
             .expect("read piece1 failed");
         assert_eq!(read_piece1.data, piece1_data);
 
-        // Test partial reads (blocks)
-        let block = manager
-            .read(info_hash, 0, 256, 256)
-            .expect("read block failed");
+        let block = state.read(&cache, 0, 256, 256).expect("read block failed");
         assert_eq!(block.data, &piece0_data[256..512]);
 
-        // Cleanup
         fs::remove_dir_all(&download_dir).unwrap();
     }
 
     #[test]
     fn test_read_and_write_multi_file_mode() {
-        // Setup a temporary download directory
         let download_dir = unique_temp_dir("bt_storage_multi");
         fs::create_dir_all(&download_dir).unwrap();
 
-        // Multi-file torrent: two files, lengths 600 and 500 => total 1100
         let f1 = FileInfo {
             length: 600,
             md5sum: None,
@@ -286,7 +332,7 @@ mod test {
         let num_pieces = (total_length as f64 / piece_length as f64).ceil() as usize;
         let pieces = vec![[0u8; 20]; num_pieces];
 
-        let info = Info {
+        let info = Arc::new(Info {
             piece_length,
             pieces,
             private: None,
@@ -294,77 +340,51 @@ mod test {
                 name: "test_multi".to_string(),
                 files: vec![f1.clone(), f2.clone()],
             },
-        };
+        });
 
-        let info = Arc::new(info);
+        let id = InfoHash::new([1u8; 20]);
 
-        let torrent = TorrentInfo {
-            info,
-            announce: "http://localhost".to_string(),
-            announce_list: None,
-            creation_date: None,
-            comment: None,
-            created_by: None,
-            encoding: None,
-            info_hash: InfoHash::new([1u8; 20]),
-        };
+        let state = StorageState::new(download_dir.clone());
+        state.add_torrent(id, info);
+        let cache = state.get_torrent(&id).unwrap();
 
-        let id = torrent.info_hash;
-        let meta = Arc::new(torrent.clone());
-
-        // Prepare StorageManager (rx never used in test)
-        let (_tx, rx) = mpsc::channel();
-        let mut manager = StorageManager::new(download_dir.clone(), rx);
-
-        manager.handle_add_torrent(id, meta.info.clone());
-
-        // Write pieces individually
         let piece0_data: Vec<u8> = (0..512).map(|i| i as u8).collect();
         let piece1_data: Vec<u8> = (0..512).map(|i| (i + 100) as u8).collect();
-        let piece2_data: Vec<u8> = (0..76).map(|i| (i + 200) as u8).collect(); // Last piece is partial
+        let piece2_data: Vec<u8> = (0..76).map(|i| (i + 200) as u8).collect();
 
-        manager
-            .write(id, 0, &piece0_data)
+        state
+            .write(&cache, 0, &piece0_data)
             .expect("write piece 0 failed");
-        manager
-            .write(id, 1, &piece1_data)
+        state
+            .write(&cache, 1, &piece1_data)
             .expect("write piece 1 failed");
-        manager
-            .write(id, 2, &piece2_data)
+        state
+            .write(&cache, 2, &piece2_data)
             .expect("write piece 2 failed");
 
-        // Read back and verify
-        let read_p0 = manager.read(id, 0, 0, 512).expect("read p0 failed");
+        let read_p0 = state.read(&cache, 0, 0, 512).expect("read p0 failed");
         assert_eq!(read_p0.data, piece0_data);
 
-        let read_p1 = manager.read(id, 1, 0, 512).expect("read p1 failed");
+        let read_p1 = state.read(&cache, 1, 0, 512).expect("read p1 failed");
         assert_eq!(read_p1.data, piece1_data);
 
-        let read_p2 = manager.read(id, 2, 0, 76).expect("read p2 failed");
+        let read_p2 = state.read(&cache, 2, 0, 76).expect("read p2 failed");
         assert_eq!(read_p2.data, piece2_data);
 
-        // Test reading a block that spans file boundary
-        // Piece 1 starts at global offset 512, so reading from begin=88 with length=100
-        // should span from file1 (which ends at offset 600) into file2
-        let spanning_block = manager.read(id, 1, 88, 100).expect("spanning read failed");
-
-        // This should read bytes from offset 600 in the torrent (end of file1)
-        // and beginning of file2
-        let mut expected = Vec::new();
-        expected.extend_from_slice(&piece1_data[88..]); // Rest of piece1 data
+        let spanning_block = state
+            .read(&cache, 1, 88, 100)
+            .expect("spanning read failed");
         assert_eq!(spanning_block.data.len(), 100);
 
-        // Cleanup
         fs::remove_dir_all(&download_dir).unwrap();
     }
 
     #[test]
     fn test_file_handle_caching() {
-        // Test that file handles are properly cached and reused
         let download_dir = unique_temp_dir("bt_storage_cache");
         fs::create_dir_all(&download_dir).unwrap();
 
-        let info = Info {
+        let info = Arc::new(Info {
             piece_length: 512,
             pieces: vec![[0u8; 20]; 2],
             private: None,
@@ -373,43 +393,76 @@ mod test {
                 length: 1024,
                 md5sum: None,
             },
-        };
+        });
 
-        let info = Arc::new(info);
+        let id = InfoHash::new([4u8; 20]);
 
-        let torrent = TorrentInfo {
-            info,
-            announce: "http://localhost".to_string(),
-            announce_list: None,
-            creation_date: None,
-            comment: None,
-            created_by: None,
-            encoding: None,
-            info_hash: InfoHash::new([4u8; 20]),
-        };
-
-        let id = torrent.info_hash;
-        let meta = torrent.info.clone();
-
-        let (_tx, rx) = mpsc::channel();
-        let mut manager = StorageManager::new(download_dir.clone(), rx);
-
-        manager.handle_add_torrent(id, meta);
+        let state = StorageState::new(download_dir.clone());
+        state.add_torrent(id, info);
+        let cache = state.get_torrent(&id).unwrap();
 
         // Initial state: no file handles cached
-        assert_eq!(manager.torrents.get(&id).unwrap().file_handles.len(), 0);
+        assert_eq!(
+            state
+                .torrents
+                .read()
+                .unwrap()
+                .get(&id)
+                .unwrap()
+                .file_handles
+                .lock()
+                .unwrap()
+                .len(),
+            0
+        );
 
         // First write should open and cache the file handle
         let data = vec![42u8; 512];
-        manager.write(id, 0, &data).expect("write failed");
-        assert_eq!(manager.torrents.get(&id).unwrap().file_handles.len(), 1);
+        state.write(&cache, 0, &data).expect("write failed");
+        assert_eq!(
+            state
+                .torrents
+                .read()
+                .unwrap()
+                .get(&id)
+                .unwrap()
+                .file_handles
+                .lock()
+                .unwrap()
+                .len(),
+            1
+        );
 
         // Subsequent operations should reuse the cached handle
-        manager.write(id, 1, &data).expect("second write failed");
-        assert_eq!(manager.torrents.get(&id).unwrap().file_handles.len(), 1);
+        state.write(&cache, 1, &data).expect("second write failed");
+        assert_eq!(
+            state
+                .torrents
+                .read()
+                .unwrap()
+                .get(&id)
+                .unwrap()
+                .file_handles
+                .lock()
+                .unwrap()
+                .len(),
+            1
+        );
 
-        let _read_data = manager.read(id, 0, 0, 256).expect("read failed");
-        assert_eq!(manager.torrents.get(&id).unwrap().file_handles.len(), 1);
+        let _read_data = state.read(&cache, 0, 0, 256).expect("read failed");
+        assert_eq!(
+            state
+                .torrents
+                .read()
+                .unwrap()
+                .get(&id)
+                .unwrap()
+                .file_handles
+                .lock()
+                .unwrap()
+                .len(),
+            1
+        );
 
         fs::remove_dir_all(&download_dir).unwrap();
     }

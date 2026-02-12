@@ -283,7 +283,7 @@ impl Torrent {
     info_hash=%self.info_hash,
     ))]
     pub async fn start_session(mut self) -> Result<(), TorrentError> {
-        self.init_interal();
+        self.init_interal().await;
 
         // Star announcing to Trackers/DHT
         let (announce_tx, mut announce_rx) = mpsc::channel(16);
@@ -334,7 +334,7 @@ impl Torrent {
     // init bitfield
     // init piece picker
     // init piece collector
-    fn init_interal(&mut self) {
+    async fn init_interal(&mut self) {
         if !self.metadata.has_metadata() {
             debug("Should return here");
             return;
@@ -342,8 +342,14 @@ impl Torrent {
 
         match &self.metadata {
             Metadata::TorrentFile(torrent_info) => {
-                self.storage
-                    .add_torrent(self.info_hash, torrent_info.info.clone());
+                if let Err(e) = self
+                    .storage
+                    .add_torrent(self.info_hash, torrent_info.info.clone())
+                    .await
+                {
+                    tracing::error!("Failed to register torrent with storage: {}", e);
+                    return;
+                }
 
                 let info = torrent_info.info.clone();
                 self.bitfield = Bitfield::with_size(info.pieces.len());
@@ -354,7 +360,10 @@ impl Torrent {
                 metadata_state: MetadataState::Complete(info),
                 ..
             } => {
-                self.storage.add_torrent(self.info_hash, info.clone());
+                if let Err(e) = self.storage.add_torrent(self.info_hash, info.clone()).await {
+                    tracing::error!("Failed to register torrent with storage: {}", e);
+                    return;
+                }
                 self.bitfield = Bitfield::with_size(info.pieces.len());
 
                 self.piece_mananger = Some(PieceManager::new(info.clone()));
@@ -635,28 +644,46 @@ impl Torrent {
     }
 
     async fn on_complete_piece(&mut self, piece_index: u32, piece: Box<[u8]>) {
-        let p = self.piece_mananger.as_mut().expect("inti");
-        p.set_piece_as(piece_index as usize, PieceState::Downloaded);
+        // Mark piece as downloaded first
+        self.piece_mananger
+            .as_mut()
+            .expect("initialized")
+            .set_piece_as(piece_index as usize, PieceState::Downloaded);
 
         let torrent_id = self.info_hash;
         let piece: Arc<[u8]> = piece.into();
 
-        let (verification_tx, verification_rx) = oneshot::channel();
-        // let t = Instant::now(); // ANALYZE TIME SPENT VALIDATING
-        self.storage
-            .verify_piece(torrent_id, piece_index, piece.clone(), verification_tx);
-
-        let valid = verification_rx.await.expect("storage actor alive");
-
-        // let t = t.elapsed();
-        // tracing::info!("PIECE VALIDATION RECV- TOOK {t:?}");
+        // Verify piece hash
+        let valid = match self
+            .storage
+            .verify_piece(torrent_id, piece_index, piece.clone())
+            .await
+        {
+            Ok(valid) => valid,
+            Err(e) => {
+                tracing::error!("Failed to verify piece {}: {}", piece_index, e);
+                self.piece_mananger
+                    .as_mut()
+                    .expect("initialized")
+                    .set_piece_as(piece_index as usize, PieceState::NotRequested);
+                return;
+            }
+        };
 
         if !valid {
-            p.set_piece_as(piece_index as usize, PieceState::NotRequested);
+            tracing::warn!("Piece {} failed hash verification", piece_index);
+            self.piece_mananger
+                .as_mut()
+                .expect("initialized")
+                .set_piece_as(piece_index as usize, PieceState::NotRequested);
             return;
         }
 
-        p.set_piece_as(piece_index as usize, PieceState::Have);
+        // Mark as have and broadcast
+        self.piece_mananger
+            .as_mut()
+            .expect("initialized")
+            .set_piece_as(piece_index as usize, PieceState::Have);
         self.bitfield.set(piece_index as usize);
         // tracing::debug!("BROADCASTING PIECE TO PEERS");
         self.broadcast_to_peers(PeerMessage::SendHave { piece_index })
@@ -664,10 +691,22 @@ impl Torrent {
 
         self.piece_mananger
             .as_ref()
-            .expect("initalized")
+            .expect("initialized")
             .info_progress();
 
-        self.storage.write_piece(torrent_id, piece_index, piece);
+        // Write piece to disk
+        if let Err(e) = self
+            .storage
+            .write_piece(torrent_id, piece_index, piece)
+            .await
+        {
+            tracing::error!("Failed to write piece {}: {}", piece_index, e);
+            // Mark piece as not downloaded so it will be retried
+            self.piece_mananger
+                .as_mut()
+                .expect("initialized")
+                .set_piece_as(piece_index as usize, PieceState::NotRequested);
+        }
     }
 
     // 1.Register torrent in storage
@@ -678,7 +717,7 @@ impl Torrent {
         if let Err(e) = self.metadata.construct_info() {
             tracing::error!("Failed to construct info from metadata: {}", e);
         } else {
-            self.init_interal();
+            self.init_interal().await;
 
             let info = self
                 .metadata
