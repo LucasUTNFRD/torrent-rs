@@ -517,7 +517,6 @@ impl Peer<Connected> {
         Ok(())
     }
     async fn on_choke(&mut self) -> Result<(), ConnectionError> {
-        // todo!(
         debug!("RECV CHOKE");
         Ok(())
     }
@@ -612,11 +611,25 @@ impl Peer<Connected> {
     }
 
     async fn on_interested(&mut self) -> Result<(), ConnectionError> {
-        todo!("Received interested message")
+        let _ = self
+            .torrent_tx
+            .send(TorrentMessage::Interest(self.pid))
+            .await;
+
+        self.state.peer_interested = true;
+
+        Ok(())
     }
 
     async fn on_not_interested(&mut self) -> Result<(), ConnectionError> {
-        todo!("Received not interested message")
+        let _ = self
+            .torrent_tx
+            .send(TorrentMessage::NotInterest(self.pid))
+            .await;
+
+        self.state.peer_interested = false;
+
+        Ok(())
     }
 
     // Updates piece availability - Affects which pieces the torrent tries to download next
