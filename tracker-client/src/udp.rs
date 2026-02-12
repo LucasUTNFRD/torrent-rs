@@ -280,8 +280,12 @@ impl TrackerClient for UdpTrackerClient {
                         seeders: resp.seeders,
                     });
                 }
-                Ok(Err(_)) => tracing::warn!(tracker = %tracker_url, "Announce response channel closed - response may have been mismatched or dropped"),
-                Err(_) => tracing::warn!(tracker = %tracker_url, attempt = n + 1, "Announce request timed out"),
+                Ok(Err(_)) => {
+                    tracing::warn!(tracker = %tracker_url, "Announce response channel closed - response may have been mismatched or dropped")
+                }
+                Err(_) => {
+                    tracing::warn!(tracker = %tracker_url, attempt = n + 1, "Announce request timed out")
+                }
             }
         }
         Err(TrackerError::Timeout)
@@ -454,8 +458,12 @@ impl UdpTrackerClient {
             let wait_secs = 15 * (1 << n);
             match timeout(Duration::from_secs(wait_secs), response_rx).await {
                 Ok(Ok(conn_resp)) => return Ok(conn_resp.connection_id),
-                Ok(Err(_)) => tracing::warn!(tracker = %tracker, "Connect response channel closed - response may have been mismatched or dropped"),
-                Err(_) => tracing::warn!(tracker = %tracker, attempt = n + 1, "Connect request timed out"),
+                Ok(Err(_)) => {
+                    tracing::warn!(tracker = %tracker, "Connect response channel closed - response may have been mismatched or dropped")
+                }
+                Err(_) => {
+                    tracing::warn!(tracker = %tracker, attempt = n + 1, "Connect request timed out")
+                }
             }
         }
 
