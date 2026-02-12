@@ -654,7 +654,11 @@ impl Torrent {
         let piece: Arc<[u8]> = piece.into();
 
         // Verify piece hash
-        let valid = match self.storage.verify_piece(torrent_id, piece_index, piece.clone()).await {
+        let valid = match self
+            .storage
+            .verify_piece(torrent_id, piece_index, piece.clone())
+            .await
+        {
             Ok(valid) => valid,
             Err(e) => {
                 tracing::error!("Failed to verify piece {}: {}", piece_index, e);
@@ -691,7 +695,11 @@ impl Torrent {
             .info_progress();
 
         // Write piece to disk
-        if let Err(e) = self.storage.write_piece(torrent_id, piece_index, piece).await {
+        if let Err(e) = self
+            .storage
+            .write_piece(torrent_id, piece_index, piece)
+            .await
+        {
             tracing::error!("Failed to write piece {}: {}", piece_index, e);
             // Mark piece as not downloaded so it will be retried
             self.piece_mananger

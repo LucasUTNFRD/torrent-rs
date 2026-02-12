@@ -126,7 +126,10 @@ async fn setup_env(num_torrents: usize) -> BenchEnv {
     for t in 0..num_torrents {
         let (info_hash, info, pieces_data) = make_torrent_info(t, PIECE_LENGTH, PIECES_PER_TORRENT);
 
-        storage.add_torrent(info_hash, info).await.expect("add_torrent should not fail");
+        storage
+            .add_torrent(info_hash, info)
+            .await
+            .expect("add_torrent should not fail");
         setups.push((info_hash, pieces_data));
     }
 

@@ -102,7 +102,7 @@ impl Storage {
     }
 
     /// Register a torrent with the storage system.
-    /// 
+    ///
     /// # Errors
     /// Returns `StorageError::ChannelClosed` if the storage actor has shut down.
     pub async fn add_torrent(
@@ -122,7 +122,7 @@ impl Storage {
     }
 
     /// Remove a torrent from storage.
-    /// 
+    ///
     /// # Errors
     /// Returns `StorageError::ChannelClosed` if the storage actor has shut down.
     #[allow(dead_code)]
@@ -138,12 +138,12 @@ impl Storage {
     }
 
     /// Verify a piece against its expected hash.
-    /// 
+    ///
     /// # Errors
     /// - `StorageError::TorrentNotFound` if torrent not registered
     /// - `StorageError::PieceNotFound` if piece index out of bounds
     /// - `StorageError::ChannelClosed` if storage actor shut down
-    /// 
+    ///
     /// Returns `Ok(true)` if piece is valid, `Ok(false)` if hash mismatch.
     pub async fn verify_piece(
         &self,
@@ -164,7 +164,7 @@ impl Storage {
     }
 
     /// Write a piece to disk.
-    /// 
+    ///
     /// # Errors
     /// - `StorageError::TorrentNotFound` if torrent not registered
     /// - `StorageError::Io` if disk write fails
@@ -188,7 +188,7 @@ impl Storage {
     }
 
     /// Read a block from disk.
-    /// 
+    ///
     /// # Errors
     /// - `StorageError::TorrentNotFound` if torrent not registered
     /// - `StorageError::Io` if disk read fails

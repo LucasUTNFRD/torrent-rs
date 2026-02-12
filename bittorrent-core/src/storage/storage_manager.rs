@@ -228,7 +228,11 @@ impl StorageManager {
     pub async fn start(mut self) {
         while let Some(msg) = self.rx.recv().await {
             match msg {
-                StorageMessage::AddTorrent { info_hash, meta, result_tx } => {
+                StorageMessage::AddTorrent {
+                    info_hash,
+                    meta,
+                    result_tx,
+                } => {
                     self.storage.add_torrent(info_hash, meta);
                     let _ = result_tx.send(Ok(()));
                 }
