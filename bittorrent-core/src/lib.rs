@@ -27,7 +27,7 @@
 //! - **storage**: Disk I/O for reading/writing pieces
 //! - **bitfield**: Compact representation of available pieces
 //! - **metadata**: BEP 9 metadata exchange for magnet links
-//! - **choker**: determines which peer to unchoke based on uplaoad/download rates
+//! - **choker**: manages which peers are choked/unchoked (currently round-robin)
 //!
 //! ## Peer Discovery
 //!
