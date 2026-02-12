@@ -285,6 +285,10 @@ impl Torrent {
         let (announce_tx, mut announce_rx) = mpsc::channel(16);
         self.announce(&announce_tx);
 
+        // Periodic choker tick (every 10 seconds)
+        let mut choker_ticker = tokio::time::interval(Duration::from_secs(10));
+        choker_ticker.tick().await;
+
         loop {
             tokio::select! {
                 Ok(()) = self.shutdown_rx.changed() => {
@@ -302,6 +306,9 @@ impl Torrent {
                         self.add_peer(PeerSource::Outbound(*peer));
                     }
 
+                }
+                _ = choker_ticker.tick() => {
+                    self.run_choker().await;
                 }
             }
         }
@@ -753,6 +760,23 @@ impl Torrent {
         }
 
         self.metrics.connected_peers.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    /// Run the choker algorithm periodically to rotate upload slots
+    async fn run_choker(&mut self) {
+        let (to_choke, to_unchoke) = self.choker.re_evaluate_unchokes();
+
+        // Apply choke decisions
+        for pid in to_choke {
+            self.send_to_peer(pid, PeerMessage::SendChoke).await;
+            tracing::debug!("Periodic choker: choked peer {pid:?}");
+        }
+
+        // Apply unchoke decisions
+        for pid in to_unchoke {
+            self.send_to_peer(pid, PeerMessage::SendUnchoke).await;
+            tracing::debug!("Periodic choker: unchoked peer {pid:?}");
+        }
     }
 
     /// Send a message to a specific peer
