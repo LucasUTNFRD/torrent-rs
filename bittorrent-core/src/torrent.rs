@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::{
     collections::HashMap,
     net::SocketAddr,
@@ -59,7 +57,7 @@ pub enum PeerSource {
     },
     Outbound(SocketAddr), // Socket to connect + Our peer id
 }
-//
+
 impl PeerSource {
     pub const fn get_addr(&self) -> &SocketAddr {
         match self {
@@ -209,7 +207,6 @@ impl Torrent {
         let bitfield = Bitfield::with_size(torrent_info.num_pieces());
 
         let metadata = Metadata::TorrentFile(Arc::new(torrent_info));
-        // let metadata = Arc::new(metadata);
 
         let (tx, rx) = mpsc::channel(64);
 
@@ -229,8 +226,6 @@ impl Torrent {
                 rx,
                 bitfield,
                 piece_mananger: None,
-                // piece_picker: None,
-                // piece_collector: None,
             },
             tx,
         )
@@ -252,8 +247,6 @@ impl Torrent {
             magnet,
             metadata_state: MetadataState::Pending,
         };
-
-        // let metadata = Arc::new(metadata);
 
         let (tx, rx) = mpsc::channel(300);
 
@@ -289,20 +282,7 @@ impl Torrent {
         let (announce_tx, mut announce_rx) = mpsc::channel(16);
         self.announce(&announce_tx);
 
-        // let mut debug_interval = tokio::time::interval(Duration::from_secs(60));
-
         loop {
-            if let Some(piece_manager) = self.piece_mananger.as_ref()
-                && piece_manager.have_all_pieces()
-            {
-                if let Some(name) = self.metadata.display_name() {
-                    info!("Torrent-{} Download Completed", name);
-                } else {
-                    info!("Torrent Download Completed");
-                }
-                //  TODO: BEFORFE BREAKING WE SHOULD DO SOME MERCIFUL SHUTDOWN OF PEER CONNECTIONS
-                break;
-            }
             tokio::select! {
                 Ok(()) = self.shutdown_rx.changed() => {
                     tracing::info!("Shutting down...");
@@ -320,11 +300,6 @@ impl Torrent {
                     }
 
                 }
-                // _ = debug_interval.tick() => {
-                //       if let Some(ref piece_manager) = self.piece_mananger {
-                //         piece_manager.debug_print_state();
-                //     }
-                // }
             }
         }
 
@@ -630,9 +605,6 @@ impl Torrent {
             .await;
         }
 
-        // TODO: IF OTHER PEER IS ALSO REQUESTING THIS PIECE WE SHOULD SEND CANCEL
-        //  AND REMOVEIT from its pending requests
-
         if let Some(piece) = self
             .piece_mananger
             .as_mut()
@@ -706,6 +678,20 @@ impl Torrent {
                 .as_mut()
                 .expect("initialized")
                 .set_piece_as(piece_index as usize, PieceState::NotRequested);
+        }
+
+        if self
+            .piece_mananger
+            .as_ref()
+            .expect("initalized")
+            .have_all_pieces()
+        {
+            self.state = TorrentState::Seeding;
+            if let Some(name) = self.metadata.display_name() {
+                info!("Torrent-{} Download Completed", name);
+            } else {
+                info!("Torrent Download Completed");
+            }
         }
     }
 
