@@ -411,8 +411,8 @@ impl Torrent {
                 self.clean_up_peer(pid, bitfield);
             }
             TorrentMessage::Have { pid, piece_idx } => {
-                // let p = self.piece_picker.as_mut().expect("init");
-                // p.increment_availability(AvailabilityUpdate::Have(piece_idx));
+                let p = self.piece_mananger.as_mut().expect("init");
+                p.increment_availability(&AvailabilityUpdate::Have(piece_idx));
             }
             TorrentMessage::ReceiveBlock(pid, block) => {
                 tracing::debug!("Incoming block {block:?}");
@@ -559,6 +559,12 @@ impl Torrent {
                     remote_addr,
                     supports_ext,
                 });
+            }
+            TorrentMessage::Interest(pid) => {
+                todo!()
+            }
+            TorrentMessage::NotInterest(pid) => {
+                todo!()
             }
         }
         Ok(())
