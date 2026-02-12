@@ -446,10 +446,19 @@ impl Peer<Connected> {
                 }
             }
             PeerMessage::SendBitfield { bitfield } => todo!(),
-            PeerMessage::SendChoke => todo!(),
+            PeerMessage::SendChoke => {
+                self.state.metrics.reset_since_unchoked();
+                self.state.sink.send(Message::Choke).await?;
+            }
             PeerMessage::SendUnchoke => todo!(),
             PeerMessage::Disconnect => todo!(),
-            PeerMessage::SendMessage(protocol_msg) => self.state.sink.send(protocol_msg).await?,
+            PeerMessage::SendMessage(protocol_msg) => {
+                if let Message::Piece(block) = &protocol_msg {
+                    self.state.metrics.record_download(block.data.len() as u64);
+                }
+                self.state.sink.send(protocol_msg).await?;
+            }
+
             PeerMessage::HaveMetadata(metadata) => {
                 debug!("Received metadata from torrent");
 
@@ -744,7 +753,7 @@ impl Peer<Connected> {
     }
 
     async fn on_request(&mut self) -> Result<(), ConnectionError> {
-        todo!()
+        todo!("We need to serve piece request")
     }
 
     async fn on_incoming_piece(&mut self, block: Block) -> Result<(), ConnectionError> {
