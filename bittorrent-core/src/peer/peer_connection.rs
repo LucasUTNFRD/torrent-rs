@@ -450,7 +450,9 @@ impl Peer<Connected> {
                 self.state.metrics.reset_since_unchoked();
                 self.state.sink.send(Message::Choke).await?;
             }
-            PeerMessage::SendUnchoke => todo!(),
+            PeerMessage::SendUnchoke => {
+                self.state.sink.send(Message::Unchoke).await?;
+            }
             PeerMessage::Disconnect => todo!(),
             PeerMessage::SendMessage(protocol_msg) => {
                 if let Message::Piece(block) = &protocol_msg {

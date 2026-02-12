@@ -29,6 +29,7 @@ use url::Url;
 use crate::{
     Storage,
     bitfield::Bitfield,
+    choker::Choker,
     metadata::{Metadata, MetadataState},
     peer::{
         PeerMessage, PeerState,
@@ -40,7 +41,7 @@ use crate::{
 
 // Peer related
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
-pub struct Pid(usize);
+pub struct Pid(pub usize);
 
 impl std::fmt::Display for Pid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -175,6 +176,7 @@ pub struct Torrent {
 
     // Download related
     piece_mananger: Option<PieceManager>,
+    choker: Choker,
     //
     shutdown_rx: watch::Receiver<()>,
 
@@ -226,6 +228,7 @@ impl Torrent {
                 rx,
                 bitfield,
                 piece_mananger: None,
+                choker: Choker::new(4), // Default 4 upload slots
             },
             tx,
         )
@@ -266,7 +269,7 @@ impl Torrent {
                 rx,
                 bitfield: Bitfield::new(),
                 piece_mananger: None,
-                // piece_collector: None,
+                choker: Choker::new(4), // Default 4 upload slots
             },
             tx,
         )
@@ -420,11 +423,19 @@ impl Torrent {
             }
             TorrentMessage::Interest(pid) => {
                 tracing::debug!("Peer {pid:?} is interested in our pieces");
-                // TODO: Consider unchoking this peer
+                let should_unchoke = self.choker.on_peer_interested(pid);
+                if should_unchoke {
+                    self.send_to_peer(pid, PeerMessage::SendUnchoke).await;
+                    tracing::debug!("Unchoked peer {pid:?}");
+                }
             }
             TorrentMessage::NotInterest(pid) => {
                 tracing::debug!("Peer {pid:?} is no longer interested in our pieces");
-                // TODO: Consider choking this peer to save resources
+                let was_unchoked = self.choker.on_peer_not_interested(pid);
+                if was_unchoked {
+                    self.send_to_peer(pid, PeerMessage::SendChoke).await;
+                    tracing::debug!("Choked peer {pid:?}");
+                }
             }
             TorrentMessage::ShouldBeInterested {
                 pid: _,
@@ -559,12 +570,6 @@ impl Torrent {
                     remote_addr,
                     supports_ext,
                 });
-            }
-            TorrentMessage::Interest(pid) => {
-                todo!()
-            }
-            TorrentMessage::NotInterest(pid) => {
-                todo!()
             }
         }
         Ok(())
@@ -727,6 +732,9 @@ impl Torrent {
 
     fn clean_up_peer(&mut self, pid: Pid, bitfield: Option<Bitfield>) {
         info!("peer disconnected {pid:?}");
+
+        // Notify choker that peer disconnected
+        self.choker.on_peer_disconnected(pid);
 
         let p = self.peers.remove(&pid);
 
