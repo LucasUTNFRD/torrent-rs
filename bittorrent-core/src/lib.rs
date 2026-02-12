@@ -37,6 +37,7 @@
 //! Both sources feed peers into the same channel for connection attempts.
 
 mod bitfield;
+mod choker;
 mod metadata;
 mod peer;
 mod piece_picker;
