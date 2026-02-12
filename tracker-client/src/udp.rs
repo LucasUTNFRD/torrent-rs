@@ -280,8 +280,8 @@ impl TrackerClient for UdpTrackerClient {
                         seeders: resp.seeders,
                     });
                 }
-                Ok(Err(_)) => tracing::error!("Oneshot channel closed unexpectedly"),
-                Err(_) => tracing::warn!("Connect request timed out (attempt {})", n + 1),
+                Ok(Err(_)) => tracing::warn!(tracker = %tracker_url, "Announce response channel closed - response may have been mismatched or dropped"),
+                Err(_) => tracing::warn!(tracker = %tracker_url, attempt = n + 1, "Announce request timed out"),
             }
         }
         Err(TrackerError::Timeout)
@@ -341,6 +341,17 @@ impl UdpTrackerClient {
                                             },
                                         );
                                         let _ = tx.send(conn_resp);
+                                    } else {
+                                        // Transaction ID or action mismatch - drop response and re-insert state
+                                        guard.insert(
+                                            addr,
+                                            TrackerState::ConnectSent {
+                                                txd_id,
+                                                instant,
+                                                tx,
+                                            },
+                                        );
+                                        tracing::debug!(tracker = %addr, expected_tx = txd_id, received_tx = conn_resp.transaction_id, expected_action = Actions::Connect as i32, received_action = conn_resp.action, "Connect response mismatch - ignoring");
                                     }
                                 } else {
                                     guard.insert(
@@ -351,7 +362,7 @@ impl UdpTrackerClient {
                                             tx,
                                         },
                                     );
-                                    tracing::error!("payload should be at least 16 bytes")
+                                    tracing::debug!(tracker = %addr, len, "Invalid connect response payload (too short)");
                                 }
                             }
                             TrackerState::AnnounceSent {
@@ -364,6 +375,17 @@ impl UdpTrackerClient {
                                         && announce_resp.action == Actions::Announce as i32
                                     {
                                         let _ = tx.send(announce_resp);
+                                    } else {
+                                        // Transaction ID or action mismatch - drop response and re-insert state
+                                        guard.insert(
+                                            addr,
+                                            TrackerState::AnnounceSent {
+                                                txn_id,
+                                                connection_id,
+                                                tx,
+                                            },
+                                        );
+                                        tracing::debug!(tracker = %addr, expected_tx = txn_id, received_tx = announce_resp.transaction_id, expected_action = Actions::Announce as i32, received_action = announce_resp.action, "Announce response mismatch - ignoring");
                                     }
                                 } else {
                                     // Mantain state
@@ -375,6 +397,7 @@ impl UdpTrackerClient {
                                             tx,
                                         },
                                     );
+                                    tracing::debug!(tracker = %addr, len, "Invalid announce response payload (too short)");
                                 }
                             }
                             _ => panic!("invalid state"),
@@ -431,8 +454,8 @@ impl UdpTrackerClient {
             let wait_secs = 15 * (1 << n);
             match timeout(Duration::from_secs(wait_secs), response_rx).await {
                 Ok(Ok(conn_resp)) => return Ok(conn_resp.connection_id),
-                Ok(Err(_)) => tracing::error!("Oneshot channel closed unexpectedly"),
-                Err(_) => tracing::warn!("Connect request timed out (attempt {})", n + 1),
+                Ok(Err(_)) => tracing::warn!(tracker = %tracker, "Connect response channel closed - response may have been mismatched or dropped"),
+                Err(_) => tracing::warn!(tracker = %tracker, attempt = n + 1, "Connect request timed out"),
             }
         }
 
