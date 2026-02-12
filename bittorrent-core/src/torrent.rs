@@ -449,9 +449,9 @@ impl Torrent {
                     }
                 }
             }
-            TorrentMessage::PeerDisconnected(pid, bitfield) => self.clean_up_peer(pid, bitfield),
+            TorrentMessage::PeerDisconnected(pid, bitfield) => self.clean_up_peer(pid, bitfield).await,
             TorrentMessage::PeerError(pid, err, bitfield) => {
-                self.clean_up_peer(pid, bitfield);
+                self.clean_up_peer(pid, bitfield).await;
             }
             TorrentMessage::Have { pid, piece_idx } => {
                 let p = self.piece_mananger.as_mut().expect("init");
@@ -770,11 +770,15 @@ impl Torrent {
         Ok(())
     }
 
-    fn clean_up_peer(&mut self, pid: Pid, bitfield: Option<Bitfield>) {
+    async fn clean_up_peer(&mut self, pid: Pid, bitfield: Option<Bitfield>) {
         info!("peer disconnected {pid:?}");
 
         // Notify choker that peer disconnected
-        self.choker.on_peer_disconnected(pid);
+        // Returns the peer that got unchoked to fill the slot (if any)
+        if let Some(unchoked_pid) = self.choker.on_peer_disconnected(pid) {
+            self.send_to_peer(unchoked_pid, PeerMessage::SendUnchoke).await;
+            tracing::debug!("Peer disconnect: unchoked peer {:?} to fill slot", unchoked_pid);
+        }
 
         let p = self.peers.remove(&pid);
 
