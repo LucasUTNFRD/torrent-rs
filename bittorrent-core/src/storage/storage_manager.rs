@@ -299,16 +299,20 @@ impl StorageManager {
                     let expected_piece_hash =
                         cache.metainfo.get_piece_hash(piece as usize).copied();
 
-                    let result = if let Some(expected) = expected_piece_hash {
-                        let mut hasher = Sha1::new();
-                        hasher.update(data);
-                        let piece_hash: [u8; 20] = hasher.finalize().into();
-                        Ok(piece_hash == expected)
-                    } else {
-                        Err(StorageError::PieceNotFound(piece))
-                    };
+                    // Move CPU-intensive SHA1 computation to spawn_blocking
+                    tokio::task::spawn_blocking(move || {
+                        let result = expected_piece_hash.map_or(
+                            Err(StorageError::PieceNotFound(piece)),
+                            |expected| {
+                                let mut hasher = Sha1::new();
+                                hasher.update(data);
+                                let piece_hash: [u8; 20] = hasher.finalize().into();
+                                Ok(piece_hash == expected)
+                            },
+                        );
 
-                    let _ = result_tx.send(result);
+                        let _ = result_tx.send(result);
+                    });
                 }
             }
         }
