@@ -412,7 +412,7 @@ impl Peer<Connected> {
             Message::NotInterested => self.on_not_interested().await?,
             Message::Have { piece_index } => self.on_have(piece_index).await?,
             Message::Bitfield(payload) => self.on_bitfield(payload).await?,
-            Message::Request(block) => self.on_request().await?,
+            Message::Request(request_block) => self.on_request(request_block).await?,
             Message::Piece(block) => self.on_incoming_piece(block).await?,
             Message::Cancel(block) => self.on_cancel().await?,
             Message::Port { port } => {
@@ -455,9 +455,7 @@ impl Peer<Connected> {
             }
             PeerMessage::Disconnect => todo!(),
             PeerMessage::SendMessage(protocol_msg) => {
-                if let Message::Piece(block) = &protocol_msg {
-                    self.state.metrics.record_download(block.data.len() as u64);
-                }
+                if let Message::Piece(block) = &protocol_msg {}
                 self.state.sink.send(protocol_msg).await?;
             }
 
@@ -754,8 +752,32 @@ impl Peer<Connected> {
         Ok(())
     }
 
-    async fn on_request(&mut self) -> Result<(), ConnectionError> {
-        todo!("We need to serve piece request")
+    async fn on_request(&mut self, request_block: BlockInfo) -> Result<(), ConnectionError> {
+        // Don't serve requests to choked peers
+        if self.state.choked {
+            debug!(
+                "Ignoring request from choked peer: piece {} offset {}",
+                request_block.index, request_block.begin
+            );
+            return Ok(());
+        }
+
+        // TODO: Fetch piece data from storage and send it
+        // For now, just log that we would serve it
+        debug!(
+            "Peer requested piece {} offset {} length {} - would serve if implemented",
+            request_block.index, request_block.begin, request_block.length
+        );
+
+        let _ = self
+            .torrent_tx
+            .send(TorrentMessage::RemoteBlockRequest {
+                pid: self.pid,
+                block_info: request_block,
+            })
+            .await;
+
+        Ok(())
     }
 
     async fn on_incoming_piece(&mut self, block: Block) -> Result<(), ConnectionError> {

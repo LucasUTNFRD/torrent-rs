@@ -113,6 +113,11 @@ pub enum TorrentMessage {
         block_tx: oneshot::Sender<Vec<BlockInfo>>,
     },
 
+    RemoteBlockRequest {
+        pid: Pid,
+        block_info: BlockInfo,
+    },
+
     // -- METADATA REQUEST --
     PeerWithMetadata {
         pid: Pid,
@@ -416,6 +421,34 @@ impl Torrent {
 
     async fn handle_message(&mut self, msg: TorrentMessage) -> Result<(), TorrentError> {
         match msg {
+            TorrentMessage::RemoteBlockRequest { pid, block_info } => {
+                let Some(peer) = self.peers.get(&pid) else {
+                    tracing::debug!("Peer {} disconnected before block could be served", pid);
+                    return Ok(());
+                };
+
+                match self.storage.read_block(self.info_hash, block_info).await {
+                    Ok(block) => {
+                        // Send piece to peer (upload tracking happens in peer_connection)
+                        if let Err(e) = peer
+                            .tx
+                            .send(PeerMessage::SendMessage(Message::Piece(block)))
+                            .await
+                        {
+                            tracing::warn!("Failed to send piece to peer {}: {}", pid, e);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to read block {} offset {} for peer {}: {}",
+                            block_info.index,
+                            block_info.begin,
+                            pid,
+                            e
+                        );
+                    }
+                }
+            }
             TorrentMessage::PeerDisconnected(pid, bitfield) => self.clean_up_peer(pid, bitfield),
             TorrentMessage::PeerError(pid, err, bitfield) => {
                 self.clean_up_peer(pid, bitfield);
