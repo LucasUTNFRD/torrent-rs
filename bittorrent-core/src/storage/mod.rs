@@ -8,38 +8,59 @@ use std::{
 
 use bittorrent_common::{metainfo::Info, types::InfoHash};
 use peer_protocol::protocol::{Block, BlockInfo};
-use sha1::Digest;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::storage::storage_manager::StorageManager;
 
 mod storage_manager;
 
+/// Errors that can occur during storage operations.
+#[derive(Debug, thiserror::Error)]
+pub enum StorageError {
+    #[error("Storage channel closed")]
+    ChannelClosed,
+    #[error("Torrent not found: {0}")]
+    TorrentNotFound(InfoHash),
+    #[error("Piece index out of bounds: {0}")]
+    PieceNotFound(u32),
+    #[error("I/O error: {0}")]
+    Io(#[from] io::Error),
+}
+
+impl From<mpsc::error::SendError<StorageMessage>> for StorageError {
+    fn from(_: mpsc::error::SendError<StorageMessage>) -> Self {
+        StorageError::ChannelClosed
+    }
+}
+
 pub enum StorageMessage {
     AddTorrent {
         info_hash: InfoHash,
         meta: Arc<Info>,
+        result_tx: oneshot::Sender<Result<(), StorageError>>,
     },
     RemoveTorrent {
         id: InfoHash,
+        result_tx: oneshot::Sender<Result<(), StorageError>>,
     },
     Read {
         id: InfoHash,
         piece_index: u32,
         begin: u32,
         length: u32,
-        block_rx: oneshot::Sender<Result<Block, io::Error>>,
+        result_tx: oneshot::Sender<Result<Block, StorageError>>,
     },
     Write {
         info_hash: InfoHash,
         piece: u32,
         data: Arc<[u8]>,
+        result_tx: oneshot::Sender<Result<(), StorageError>>,
     },
     Verify {
         info_hash: InfoHash,
         piece: u32,
         data: Arc<[u8]>,
-        verification_tx: oneshot::Sender<bool>,
+        result_tx: oneshot::Sender<Result<bool, StorageError>>,
     },
 }
 
@@ -72,9 +93,6 @@ impl Storage {
     }
 
     pub fn with_download_dir(download_dir: PathBuf) -> Self {
-        // TODO(step 6): proper backpressure -- callers use try_send() which
-        // silently drops messages when the channel is full.  For now, size the
-        // buffer large enough that we don't hit this in normal operation.
         let (tx, rx) = mpsc::channel(1024);
 
         let manager = StorageManager::new(download_dir, rx);
@@ -83,56 +101,114 @@ impl Storage {
         Self { tx }
     }
 
-    pub fn add_torrent(&self, info_hash: InfoHash, torrent: Arc<Info>) {
-        let _ = self.tx.try_send(StorageMessage::AddTorrent {
-            info_hash,
-            meta: torrent,
-        });
+    /// Register a torrent with the storage system.
+    /// 
+    /// # Errors
+    /// Returns `StorageError::ChannelClosed` if the storage actor has shut down.
+    pub async fn add_torrent(
+        &self,
+        info_hash: InfoHash,
+        torrent: Arc<Info>,
+    ) -> Result<(), StorageError> {
+        let (result_tx, result_rx) = oneshot::channel();
+        self.tx
+            .send(StorageMessage::AddTorrent {
+                info_hash,
+                meta: torrent,
+                result_tx,
+            })
+            .await?;
+        result_rx.await.map_err(|_| StorageError::ChannelClosed)?
     }
 
+    /// Remove a torrent from storage.
+    /// 
+    /// # Errors
+    /// Returns `StorageError::ChannelClosed` if the storage actor has shut down.
     #[allow(dead_code)]
-    pub fn remove_torrent(&self, torrent_id: InfoHash) {
-        let _ = self
-            .tx
-            .try_send(StorageMessage::RemoveTorrent { id: torrent_id });
+    pub async fn remove_torrent(&self, torrent_id: InfoHash) -> Result<(), StorageError> {
+        let (result_tx, result_rx) = oneshot::channel();
+        self.tx
+            .send(StorageMessage::RemoveTorrent {
+                id: torrent_id,
+                result_tx,
+            })
+            .await?;
+        result_rx.await.map_err(|_| StorageError::ChannelClosed)?
     }
 
-    pub fn verify_piece(
+    /// Verify a piece against its expected hash.
+    /// 
+    /// # Errors
+    /// - `StorageError::TorrentNotFound` if torrent not registered
+    /// - `StorageError::PieceNotFound` if piece index out of bounds
+    /// - `StorageError::ChannelClosed` if storage actor shut down
+    /// 
+    /// Returns `Ok(true)` if piece is valid, `Ok(false)` if hash mismatch.
+    pub async fn verify_piece(
         &self,
         info_hash: InfoHash,
         piece_index: u32,
         piece_data: Arc<[u8]>,
-        verification_tx: oneshot::Sender<bool>,
-    ) {
-        let _ = self.tx.try_send(StorageMessage::Verify {
-            info_hash,
-            piece: piece_index,
-            data: piece_data,
-            verification_tx,
-        });
+    ) -> Result<bool, StorageError> {
+        let (result_tx, result_rx) = oneshot::channel();
+        self.tx
+            .send(StorageMessage::Verify {
+                info_hash,
+                piece: piece_index,
+                data: piece_data,
+                result_tx,
+            })
+            .await?;
+        result_rx.await.map_err(|_| StorageError::ChannelClosed)?
     }
 
-    pub fn write_piece(&self, info_hash: InfoHash, piece_index: u32, piece_data: Arc<[u8]>) {
-        let _ = self.tx.try_send(StorageMessage::Write {
-            info_hash,
-            piece: piece_index,
-            data: piece_data,
-        });
+    /// Write a piece to disk.
+    /// 
+    /// # Errors
+    /// - `StorageError::TorrentNotFound` if torrent not registered
+    /// - `StorageError::Io` if disk write fails
+    /// - `StorageError::ChannelClosed` if storage actor shut down
+    pub async fn write_piece(
+        &self,
+        info_hash: InfoHash,
+        piece_index: u32,
+        piece_data: Arc<[u8]>,
+    ) -> Result<(), StorageError> {
+        let (result_tx, result_rx) = oneshot::channel();
+        self.tx
+            .send(StorageMessage::Write {
+                info_hash,
+                piece: piece_index,
+                data: piece_data,
+                result_tx,
+            })
+            .await?;
+        result_rx.await.map_err(|_| StorageError::ChannelClosed)?
     }
 
-    pub fn read_block(
+    /// Read a block from disk.
+    /// 
+    /// # Errors
+    /// - `StorageError::TorrentNotFound` if torrent not registered
+    /// - `StorageError::Io` if disk read fails
+    /// - `StorageError::ChannelClosed` if storage actor shut down
+    pub async fn read_block(
         &self,
         torrent_id: InfoHash,
         block_info: BlockInfo,
-        block_rx: oneshot::Sender<Result<Block, io::Error>>,
-    ) {
-        let _ = self.tx.try_send(StorageMessage::Read {
-            id: torrent_id,
-            piece_index: block_info.index,
-            begin: block_info.begin,
-            length: block_info.length,
-            block_rx,
-        });
+    ) -> Result<Block, StorageError> {
+        let (result_tx, result_rx) = oneshot::channel();
+        self.tx
+            .send(StorageMessage::Read {
+                id: torrent_id,
+                piece_index: block_info.index,
+                begin: block_info.begin,
+                length: block_info.length,
+                result_tx,
+            })
+            .await?;
+        result_rx.await.map_err(|_| StorageError::ChannelClosed)?
     }
 }
 
@@ -168,7 +244,7 @@ mod test {
     };
 
     use bittorrent_common::{
-        metainfo::{self, FileInfo, Info, TorrentInfo},
+        metainfo::{self, FileInfo, Info},
         types::InfoHash,
     };
 

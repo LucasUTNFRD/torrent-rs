@@ -45,7 +45,7 @@ use bittorrent_core::Storage;
 use criterion::{BenchmarkId, Criterion, criterion_group, measurement::WallTime};
 use peer_protocol::protocol::BlockInfo;
 use sha1::{Digest, Sha1};
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::Mutex;
 
 const PIECE_LENGTH: usize = 256 * 1024; // 256 KiB -- typical piece size
 const PIECES_PER_TORRENT: usize = 20; // 20 pieces = 5 MiB per torrent
@@ -110,7 +110,7 @@ struct BenchEnv {
 }
 
 /// Prepare a Storage actor with N registered torrents.
-fn setup_env(num_torrents: usize) -> BenchEnv {
+async fn setup_env(num_torrents: usize) -> BenchEnv {
     let tmp_dir = env::temp_dir().join(format!(
         "bt_bench_{}",
         std::time::SystemTime::now()
@@ -126,12 +126,12 @@ fn setup_env(num_torrents: usize) -> BenchEnv {
     for t in 0..num_torrents {
         let (info_hash, info, pieces_data) = make_torrent_info(t, PIECE_LENGTH, PIECES_PER_TORRENT);
 
-        storage.add_torrent(info_hash, info);
+        storage.add_torrent(info_hash, info).await.expect("add_torrent should not fail");
         setups.push((info_hash, pieces_data));
     }
 
     // Give storage thread time to process AddTorrent messages.
-    std::thread::sleep(Duration::from_millis(50));
+    tokio::time::sleep(Duration::from_millis(50)).await;
 
     BenchEnv {
         storage,
@@ -146,7 +146,9 @@ async fn seed_all_pieces(env: &BenchEnv) {
     for (info_hash, pieces_data) in &env.setups {
         for (idx, piece_data) in pieces_data.iter().enumerate() {
             env.storage
-                .write_piece(*info_hash, idx as u32, piece_data.clone());
+                .write_piece(*info_hash, idx as u32, piece_data.clone())
+                .await
+                .expect("write_piece should not fail");
         }
     }
     // Let all writes drain through the storage thread
@@ -165,10 +167,11 @@ async fn simulate_download_session(
     latencies: Option<Arc<Mutex<Vec<Duration>>>>,
 ) {
     for (idx, piece_data) in pieces_data.into_iter().enumerate() {
-        let (tx, rx) = oneshot::channel();
         let t0 = Instant::now();
-        storage.verify_piece(info_hash, idx as u32, piece_data.clone(), tx);
-        let valid = rx.await.expect("storage actor alive");
+        let valid = storage
+            .verify_piece(info_hash, idx as u32, piece_data.clone())
+            .await
+            .expect("verify piece should not fail");
         let elapsed = t0.elapsed();
 
         assert!(valid, "piece {idx} should pass verification");
@@ -177,7 +180,10 @@ async fn simulate_download_session(
             lats.lock().await.push(elapsed);
         }
 
-        storage.write_piece(info_hash, idx as u32, piece_data);
+        storage
+            .write_piece(info_hash, idx as u32, piece_data)
+            .await
+            .expect("write piece should not fail");
     }
 }
 
@@ -214,10 +220,8 @@ async fn simulate_seed_session(
             length: BLOCK_LENGTH,
         };
 
-        let (tx, rx) = oneshot::channel();
         let t0 = Instant::now();
-        storage.read_block(info_hash, block_info, tx);
-        let result = rx.await.expect("storage actor alive");
+        let result = storage.read_block(info_hash, block_info).await;
         let elapsed = t0.elapsed();
 
         assert!(result.is_ok(), "read should succeed");
@@ -248,7 +252,7 @@ fn bench_download(c: &mut Criterion<WallTime>) {
                 b.to_async(&rt).iter_custom(|iters| async move {
                     let mut total = Duration::ZERO;
                     for _ in 0..iters {
-                        let env = setup_env(n);
+                        let env = setup_env(n).await;
                         let start = Instant::now();
 
                         let mut handles = Vec::with_capacity(n);
@@ -293,7 +297,7 @@ fn bench_seeding(c: &mut Criterion<WallTime>) {
                     let mut total = Duration::ZERO;
                     for _ in 0..iters {
                         // Setup: write all data to disk first
-                        let env = setup_env(n);
+                        let env = setup_env(n).await;
                         seed_all_pieces(&env).await;
 
                         // Measured: N concurrent seeding sessions doing random reads
@@ -379,7 +383,7 @@ fn latency_report() {
             let latencies: Arc<Mutex<Vec<Duration>>> = Arc::new(Mutex::new(Vec::new()));
 
             rt.block_on(async {
-                let env = setup_env(n);
+                let env = setup_env(n).await;
                 let mut handles = Vec::new();
                 for (info_hash, pieces_data) in &env.setups {
                     let storage = env.storage.clone();
@@ -408,7 +412,7 @@ fn latency_report() {
             let latencies: Arc<Mutex<Vec<Duration>>> = Arc::new(Mutex::new(Vec::new()));
 
             rt.block_on(async {
-                let env = setup_env(n);
+                let env = setup_env(n).await;
                 seed_all_pieces(&env).await;
 
                 let mut handles = Vec::new();

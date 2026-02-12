@@ -7,9 +7,7 @@ use std::{
     sync::{Arc, Mutex, RwLock},
 };
 
-use crate::storage::open_file;
-
-use super::StorageMessage;
+use crate::storage::{StorageError, StorageMessage, open_file};
 
 use bittorrent_common::{
     metainfo::{FileInfo, Info},
@@ -230,85 +228,83 @@ impl StorageManager {
     pub async fn start(mut self) {
         while let Some(msg) = self.rx.recv().await {
             match msg {
-                StorageMessage::AddTorrent { info_hash, meta } => {
+                StorageMessage::AddTorrent { info_hash, meta, result_tx } => {
                     self.storage.add_torrent(info_hash, meta);
+                    let _ = result_tx.send(Ok(()));
                 }
-                StorageMessage::RemoveTorrent { id } => {
+                StorageMessage::RemoveTorrent { id, result_tx } => {
                     // Run inline -- the write lock is O(1) and does not perform
                     // I/O, so it won't block the event loop appreciably.
                     // Running inline guarantees removal is ordered with respect
                     // to subsequent messages so we don't need to coordinate with
                     // in-flight spawned tasks.
                     self.storage.torrents.write().unwrap().remove(&id);
+                    let _ = result_tx.send(Ok(()));
                 }
                 StorageMessage::Read {
                     id,
                     piece_index,
                     begin,
                     length,
-                    block_rx,
+                    result_tx,
                 } => {
                     // Snapshot the Arc<TorrentCache> *before* spawning so the
                     // cache stays alive even if RemoveTorrent runs before the
                     // blocking task acquires the lock.
                     let Some(cache) = self.storage.get_torrent(&id) else {
-                        let _ = block_rx.send(Err(io::Error::new(
-                            io::ErrorKind::NotFound,
-                            "torrent not registered",
-                        )));
+                        let _ = result_tx.send(Err(StorageError::TorrentNotFound(id)));
                         continue;
                     };
                     let storage = self.storage.clone();
                     tokio::task::spawn_blocking(move || {
-                        let data = storage.read(&cache, piece_index, begin, length);
-                        let _ = block_rx.send(data);
+                        let result = storage
+                            .read(&cache, piece_index, begin, length)
+                            .map_err(StorageError::from);
+                        let _ = result_tx.send(result);
                     });
                 }
                 StorageMessage::Write {
                     info_hash,
                     piece,
                     data,
+                    result_tx,
                 } => {
                     let Some(cache) = self.storage.get_torrent(&info_hash) else {
-                        tracing::error!("write to non-registered torrent {info_hash:?}");
+                        let _ = result_tx.send(Err(StorageError::TorrentNotFound(info_hash)));
                         continue;
                     };
                     let storage = self.storage.clone();
                     tokio::task::spawn_blocking(move || {
-                        if let Err(e) = storage.write(&cache, piece, &data) {
-                            tracing::error!(?e);
-                        }
+                        let result = storage
+                            .write(&cache, piece, &data)
+                            .map_err(StorageError::from);
+                        let _ = result_tx.send(result);
                     });
                 }
                 StorageMessage::Verify {
                     info_hash,
                     piece,
                     data,
-                    verification_tx,
+                    result_tx,
                 } => {
                     let Some(cache) = self.storage.get_torrent(&info_hash) else {
-                        tracing::error!(
-                            "piece verification of a non-registered torrent {info_hash:?}"
-                        );
-                        let _ = verification_tx.send(false);
+                        let _ = result_tx.send(Err(StorageError::TorrentNotFound(info_hash)));
                         continue;
                     };
 
                     let expected_piece_hash =
                         cache.metainfo.get_piece_hash(piece as usize).copied();
 
-                    if let Some(expected) = expected_piece_hash {
+                    let result = if let Some(expected) = expected_piece_hash {
                         let mut hasher = Sha1::new();
                         hasher.update(data);
                         let piece_hash: [u8; 20] = hasher.finalize().into();
-
-                        let matches = piece_hash == expected;
-                        if verification_tx.send(matches).is_err() {
-                            tracing::error!("failed to send verification to peer");
-                        }
+                        Ok(piece_hash == expected)
                     } else {
-                        let _ = verification_tx.send(false);
-                    }
+                        Err(StorageError::PieceNotFound(piece))
+                    };
+
+                    let _ = result_tx.send(result);
                 }
             }
         }
