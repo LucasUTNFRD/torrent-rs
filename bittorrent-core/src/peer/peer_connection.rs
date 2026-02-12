@@ -448,9 +448,11 @@ impl Peer<Connected> {
             PeerMessage::SendBitfield { bitfield } => todo!(),
             PeerMessage::SendChoke => {
                 self.state.metrics.reset_since_unchoked();
+                self.state.choked = true;
                 self.state.sink.send(Message::Choke).await?;
             }
             PeerMessage::SendUnchoke => {
+                self.state.choked = false;
                 self.state.sink.send(Message::Unchoke).await?;
             }
             PeerMessage::Disconnect => todo!(),
