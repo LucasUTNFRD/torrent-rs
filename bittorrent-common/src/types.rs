@@ -1,4 +1,4 @@
-use rand::RngCore;
+use rand::Rng;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct InfoHash([u8; 20]);

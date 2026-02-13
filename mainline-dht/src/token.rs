@@ -14,7 +14,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use rand::RngCore;
+use rand::Rng;
 
 /// Token rotation interval (5 minutes per BEP 5).
 const ROTATION_INTERVAL: Duration = Duration::from_secs(5 * 60);

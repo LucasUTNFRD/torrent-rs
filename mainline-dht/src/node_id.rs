@@ -7,7 +7,7 @@ use std::{
 
 use bittorrent_common::types::InfoHash;
 use crc::{CRC_32_ISCSI, Crc};
-use rand::Rng;
+use rand::{Rng, RngExt, TryRng};
 
 const CASTAGNOLI: Crc<u32> = Crc::<u32>::new(&CRC_32_ISCSI);
 
@@ -84,7 +84,7 @@ impl NodeId {
 
         let mut rng = rand::rng();
 
-        rng.fill(&mut bytes);
+        let _ = rng.try_fill_bytes(&mut bytes);
 
         Self(bytes)
     }

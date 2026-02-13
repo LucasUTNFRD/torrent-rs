@@ -11,8 +11,8 @@ members = [
   "peer-protocol",
   "tracker-client",
 ]
-
-resolver = "2" # Recommended for new workspaces
+resolver = "2"
+default-members = ["bittorrent-cli", "bittorrent-daemon", "bittorrent-remote"]
 
 [workspace.dependencies]
 sha1 = "0.10"
@@ -21,4 +21,13 @@ tokio = { version = "1", features = ["full", "tracing"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 console-subscriber = "0.5.0"
-rand = "0.9.1"
+rand = "0.10.0"
+
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 16
+strip = true
