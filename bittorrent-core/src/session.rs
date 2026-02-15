@@ -229,25 +229,26 @@ impl SessionManager {
         let tracker = Arc::new(TrackerHandler::new(*CLIENT_ID));
         let storage = Arc::new(Storage::new());
 
-        // TODO: Boostrap this in a tokio task to avoid blocking
-        // Initialize and bootstrap DHT if enabled
         let dht: Option<Arc<DhtHandler>> = if self.dht_enabled {
             match DhtHandler::new(Some(self.config.port)).await {
                 Ok(dht) => {
                     tracing::info!("DHT node created, bootstrapping...");
-                    match dht.bootstrap().await {
-                        Ok(node_id) => {
-                            tracing::info!(
-                                "DHT bootstrapped successfully with node ID: {:?}",
-                                node_id
-                            );
-                            Some(Arc::new(dht))
+                    let dht = Arc::new(dht);
+                    let dht_clone = dht.clone();
+                    tokio::spawn(async move {
+                        match dht_clone.bootstrap().await {
+                            Ok(node_id) => {
+                                tracing::info!(
+                                    "DHT bootstrapped successfully with node ID: {:?}",
+                                    node_id
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!("DHT bootstrap failed: {}", e);
+                            }
                         }
-                        Err(e) => {
-                            tracing::warn!("DHT bootstrap failed: {}, continuing without DHT", e);
-                            None
-                        }
-                    }
+                    });
+                    Some(dht)
                 }
                 Err(e) => {
                     tracing::warn!("Failed to create DHT node: {}, continuing without DHT", e);
