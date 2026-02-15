@@ -406,7 +406,7 @@ impl Peer<Connected> {
 
         match msg {
             Message::KeepAlive => self.on_keepalive().await?,
-            Message::Choke => self.on_choke().await?,
+            Message::Choke => self.on_choke()?,
             Message::Unchoke => self.on_unchoke().await?,
             Message::Interested => self.on_interested().await?,
             Message::NotInterested => self.on_not_interested().await?,
@@ -527,11 +527,13 @@ impl Peer<Connected> {
         debug!("recv keepalive");
         Ok(())
     }
-    async fn on_choke(&mut self) -> Result<(), ConnectionError> {
+
+    fn on_choke(&mut self) -> Result<(), ConnectionError> {
         debug!("RECV CHOKE");
         self.state.peer_choked = true;
         Ok(())
     }
+
     async fn on_unchoke(&mut self) -> Result<(), ConnectionError> {
         debug!("UNCHOKE Received");
         self.state.peer_choked = false;

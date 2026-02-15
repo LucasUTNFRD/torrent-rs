@@ -29,7 +29,7 @@ pub enum StorageError {
 
 impl From<mpsc::error::SendError<StorageMessage>> for StorageError {
     fn from(_: mpsc::error::SendError<StorageMessage>) -> Self {
-        StorageError::ChannelClosed
+        Self::ChannelClosed
     }
 }
 
