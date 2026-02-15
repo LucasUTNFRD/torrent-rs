@@ -229,6 +229,7 @@ impl SessionManager {
         let tracker = Arc::new(TrackerHandler::new(*CLIENT_ID));
         let storage = Arc::new(Storage::new());
 
+        // TODO: Boostrap this in a tokio task to avoid blocking
         // Initialize and bootstrap DHT if enabled
         let dht: Option<Arc<DhtHandler>> = if self.dht_enabled {
             let config =
