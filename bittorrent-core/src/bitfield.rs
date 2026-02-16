@@ -19,7 +19,7 @@ pub enum BitfieldError {
 #[derive(Clone, Eq, PartialEq)]
 pub struct Bitfield {
     inner: Vec<u8>, // is this the best fit for the data?
-    num_pieces: usize,
+    pub(crate) num_pieces: usize,
 }
 
 impl fmt::Debug for Bitfield {
@@ -167,6 +167,12 @@ impl Bitfield {
     }
 
     pub fn set(&mut self, index: usize) {
+        assert!(
+            index < self.num_pieces,
+            "index out of bounds: the len is {} but the index is {}",
+            self.num_pieces,
+            index
+        );
         let byte_idx = index / 8;
         let bit_idx = index % 8;
         self.inner[byte_idx] |= MSB_MASK >> bit_idx;
@@ -177,6 +183,12 @@ impl Bitfield {
     }
 
     pub fn has(&self, index: usize) -> bool {
+        assert!(
+            index < self.num_pieces,
+            "index out of bounds: the len is {} but the index is {}",
+            self.num_pieces,
+            index
+        );
         let byte_idx = index / 8;
         let bit_idx = index % 8;
         (self.inner[byte_idx] & (MSB_MASK >> bit_idx)) != 0

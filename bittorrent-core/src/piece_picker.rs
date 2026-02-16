@@ -194,6 +194,34 @@ impl PieceManager {
         }
     }
 
+    /// Reset a piece to NotRequested state and clear all block data
+    /// Used when a piece fails hash verification and needs to be re-downloaded
+    pub fn reset_piece(&mut self, index: PieceIndex) {
+        if let Some(piece) = self.pieces.get_mut(index) {
+            // Reset piece state
+            piece.state = PieceState::NotRequested;
+
+            // Reset all blocks to NotRequested
+            for block in &mut piece.blocks {
+                block.state = BlockState::NotRequested;
+            }
+
+            // Clear the piece buffer to discard corrupt data
+            let piece_len = self.torrent_info.get_piece_len(index);
+            piece.buffer = Some(PieceBuffer::new(piece_len as usize));
+
+            // Remove any remaining heat entries for this piece's blocks
+            piece.blocks.iter().for_each(|block| {
+                let request = BlockRequest {
+                    piece_index: index as u32,
+                    begin: block.offset,
+                    length: block.length,
+                };
+                self.heat.remove(&request);
+            });
+        }
+    }
+
     /// Register a block request and increment its heat
     pub fn add_request(&mut self, request: BlockRequest) -> bool {
         let piece_idx = request.piece_index as usize;
@@ -234,6 +262,19 @@ impl PieceManager {
         let total = self.pieces.len();
 
         tracing::info!("Piece progress {have:?}/{total:?}");
+    }
+
+    /// Get download progress as a fraction (0.0 - 1.0)
+    pub fn get_progress(&self) -> f64 {
+        if self.pieces.is_empty() {
+            return 0.0;
+        }
+        let have = self
+            .pieces
+            .iter()
+            .filter(|p| p.state == PieceState::Have)
+            .count();
+        have as f64 / self.pieces.len() as f64
     }
 
     /// Remove a block request and decrement its heat

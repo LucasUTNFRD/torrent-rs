@@ -168,7 +168,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tracing_subscriber::fmt::layer()
                 .with_target(false)
                 .with_thread_ids(false)
-                .with_file(false)
+                .with_file(true)
                 .with_line_number(true)
                 .with_filter(log_level),
         )

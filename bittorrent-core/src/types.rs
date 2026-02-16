@@ -62,6 +62,8 @@ pub struct TorrentSummary {
     pub upload_rate: u64,
     /// Number of currently connected peers
     pub peers_connected: usize,
+    /// Total number of peers discovered (from trackers/DHT)
+    pub peers_discovered: usize,
     /// Total size in bytes
     pub size_bytes: u64,
     /// Bytes downloaded so far
