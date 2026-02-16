@@ -142,6 +142,23 @@ pub enum TorrentMessage {
         remote_addr: SocketAddr,
         supports_ext: bool,
     },
+    /// Get torrent statistics
+    GetStats {
+        resp: oneshot::Sender<TorrentStats>,
+    },
+}
+
+/// Statistics for a torrent
+#[derive(Debug, Clone)]
+pub struct TorrentStats {
+    pub state: TorrentState,
+    pub progress: f64,
+    pub download_rate: u64,
+    pub upload_rate: u64,
+    pub peers_connected: usize,
+    pub peers_discovered: usize,
+    pub downloaded_bytes: u64,
+    pub uploaded_bytes: u64,
 }
 
 //
@@ -614,8 +631,58 @@ impl Torrent {
                     supports_ext,
                 });
             }
+            TorrentMessage::GetStats { resp } => {
+                let stats = self.get_stats();
+                let _ = resp.send(stats);
+            }
         }
         Ok(())
+    }
+
+    /// Get current torrent statistics
+    fn get_stats(&self) -> TorrentStats {
+        // Aggregate peer metrics
+        let mut total_download_rate = 0u64;
+        let mut total_upload_rate = 0u64;
+        let mut downloaded_bytes = 0u64;
+        let mut uploaded_bytes = 0u64;
+
+        for peer in self.peers.values() {
+            total_download_rate += peer.metrics.get_download_rate();
+            total_upload_rate += peer.metrics.get_upload_rate();
+            downloaded_bytes += peer.metrics.get_bytes_downloaded();
+            uploaded_bytes += peer.metrics.get_bytes_uploaded();
+        }
+
+        // Calculate progress from piece manager
+        let progress = self
+            .piece_mananger
+            .as_ref()
+            .map(|pm| pm.get_progress())
+            .unwrap_or(0.0);
+
+        // Determine state based on progress and piece manager state
+        let state = if self.metadata.has_metadata() {
+            if progress >= 1.0 {
+                TorrentState::Seeding
+            } else {
+                TorrentState::Leeching
+            }
+        } else {
+            // No metadata yet, still fetching
+            TorrentState::Leeching
+        };
+
+        TorrentStats {
+            state,
+            progress,
+            download_rate: total_download_rate,
+            upload_rate: total_upload_rate,
+            peers_connected: self.peers.len(),
+            peers_discovered: self.metrics.connected_peers.load(Ordering::Relaxed),
+            downloaded_bytes,
+            uploaded_bytes,
+        }
     }
 
     // async fn incoming_have(&self) {

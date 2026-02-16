@@ -29,7 +29,7 @@ use tokio::{
 };
 
 use tokio_util::codec::Framed;
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, instrument};
 
 use crate::{
     bitfield::{Bitfield, BitfieldError},
@@ -132,7 +132,7 @@ impl Peer<Handshaking> {
         tracing::debug!("Validating remote handshake");
 
         if remote_handshake.info_hash != self.info_hash {
-            warn!("Handshake failed: info hash mismatch");
+            debug!("Handshake failed: info hash mismatch");
             return Err(ConnectionError::InvalidHandshake);
         }
 
@@ -285,7 +285,7 @@ impl Peer<Connected> {
     )
     )]
     pub async fn start(mut self) -> Result<(), ConnectionError> {
-        info!("connection established");
+        debug!("connection established");
 
         self.have_valid_metadata().await;
 
@@ -320,7 +320,7 @@ impl Peer<Connected> {
 
                     let time_since_last_request = self.state.last_block_request.elapsed();
                     if self.state.interesting && time_since_last_request > Duration::from_secs(30) || self.state.last_recv_msg.elapsed() > Duration::from_secs(60) {
-                        warn!(
+                        debug!(
                             "Disconnecting peer: interested but no block request activity for {} seconds",
                             time_since_last_request.as_secs()
                         );
@@ -355,7 +355,7 @@ impl Peer<Connected> {
     fn metric_update(&mut self) {
         self.state.metrics.update_rates();
 
-        info!(
+        debug!(
             "dr : {} | choked: {} | interested: {} | max_queue_size : {}, outgoing_requests: {} | slow_start : {}",
             self.state.metrics.get_download_rate_human(),
             self.state.choked,
@@ -375,7 +375,7 @@ impl Peer<Connected> {
             let threshold = std::cmp::max(current_rate / 20, 10_240);
 
             if current_rate > 0 && rate_increase < threshold {
-                info!(
+                debug!(
                     "Leaving slow start. Rate: {} B/s, Increase: {}",
                     current_rate, rate_increase
                 );
@@ -670,7 +670,7 @@ impl Peer<Connected> {
             let num_pieces = metadata.pieces.len();
 
             if have_idx as usize >= num_pieces {
-                warn!(
+                debug!(
                     "Received HAVE for invalid piece index {} (max: {})",
                     have_idx,
                     num_pieces - 1
@@ -682,7 +682,7 @@ impl Peer<Connected> {
         } else {
             // Pre-metadata validation - cap at 64k pieces
             if have_idx >= 65536 {
-                warn!(
+                debug!(
                     "Received HAVE for piece index {} exceeding 64k limit",
                     have_idx
                 );
@@ -726,7 +726,7 @@ impl Peer<Connected> {
 
         // Check if we already received a bitfield
         if self.state.bitfield.is_received() {
-            warn!("Received duplicate bitfield from peer");
+            debug!("Received duplicate bitfield from peer");
             return Err(ConnectionError::Protocol(
                 "Duplicate bitfield message".to_string(),
             ));
@@ -740,7 +740,7 @@ impl Peer<Connected> {
                     self.state.bitfield = BitfieldState::Validated(bitfield);
                 }
                 Err(e) => {
-                    warn!("Invalid bitfield received: {}", e);
+                    debug!("Invalid bitfield received: {}", e);
                     return Err(ConnectionError::BitfieldError(e));
                 }
             }
@@ -817,7 +817,7 @@ impl Peer<Connected> {
                         self.state.target_request_queue = self.state.max_outgoing_request;
                     }
                 } else {
-                    warn!(
+                    debug!(
                         "Bufferbloat detected ({}s queue). Exiting slow start.",
                         queue_duration_secs
                     );
@@ -843,7 +843,7 @@ impl Peer<Connected> {
                     self.state.target_request_queue = self.state.max_outgoing_request;
                 }
             } else {
-                warn!(
+                debug!(
                     "Bufferbloat detected ({}s queue). Exiting slow start.",
                     queue_duration_secs
                 );
@@ -1107,7 +1107,7 @@ pub fn spawn_outgoing_peer(
         .await;
 
         if let Err(e) = result {
-            warn!(peer = %addr, error = %e, "Outgoing peer connection failed");
+            debug!(peer = %addr, error = %e, "Outgoing peer connection failed");
         }
     });
 }
@@ -1133,7 +1133,7 @@ pub fn spawn_inbound_peer(
         };
 
         if let Err(e) = peer.start().await {
-            warn!(?e, "Inbound peer error");
+            debug!(?e, "Inbound peer error");
         }
     });
 }

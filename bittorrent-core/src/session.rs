@@ -31,7 +31,7 @@ use tracker_client::TrackerHandler;
 
 use crate::{
     storage::Storage,
-    torrent::{Torrent, TorrentError, TorrentMessage},
+    torrent::{Torrent, TorrentError, TorrentMessage, TorrentStats},
     types::{SessionConfig, SessionStats, TorrentId, TorrentState, TorrentSummary},
 };
 
@@ -294,7 +294,7 @@ impl SessionManager {
                     let _ = resp.send(list);
                 }
                 SessionCommand::GetTorrent { id, resp } => {
-                    let info = self.handle_get_torrent(id);
+                    let info = self.handle_get_torrent(id).await;
                     let _ = resp.send(info);
                 }
                 SessionCommand::GetStats { resp } => {
@@ -453,6 +453,7 @@ impl SessionManager {
                     download_rate: 0,                 // Placeholder
                     upload_rate: 0,                   // Placeholder
                     peers_connected: 0,               // Placeholder
+                    peers_discovered: 0,              // Placeholder
                     size_bytes: entry.size_bytes,
                     downloaded_bytes: 0, // Placeholder
                 }
@@ -460,21 +461,55 @@ impl SessionManager {
             .collect()
     }
 
-    fn handle_get_torrent(&self, id: TorrentId) -> Option<TorrentSummary> {
-        let sessions = self.sessions.read().unwrap();
-        sessions.get(&id).map(|entry| {
-            // TODO: Query actual stats from torrent when Phase 3 is implemented
-            TorrentSummary {
-                id,
-                name: entry.name.clone(),
-                state: TorrentState::Downloading, // Placeholder
-                progress: 0.0,                    // Placeholder
-                download_rate: 0,                 // Placeholder
-                upload_rate: 0,                   // Placeholder
-                peers_connected: 0,               // Placeholder
-                size_bytes: entry.size_bytes,
-                downloaded_bytes: 0, // Placeholder
+    async fn handle_get_torrent(&self, id: TorrentId) -> Option<TorrentSummary> {
+        let (tx, name, size_bytes) = {
+            let sessions = self.sessions.read().unwrap();
+            let entry = sessions.get(&id)?;
+            (entry.tx.clone(), entry.name.clone(), entry.size_bytes)
+        };
+
+        // Query torrent for stats
+        let (stats_tx, stats_rx) = oneshot::channel();
+        let _ = tx.send(TorrentMessage::GetStats { resp: stats_tx }).await;
+
+        let stats = match stats_rx.await {
+            Ok(stats) => stats,
+            Err(_) => {
+                // Torrent task dropped, return defaults
+                TorrentStats {
+                    state: crate::torrent::TorrentState::Leeching,
+                    progress: 0.0,
+                    download_rate: 0,
+                    upload_rate: 0,
+                    peers_connected: 0,
+                    peers_discovered: 0,
+                    downloaded_bytes: 0,
+                    uploaded_bytes: 0,
+                }
             }
+        };
+
+        Some(TorrentSummary {
+            id,
+            name,
+            state: match stats.state {
+                crate::torrent::TorrentState::Seeding => TorrentState::Seeding,
+                crate::torrent::TorrentState::Leeching => {
+                    if stats.progress == 0.0 && size_bytes > 0 {
+                        TorrentState::Checking
+                    } else {
+                        TorrentState::Downloading
+                    }
+                }
+                crate::torrent::TorrentState::Paused => TorrentState::Paused,
+            },
+            progress: stats.progress,
+            download_rate: stats.download_rate,
+            upload_rate: stats.upload_rate,
+            peers_connected: stats.peers_connected,
+            peers_discovered: stats.peers_discovered,
+            size_bytes,
+            downloaded_bytes: stats.downloaded_bytes,
         })
     }
 
