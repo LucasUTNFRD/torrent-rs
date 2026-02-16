@@ -49,4 +49,5 @@ mod types;
 
 pub use session::{Session, SessionError};
 pub use storage::Storage;
+pub use torrent::{TorrentStats, TorrentState as InternalTorrentState};
 pub use types::{SessionConfig, SessionStats, TorrentId, TorrentState, TorrentSummary};

@@ -236,6 +236,19 @@ impl PieceManager {
         tracing::info!("Piece progress {have:?}/{total:?}");
     }
 
+    /// Get download progress as a fraction (0.0 - 1.0)
+    pub fn get_progress(&self) -> f64 {
+        if self.pieces.is_empty() {
+            return 0.0;
+        }
+        let have = self
+            .pieces
+            .iter()
+            .filter(|p| p.state == PieceState::Have)
+            .count();
+        have as f64 / self.pieces.len() as f64
+    }
+
     /// Remove a block request and decrement its heat
     pub fn delete_request(&mut self, request: BlockRequest) {
         if let Some(heat) = self.heat.get_mut(&request) {
