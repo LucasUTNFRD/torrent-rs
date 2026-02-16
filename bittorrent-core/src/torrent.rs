@@ -401,9 +401,13 @@ impl Torrent {
         let (peer_tx, peer_rx) = mpsc::channel(64);
 
         let peer_addr = *peer.get_addr();
-        info!("connecting to {}", peer_addr);
 
         self.metrics.connected_peers.fetch_add(1, Ordering::Relaxed);
+        
+        // Create shared metrics that both torrent and peer connection will use
+        let shared_metrics = Arc::new(PeerMetrics::new());
+        let metrics_clone = shared_metrics.clone();
+        
         match peer {
             PeerSource::Inbound {
                 stream,
@@ -427,10 +431,13 @@ impl Torrent {
             ),
         }
 
+        // Send the shared metrics to the peer connection
+        let _ = peer_tx.try_send(PeerMessage::Connected { metrics: metrics_clone });
+
         let peer = PeerState {
             addr: peer_addr,
             tx: peer_tx,
-            metrics: PeerMetrics::new(),
+            metrics: shared_metrics,
             pending_requests: Vec::new(),
         };
 
@@ -782,11 +789,6 @@ impl Torrent {
         self.broadcast_to_peers(PeerMessage::SendHave { piece_index })
             .await;
 
-        self.piece_mananger
-            .as_ref()
-            .expect("initialized")
-            .info_progress();
-
         // Write piece to disk
         if let Err(e) = self
             .storage
@@ -841,8 +843,6 @@ impl Torrent {
     }
 
     async fn clean_up_peer(&mut self, pid: Pid, bitfield: Option<Bitfield>) {
-        info!("peer disconnected {pid:?}");
-
         // Notify choker that peer disconnected
         // Returns the peer that got unchoked to fill the slot (if any)
         if let Some(unchoked_pid) = self.choker.on_peer_disconnected(pid) {

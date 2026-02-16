@@ -244,6 +244,10 @@ impl BitfieldState {
 impl ConnectionState for Connected {}
 impl Connected {
     pub fn new(stream: TcpStream, supports_extended: bool) -> Self {
+        Self::new_with_metrics(stream, supports_extended, Arc::new(PeerMetrics::new()))
+    }
+
+    pub fn new_with_metrics(stream: TcpStream, supports_extended: bool, metrics: Arc<PeerMetrics>) -> Self {
         let framed = Framed::new(stream, MessageCodec {});
         let (sink, stream) = framed.split();
 
@@ -263,7 +267,7 @@ impl Connected {
             bitfield: BitfieldState::new(),
             metadata: None,
             request_queue: Vec::new(),
-            metrics: Arc::new(PeerMetrics::new()),
+            metrics,
             last_block_request: Instant::now(),
             target_request_queue: 2,
             prev_download_rate: 0,
@@ -471,6 +475,10 @@ impl Peer<Connected> {
 
                 // Update interest status now that we have metadata
                 self.update_interest_status().await?;
+            }
+            PeerMessage::Connected { metrics } => {
+                // Replace internal metrics with shared metrics from torrent
+                self.state.metrics = metrics;
             }
         }
         Ok(())
@@ -694,6 +702,13 @@ impl Peer<Connected> {
 
         // Update the bitfield if we don't already have this piece
         if let Some(bitfield) = self.state.bitfield.get_bitfield_mut() {
+            // Skip if bitfield hasn't been validated yet (num_pieces == 0)
+            // or if the index is out of bounds
+            let num_pieces = bitfield.num_pieces();
+            if num_pieces == 0 || have_idx as usize >= num_pieces {
+                return Ok(());
+            }
+
             if bitfield.has(have_idx as usize) {
                 return Ok(());
             }

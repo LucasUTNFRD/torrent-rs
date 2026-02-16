@@ -167,6 +167,12 @@ impl Bitfield {
     }
 
     pub fn set(&mut self, index: usize) {
+        assert!(
+            index < self.num_pieces,
+            "index out of bounds: the len is {} but the index is {}",
+            self.num_pieces,
+            index
+        );
         let byte_idx = index / 8;
         let bit_idx = index % 8;
         self.inner[byte_idx] |= MSB_MASK >> bit_idx;
@@ -177,6 +183,12 @@ impl Bitfield {
     }
 
     pub fn has(&self, index: usize) -> bool {
+        assert!(
+            index < self.num_pieces,
+            "index out of bounds: the len is {} but the index is {}",
+            self.num_pieces,
+            index
+        );
         let byte_idx = index / 8;
         let bit_idx = index % 8;
         (self.inner[byte_idx] & (MSB_MASK >> bit_idx)) != 0
@@ -313,7 +325,7 @@ mod test {
         assert_eq!(bitfield.inner[0], 0b10000001); // bits 0 and 7
         assert_eq!(bitfield.inner[1], 0b10000000); // bit 8
         assert_eq!(bitfield.inner[2], 0b00010000); // bit 19
-        //
+                                                   //
 
         let mut iter = bitfield.iter_set();
 
