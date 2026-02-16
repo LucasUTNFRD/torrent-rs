@@ -169,7 +169,8 @@ pub struct TorrentStats {
 pub struct Metrics {
     pub downloaded_bytes: AtomicU64,
     pub uploaded_bytes: AtomicU64,
-    pub connected_peers: AtomicUsize,
+    /// Total number of unique peers discovered from trackers/DHT (cumulative, never decrements)
+    pub peers_discovered: AtomicUsize,
 }
 
 //
@@ -402,12 +403,14 @@ impl Torrent {
 
         let peer_addr = *peer.get_addr();
 
-        self.metrics.connected_peers.fetch_add(1, Ordering::Relaxed);
-        
+        self.metrics
+            .peers_discovered
+            .fetch_add(1, Ordering::Relaxed);
+
         // Create shared metrics that both torrent and peer connection will use
         let shared_metrics = Arc::new(PeerMetrics::new());
         let metrics_clone = shared_metrics.clone();
-        
+
         match peer {
             PeerSource::Inbound {
                 stream,
@@ -432,7 +435,9 @@ impl Torrent {
         }
 
         // Send the shared metrics to the peer connection
-        let _ = peer_tx.try_send(PeerMessage::Connected { metrics: metrics_clone });
+        let _ = peer_tx.try_send(PeerMessage::Connected {
+            metrics: metrics_clone,
+        });
 
         let peer = PeerState {
             addr: peer_addr,
@@ -585,7 +590,7 @@ impl Torrent {
 
                 // Put the metadata piece into the buffer
                 if let Err(e) = self.metadata.put_metadata_piece(metadata, piece_idx) {
-                    tracing::warn!("Failed to put metadata piece {}: {}", piece_idx, e);
+                    tracing::debug!("Failed to put metadata piece {}: {}", piece_idx, e);
                     return Ok(());
                 }
 
@@ -661,12 +666,10 @@ impl Torrent {
             uploaded_bytes += peer.metrics.get_bytes_uploaded();
         }
 
-        // Calculate progress from piece manager
         let progress = self
             .piece_mananger
             .as_ref()
-            .map(|pm| pm.get_progress())
-            .unwrap_or(0.0);
+            .map_or(0.0, PieceManager::get_progress);
 
         // Determine state based on progress and piece manager state
         let state = if self.metadata.has_metadata() {
@@ -686,15 +689,11 @@ impl Torrent {
             download_rate: total_download_rate,
             upload_rate: total_upload_rate,
             peers_connected: self.peers.len(),
-            peers_discovered: self.metrics.connected_peers.load(Ordering::Relaxed),
+            peers_discovered: self.metrics.peers_discovered.load(Ordering::Relaxed),
             downloaded_bytes,
             uploaded_bytes,
         }
     }
-
-    // async fn incoming_have(&self) {
-    //     todo!()
-    // }
 
     async fn incoming_block(&mut self, pid: Pid, block: Block) {
         let piece_index = block.index;
@@ -761,21 +760,21 @@ impl Torrent {
         {
             Ok(valid) => valid,
             Err(e) => {
-                tracing::error!("Failed to verify piece {}: {}", piece_index, e);
+                tracing::error!("Failed to verify piece {}: {} - resetting for re-download", piece_index, e);
                 self.piece_mananger
                     .as_mut()
                     .expect("initialized")
-                    .set_piece_as(piece_index as usize, PieceState::NotRequested);
+                    .reset_piece(piece_index as usize);
                 return;
             }
         };
 
         if !valid {
-            tracing::warn!("Piece {} failed hash verification", piece_index);
+            tracing::warn!("Piece {} failed hash verification - resetting for re-download", piece_index);
             self.piece_mananger
                 .as_mut()
                 .expect("initialized")
-                .set_piece_as(piece_index as usize, PieceState::NotRequested);
+                .reset_piece(piece_index as usize);
             return;
         }
 
@@ -795,12 +794,12 @@ impl Torrent {
             .write_piece(torrent_id, piece_index, piece)
             .await
         {
-            tracing::error!("Failed to write piece {}: {}", piece_index, e);
-            // Mark piece as not downloaded so it will be retried
+            tracing::error!("Failed to write piece {}: {} - resetting for re-download", piece_index, e);
+            // Reset piece so it will be re-downloaded
             self.piece_mananger
                 .as_mut()
                 .expect("initialized")
-                .set_piece_as(piece_index as usize, PieceState::NotRequested);
+                .reset_piece(piece_index as usize);
         }
 
         if self
@@ -833,7 +832,7 @@ impl Torrent {
                 .info()
                 .expect("metadata was not successfully constructed");
 
-            tracing::info!("Metadata Info: {:#?}", info);
+            // tracing::info!("Metadata Info: {:#?}", info);
 
             self.broadcast_to_peers(PeerMessage::HaveMetadata(info))
                 .await;
@@ -870,7 +869,9 @@ impl Torrent {
             mananger.cancel_peer_requests(&requests);
         }
 
-        self.metrics.connected_peers.fetch_sub(1, Ordering::Relaxed);
+        // Note: We do NOT decrement peers_discovered here because it tracks
+        // cumulative discovered peers, not currently connected peers.
+        // peers_connected (self.peers.len()) tracks current connections.
     }
 
     /// Run the choker algorithm periodically to rotate upload slots
