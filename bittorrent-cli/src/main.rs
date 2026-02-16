@@ -135,7 +135,7 @@ fn get_status_line(summary: &TorrentSummary) -> String {
             format!(
                 "Progress: {:.1}%, dl from {} of {} peers ({}), ul to {} ({}) [{}]",
                 progress,
-                summary.peers_connected, // connected peers
+                summary.peers_connected,  // connected peers
                 summary.peers_discovered, // discovered peers from trackers/DHT
                 format_bytes_per_second(summary.download_rate),
                 0, // peers_getting_from_us - not tracked yet

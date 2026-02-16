@@ -247,7 +247,11 @@ impl Connected {
         Self::new_with_metrics(stream, supports_extended, Arc::new(PeerMetrics::new()))
     }
 
-    pub fn new_with_metrics(stream: TcpStream, supports_extended: bool, metrics: Arc<PeerMetrics>) -> Self {
+    pub fn new_with_metrics(
+        stream: TcpStream,
+        supports_extended: bool,
+        metrics: Arc<PeerMetrics>,
+    ) -> Self {
         let framed = Framed::new(stream, MessageCodec {});
         let (sink, stream) = framed.split();
 
@@ -323,7 +327,7 @@ impl Peer<Connected> {
                 _=heartbeat_ticker.tick()=>{
 
                     let time_since_last_request = self.state.last_block_request.elapsed();
-                    if self.state.interesting && time_since_last_request > Duration::from_secs(30) || self.state.last_recv_msg.elapsed() > Duration::from_secs(60) {
+                    if self.state.interesting && time_since_last_request > Duration::from_secs(30) || self.state.last_recv_msg.elapsed() > Duration::from_secs(45) {
                         debug!(
                             "Disconnecting peer: interested but no block request activity for {} seconds",
                             time_since_last_request.as_secs()
@@ -704,7 +708,7 @@ impl Peer<Connected> {
         if let Some(bitfield) = self.state.bitfield.get_bitfield_mut() {
             // Skip if bitfield hasn't been validated yet (num_pieces == 0)
             // or if the index is out of bounds
-            let num_pieces = bitfield.num_pieces();
+            let num_pieces = bitfield.num_pieces;
             if num_pieces == 0 || have_idx as usize >= num_pieces {
                 return Ok(());
             }
