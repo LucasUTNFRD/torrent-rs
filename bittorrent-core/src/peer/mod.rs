@@ -21,11 +21,13 @@ pub enum PeerMessage {
     Disconnect,
     SendMessage(Message),
     HaveMetadata(Arc<Info>),
+    /// Sent to peer after connection to share metrics Arc
+    Connected { metrics: Arc<PeerMetrics> },
 }
 
 pub struct PeerState {
     pub addr: SocketAddr,
-    pub metrics: PeerMetrics,
+    pub metrics: Arc<PeerMetrics>,
     pub tx: mpsc::Sender<PeerMessage>,
     pub pending_requests: Vec<BlockInfo>,
 }
