@@ -1064,7 +1064,14 @@ impl DhtActor {
         implied_port: bool,
     ) -> Result<AnnounceResult, DhtError> {
         // First, perform get_peers to find closest nodes and get tokens
-        let get_peers_result = self.iterative_get_peers(info_hash).await?;
+        // Use the concurrent search system for better performance
+        let (completion_tx, completion_rx) = oneshot::channel::<GetPeersResult>();
+        self.start_concurrent_get_peers(info_hash, completion_tx).await;
+
+        // Wait for the concurrent search to complete
+        let get_peers_result = completion_rx
+            .await
+            .map_err(|_| DhtError::ChannelClosed)?;
 
         let mut announce_count = 0;
 
