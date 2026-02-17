@@ -39,7 +39,9 @@ pub mod search;
 mod token;
 
 // Re-export main types for convenience
-pub use dht::{AnnounceResult, Dht, DhtConfig, DhtHandler, DhtResponse, GetPeersResult};
+pub use dht::{AnnounceResult, DhtConfig, DhtHandler, DhtResponse, GetPeersResult};
+
+pub type Dht = DhtHandler;
 pub use error::DhtError;
 pub use message::CompactNodeInfo;
 pub use node_id::NodeId;

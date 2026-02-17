@@ -156,6 +156,13 @@ impl RoutingTable {
         self.buckets.iter().map(|b| b.nodes.len()).sum()
     }
 
+    pub fn get_all_nodes(&self) -> Vec<&Node> {
+        self.buckets
+            .iter()
+            .flat_map(|bucket| bucket.nodes.iter())
+            .collect()
+    }
+
     /// Number of good nodes in the routing table.
     #[allow(dead_code)]
     pub fn good_node_count(&self) -> usize {

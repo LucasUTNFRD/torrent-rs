@@ -14,10 +14,10 @@ use bittorrent_common::types::InfoHash;
 use lru::LruCache;
 
 /// Default maximum number of torrents to track.
-const DEFAULT_MAX_TORRENTS: usize = 1000;
+const DEFAULT_MAX_TORRENTS: usize = 16384;
 
 /// Default maximum peers stored per torrent.
-const DEFAULT_MAX_PEERS: usize = 100;
+const DEFAULT_MAX_PEERS: usize = 2048;
 
 /// Default peer TTL (30 minutes per BEP 5 recommendation).
 const DEFAULT_PEER_TTL: Duration = Duration::from_secs(30 * 60);

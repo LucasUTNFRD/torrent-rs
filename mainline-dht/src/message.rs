@@ -16,17 +16,12 @@ use bittorrent_common::types::InfoHash;
 use crate::{error::DhtError, node_id::NodeId};
 
 ///Transaction ID for correlating requests and responses.
-/// Typically 2 bytes, sufficient for 65536 outstanding queries.
-///
-/// Uses `Vec<u8>` instead of `u16` because BEP 0005 treats transaction IDs as
-/// opaque byte strings - other DHT nodes may send IDs of any length (1, 2, 4+ bytes)
-/// and we must echo them back exactly in responses.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct TransactionId(pub Vec<u8>);
+pub struct TransactionId(pub [u8; 2]);
 
 impl TransactionId {
     pub fn new(id: u16) -> Self {
-        Self(id.to_be_bytes().to_vec())
+        Self(id.to_be_bytes())
     }
 
     pub fn as_bytes(&self) -> &[u8] {
@@ -239,7 +234,7 @@ impl KrpcMessage {
         let transaction_id = dict
             .get_bytes(b"t")
             .ok_or_else(|| DhtError::Parse("missing transaction id".to_string()))?;
-        let transaction_id = TransactionId(transaction_id.to_vec());
+        let transaction_id = TransactionId(transaction_id.try_into().expect("2 bytes long"));
 
         // Version (optional)
         let version = dict.get_bytes(b"v").map(|v| v.to_vec());
@@ -708,7 +703,7 @@ mod tests {
         let bytes = msg.to_bytes();
         let decoded = KrpcMessage::from_bytes(&bytes).unwrap();
 
-        assert_eq!(decoded.transaction_id.0, vec![0, 42]);
+        assert_eq!(decoded.transaction_id.0, [0, 42]);
         match decoded.body {
             MessageBody::Query(Query::Ping { id }) => {
                 assert_eq!(id, node_id);
