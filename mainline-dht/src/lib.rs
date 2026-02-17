@@ -35,8 +35,8 @@ mod node;
 pub mod node_id;
 mod peer_store;
 mod routing_table;
-pub mod search;
 mod token;
+pub mod transaction;
 
 // Re-export main types for convenience
 pub use dht::{AnnounceResult, DhtConfig, DhtHandler, DhtResponse, GetPeersResult};
