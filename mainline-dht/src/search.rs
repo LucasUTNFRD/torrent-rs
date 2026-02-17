@@ -14,7 +14,11 @@ use std::{
 use bittorrent_common::types::InfoHash;
 use tokio::sync::oneshot;
 
-use crate::{dht::GetPeersResult, message::CompactNodeInfo, node_id::NodeId};
+use crate::{
+    dht::GetPeersResult,
+    message::{CompactNodeInfo, TransactionId},
+    node_id::NodeId,
+};
 
 // ============================================================================
 // Constants
@@ -39,7 +43,7 @@ pub enum CandidateStatus {
     /// Not yet queried.
     Pending,
     /// Query sent, waiting for response (stores transaction ID bytes).
-    Querying(Vec<u8>),
+    Querying(TransactionId),
     /// Successfully responded.
     Responded,
     /// Timed out or error.
@@ -176,7 +180,7 @@ impl SearchState {
     }
 
     /// Mark a candidate as querying with the given transaction ID.
-    pub fn mark_querying(&mut self, node_id: &NodeId, tx_id: Vec<u8>) {
+    pub fn mark_querying(&mut self, node_id: &NodeId, tx_id: TransactionId) {
         if let Some(candidate) = self
             .candidates
             .iter_mut()
@@ -188,7 +192,7 @@ impl SearchState {
     }
 
     /// Mark a candidate as responded based on transaction ID.
-    pub fn mark_responded(&mut self, tx_id: &[u8]) -> Option<NodeId> {
+    pub fn mark_responded(&mut self, tx_id: &TransactionId) -> Option<NodeId> {
         for candidate in &mut self.candidates {
             if matches!(&candidate.status, CandidateStatus::Querying(id) if id == tx_id) {
                 candidate.status = CandidateStatus::Responded;
@@ -199,7 +203,7 @@ impl SearchState {
     }
 
     /// Mark a candidate as failed based on transaction ID.
-    pub fn mark_failed(&mut self, tx_id: &[u8]) -> Option<NodeId> {
+    pub fn mark_failed(&mut self, tx_id: &TransactionId) -> Option<NodeId> {
         for candidate in &mut self.candidates {
             if matches!(&candidate.status, CandidateStatus::Querying(id) if id == tx_id) {
                 candidate.status = CandidateStatus::Failed;
@@ -242,7 +246,7 @@ pub struct SearchManager {
     /// Active searches by infohash.
     pub searches: HashMap<InfoHash, SearchState>,
     /// Map transaction ID -> infohash for routing responses.
-    pub tx_to_search: HashMap<Vec<u8>, InfoHash>,
+    pub tx_to_search: HashMap<TransactionId, InfoHash>,
 }
 
 impl SearchManager {
@@ -260,17 +264,17 @@ impl SearchManager {
     }
 
     /// Register a transaction ID for a search.
-    pub fn register_tx(&mut self, tx_id: Vec<u8>, info_hash: InfoHash) {
+    pub fn register_tx(&mut self, tx_id: TransactionId, info_hash: InfoHash) {
         self.tx_to_search.insert(tx_id, info_hash);
     }
 
     /// Look up which search a transaction belongs to.
-    pub fn lookup_tx(&self, tx_id: &[u8]) -> Option<&InfoHash> {
+    pub fn lookup_tx(&self, tx_id: &TransactionId) -> Option<&InfoHash> {
         self.tx_to_search.get(tx_id)
     }
 
     /// Remove a transaction ID mapping.
-    pub fn remove_tx(&mut self, tx_id: &[u8]) -> Option<InfoHash> {
+    pub fn remove_tx(&mut self, tx_id: &TransactionId) -> Option<InfoHash> {
         self.tx_to_search.remove(tx_id)
     }
 

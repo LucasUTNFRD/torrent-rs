@@ -515,7 +515,7 @@ struct DhtActor {
     routing_table: RoutingTable,
     command_rx: mpsc::Receiver<DhtCommand>,
     next_tx_id: AtomicU16,
-    pending: HashMap<Vec<u8>, PendingRequest>,
+    pending: HashMap<TransactionId, PendingRequest>,
     /// Storage for announced peers.
     peer_store: PeerStore,
     /// Token generation and validation.
@@ -552,7 +552,7 @@ impl DhtActor {
     }
 
     async fn run(mut self, shared_node_id: Arc<std::sync::RwLock<NodeId>>) -> Result<(), DhtError> {
-        let mut buf = [0u8; 1500];
+        let mut buf = [0u8; 4096];
 
         // Interval for checking search timeouts (100ms as per plan)
         let mut timeout_check_interval = interval(Duration::from_millis(100));
@@ -1158,10 +1158,10 @@ impl DhtActor {
         &mut self,
         addr: SocketAddrV4,
         info_hash: InfoHash,
-    ) -> Vec<u8> {
+    ) -> TransactionId {
         let tx_id = self.next_transaction_id();
         let msg = KrpcMessage::get_peers_query(tx_id, self.node_id, info_hash);
-        let tx_id_bytes = msg.transaction_id.0.clone();
+        let tx_id_bytes = msg.transaction_id.0;
         let bytes = msg.to_bytes();
 
         // Fire-and-forget UDP send
@@ -1169,7 +1169,7 @@ impl DhtActor {
             tracing::warn!("Failed to send get_peers to {}: {}", addr, e);
         }
 
-        tx_id_bytes
+        TransactionId(tx_id_bytes)
     }
 
     /// Advance a search by sending queries to pending candidates.
@@ -1217,7 +1217,7 @@ impl DhtActor {
         let now = Instant::now();
 
         // Collect timed out transactions
-        let mut timed_out: Vec<(InfoHash, Vec<u8>)> = Vec::new();
+        let mut timed_out: Vec<(InfoHash, TransactionId)> = Vec::new();
 
         for (info_hash, search) in &self.search_manager.searches {
             for candidate in &search.candidates {
@@ -1293,7 +1293,7 @@ impl DhtActor {
 
     /// Handle a get_peers response for an active concurrent search.
     async fn handle_search_response(&mut self, msg: KrpcMessage, from: SocketAddr) {
-        let tx_id = msg.transaction_id.0.clone();
+        let tx_id = TransactionId(msg.transaction_id.0);
 
         // Look up which search this belongs to
         let Some(info_hash) = self.search_manager.remove_tx(&tx_id) else {
@@ -1385,8 +1385,7 @@ impl DhtActor {
         msg: KrpcMessage,
         addr: SocketAddr,
     ) -> Result<(KrpcMessage, SocketAddr), DhtError> {
-        // Why not use directly u16?
-        let tx_id = msg.transaction_id.0.clone();
+        let tx_id = TransactionId(msg.transaction_id.0);
         let bytes = msg.to_bytes();
 
         // Create response channel
@@ -1454,7 +1453,7 @@ impl DhtActor {
             }
             MessageBody::Response(_) => {
                 // Correlate with pending request
-                let tx_id = msg.transaction_id.0.clone();
+                let tx_id = TransactionId(msg.transaction_id.0);
                 tracing::debug!(
                     "Received response from {from}, tx_id={:?}, pending_count={}",
                     tx_id,
