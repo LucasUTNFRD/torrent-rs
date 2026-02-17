@@ -26,7 +26,7 @@ use tokio::{
     task::JoinHandle,
 };
 
-use mainline_dht::DhtHandler;
+use mainline_dht::{DhtConfig, DhtHandler};
 use tracker_client::TrackerHandler;
 
 use crate::{
@@ -231,7 +231,19 @@ impl SessionManager {
 
         // Initialize and bootstrap DHT if enabled
         let dht: Option<Arc<DhtHandler>> = if self.dht_enabled {
-            match DhtHandler::new(Some(self.config.port)).await {
+            let config =
+                DhtConfig::with_default_persistence(self.config.port).unwrap_or_else(|e| {
+                    tracing::warn!(
+                        "Failed to create DHT config with persistence: {}, using defaults",
+                        e
+                    );
+                    DhtConfig {
+                        port: self.config.port,
+                        ..Default::default()
+                    }
+                });
+
+            match DhtHandler::with_config(config).await {
                 Ok(dht) => {
                     tracing::info!("DHT node created, bootstrapping...");
                     match dht.bootstrap().await {
