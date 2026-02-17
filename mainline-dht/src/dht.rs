@@ -129,19 +129,20 @@ pub struct DhtResponse {
 }
 
 // ============================================================================
-// Public API: Dht handle
+// Public API: DhtHandler
 // ============================================================================
 
-/// Handle to interact with the DHT node.
+/// Lightweight handle for DHT operations.
 ///
-/// This is a lightweight handle that can be cloned and used from multiple tasks.
+/// This follows the same pattern as `TrackerHandler` from tracker-client,
+/// providing a simple interface for peer discovery and announcement.
 #[derive(Clone)]
-pub struct Dht {
+pub struct DhtHandler {
     command_tx: mpsc::Sender<DhtCommand>,
     node_id: Arc<std::sync::RwLock<NodeId>>,
 }
 
-impl Dht {
+impl DhtHandler {
     /// Create a new DHT node bound to the specified port.
     ///
     /// If no port is specified, binds to port 6881 (default DHT port).
@@ -162,7 +163,6 @@ impl Dht {
         let socket = UdpSocket::bind(bind_addr).await?;
         let socket = Arc::new(socket);
 
-        // Load or generate node ID
         let initial_id = if let Some(ref path) = config.id_file_path {
             match NodeId::load_or_generate(path) {
                 Ok(id) => {
@@ -194,7 +194,7 @@ impl Dht {
             }
         });
 
-        Ok(Dht {
+        Ok(DhtHandler {
             command_tx,
             node_id,
         })
@@ -346,64 +346,13 @@ impl Dht {
 
         resp_rx.await.map_err(|_| DhtError::ChannelClosed)?
     }
-}
-
-// ============================================================================
-// Public API: DhtHandler (TrackerHandler-like interface)
-// ============================================================================
-
-/// Lightweight handle for DHT operations.
-///
-/// This follows the same pattern as `TrackerHandler` from tracker-client,
-/// providing a simple interface for peer discovery and announcement.
-#[derive(Clone)]
-pub struct DhtHandler {
-    dht: Dht,
-}
-
-impl DhtHandler {
-    /// Create a new DHT handler.
-    ///
-    /// This creates the DHT node but does NOT bootstrap automatically.
-    /// Call `bootstrap()` before using `get_peers()` or `announce()`.
-    ///
-    /// Uses default configuration (random ID on each start, no persistence).
-    pub async fn new(port: Option<u16>) -> Result<Self, DhtError> {
-        let config = DhtConfig {
-            port: port.unwrap_or(DEFAULT_PORT),
-            ..Default::default()
-        };
-        Self::with_config(config).await
-    }
-
-    /// Create a new DHT handler with full configuration.
-    ///
-    /// This creates the DHT node but does NOT bootstrap automatically.
-    /// Call `bootstrap()` before using `get_peers()` or `announce()`.
-    pub async fn with_config(config: DhtConfig) -> Result<Self, DhtError> {
-        let dht = Dht::with_config(config).await?;
-        Ok(Self { dht })
-    }
-
-    /// Bootstrap into the DHT network.
-    ///
-    /// Must be called before `get_peers()` or `announce()` to populate
-    /// the routing table.
-    pub async fn bootstrap(&self) -> Result<NodeId, DhtError> {
-        self.dht.bootstrap().await
-    }
-
-    /// Bootstrap using custom bootstrap nodes.
-    pub async fn bootstrap_with_nodes(&self, nodes: &[&str]) -> Result<NodeId, DhtError> {
-        self.dht.bootstrap_with_nodes(nodes).await
-    }
 
     /// Get peers for a torrent infohash.
     ///
     /// Performs an iterative DHT lookup and returns discovered peers.
     /// Returns a `DhtResponse` matching the `TrackerResponse` pattern.
-    pub async fn get_peers(&self, info_hash: InfoHash) -> Result<DhtResponse, DhtError> {
-        let result = self.dht.get_peers(info_hash).await?;
+    pub async fn get_peers_response(&self, info_hash: InfoHash) -> Result<DhtResponse, DhtError> {
+        let result = self.get_peers(info_hash).await?;
 
         Ok(DhtResponse {
             peers: result.peers.into_iter().map(SocketAddr::V4).collect(),
@@ -430,37 +379,15 @@ impl DhtHandler {
         port: u16,
         implied_port: bool,
     ) -> Result<DhtResponse, DhtError> {
-        let result = self
-            .dht
-            .announce_peer_ext(info_hash, port, implied_port)
-            .await?;
+        let result = self.announce_peer_ext(info_hash, port, implied_port).await?;
 
         Ok(DhtResponse {
             peers: result.peers.into_iter().map(SocketAddr::V4).collect(),
         })
     }
-
-    /// Get our current node ID.
-    pub fn node_id(&self) -> NodeId {
-        self.dht.node_id()
-    }
-
-    // TODO:
-    //A client using the DHT could receive by the PORT that they should attempt to ping the node on the received port and IP address of the remote peer. If a response to the ping is recieved, the node should attempt to insert the new contact information into their routing table according to the usual rules.
-    pub async fn try_add_node(&self, node_addr: SocketAddr) -> Result<(), DhtError> {
-        self.dht.try_add_node(node_addr).await
-    }
-
-    /// Get the number of nodes in our routing table.
-    pub async fn routing_table_size(&self) -> Result<usize, DhtError> {
-        self.dht.routing_table_size().await
-    }
-
-    /// Gracefully shutdown the DHT node.
-    pub async fn shutdown(&self) -> Result<(), DhtError> {
-        self.dht.shutdown().await
-    }
 }
+
+
 
 // ============================================================================
 // Internal: Commands

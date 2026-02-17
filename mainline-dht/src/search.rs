@@ -99,7 +99,7 @@ impl Ord for SearchCandidate {
     }
 }
 
-/// Tracks an active search for peers (similar to C's struct search).
+/// Tracks an active search for peers
 pub struct SearchState {
     /// Target infohash we're searching for.
     pub info_hash: InfoHash,
