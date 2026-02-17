@@ -234,7 +234,13 @@ impl KrpcMessage {
         let transaction_id = dict
             .get_bytes(b"t")
             .ok_or_else(|| DhtError::Parse("missing transaction id".to_string()))?;
-        let transaction_id = TransactionId(transaction_id.try_into().expect("2 bytes TID"));
+        let transaction_id = match transaction_id.try_into() as Result<[u8; 2], _> {
+            Ok(arr) => TransactionId(arr),
+            Err(_) => {
+                tracing::debug!("Invalid transaction ID length: {}", transaction_id.len());
+                return Err(DhtError::Parse("invalid transaction id length".to_string()));
+            }
+        };
 
         // Version (optional)
         let version = dict.get_bytes(b"v").map(|v| v.to_vec());
@@ -531,7 +537,11 @@ fn parse_response(dict: &BTreeMap<Vec<u8>, Bencode>) -> Result<MessageBody, DhtE
                     _ => None,
                 })
                 .collect();
-            if peers.is_empty() { None } else { Some(peers) }
+            if peers.is_empty() {
+                None
+            } else {
+                Some(peers)
+            }
         } else {
             None
         };

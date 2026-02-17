@@ -39,7 +39,7 @@ mod token;
 pub mod transaction;
 
 // Re-export main types for convenience
-pub use dht::{AnnounceResult, DhtConfig, DhtHandler, DhtResponse, GetPeersResult};
+pub use dht::{DhtConfig, DhtHandler, DhtResponse, GetPeersResult};
 
 pub type Dht = DhtHandler;
 pub use error::DhtError;
