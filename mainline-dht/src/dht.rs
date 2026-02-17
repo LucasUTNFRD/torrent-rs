@@ -9,6 +9,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    fs,
     net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, ToSocketAddrs},
     path::PathBuf,
     sync::{
@@ -18,6 +19,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use bencode::{Bencode, BencodeBuilder, BencodeDict};
 use bittorrent_common::types::InfoHash;
 use tokio::{
     net::UdpSocket,
@@ -64,6 +66,8 @@ const ALPHA: usize = 3;
 pub struct DhtConfig {
     /// Path to store the node ID file. If None, generates random ID on each start
     pub id_file_path: Option<PathBuf>,
+    /// Path to store the DHT state (routing table nodes). If None, no state persistence
+    pub state_file_path: Option<PathBuf>,
     /// Network port to bind to
     pub port: u16,
 }
@@ -71,7 +75,8 @@ pub struct DhtConfig {
 impl Default for DhtConfig {
     fn default() -> Self {
         Self {
-            id_file_path: None, // Default: no persistence
+            id_file_path: None,
+            state_file_path: None,
             port: DEFAULT_PORT,
         }
     }
@@ -80,18 +85,20 @@ impl Default for DhtConfig {
 impl DhtConfig {
     /// Create a config with default persistence in the user's config directory
     ///
-    /// On Linux: ~/.config/mainline-dht/node.id
-    /// On macOS: ~/Library/Application Support/mainline-dht/node.id  
-    /// On Windows: %APPDATA%/mainline-dht/node.id
+    /// On Linux: ~/.config/mainline-dht/
+    /// On macOS: ~/Library/Application Support/mainline-dht/
+    /// On Windows: %APPDATA%/mainline-dht/
     pub fn with_default_persistence(port: u16) -> Result<Self, DhtError> {
         let project_dirs = directories::ProjectDirs::from("com", "mainline", "mainline-dht")
             .ok_or_else(|| DhtError::Other("Could not determine config directory".to_string()))?;
 
         let config_dir = project_dirs.config_dir();
         let id_path = config_dir.join("node.id");
+        let state_path = config_dir.join("dht_state.dat");
 
         Ok(Self {
             id_file_path: Some(id_path),
+            state_file_path: Some(state_path),
             port,
         })
     }
@@ -185,7 +192,7 @@ impl DhtHandler {
         let node_id = Arc::new(std::sync::RwLock::new(initial_id));
         let (command_tx, command_rx) = mpsc::channel(32);
 
-        let actor = DhtActor::new(socket, initial_id, command_rx, config.id_file_path.clone());
+        let actor = DhtActor::new(socket, initial_id, command_rx, config.id_file_path.clone(), config.state_file_path.clone());
 
         let node_id_clone = node_id.clone();
         tokio::spawn(async move {
@@ -451,6 +458,8 @@ struct DhtActor {
     search_manager: SearchManager,
     /// Path to store the node ID file for persistence.
     id_file_path: Option<PathBuf>,
+    /// Path to store the DHT state (routing table) for persistence.
+    state_file_path: Option<PathBuf>,
 }
 
 impl DhtActor {
@@ -459,6 +468,7 @@ impl DhtActor {
         node_id: NodeId,
         command_rx: mpsc::Receiver<DhtCommand>,
         id_file_path: Option<PathBuf>,
+        state_file_path: Option<PathBuf>,
     ) -> Self {
         Self {
             socket,
@@ -471,6 +481,7 @@ impl DhtActor {
             token_manager: TokenManager::new(),
             search_manager: SearchManager::new(),
             id_file_path,
+            state_file_path,
         }
     }
 
@@ -541,6 +552,7 @@ impl DhtActor {
                         }
                         DhtCommand::Shutdown => {
                             tracing::info!("DHT shutdown requested");
+                            self.save_state();
                             return Ok(());
                         }
                     }
@@ -564,6 +576,20 @@ impl DhtActor {
             bootstrap_nodes.len()
         );
 
+        // Try to load persisted state for faster bootstrap
+        let persisted_nodes = self
+            .state_file_path
+            .as_ref()
+            .and_then(|path| DhtActor::load_state(path));
+
+        if let Some((saved_id, ref saved_nodes)) = persisted_nodes {
+            tracing::info!(
+                "Found persisted DHT state: {} nodes, node_id={:?}",
+                saved_nodes.len(),
+                saved_id
+            );
+        }
+
         // Resolve bootstrap addresses
         let mut addrs: Vec<SocketAddr> = Vec::new();
         for node in bootstrap_nodes {
@@ -573,7 +599,7 @@ impl DhtActor {
             }
         }
 
-        if addrs.is_empty() {
+        if addrs.is_empty() && persisted_nodes.is_none() {
             return Err(DhtError::BootstrapFailed);
         }
 
@@ -583,18 +609,15 @@ impl DhtActor {
 
         for addr in &addrs {
             let SocketAddr::V4(addr_v4) = addr else {
-                continue; // Skip IPv6 for now
+                continue;
             };
 
             match self.ping(*addr_v4).await {
                 Ok((msg, _)) => {
-                    // Extract external IP from response
                     if let Some(sender_ip) = msg.sender_ip {
                         external_ip = Some(*sender_ip.ip());
-                        // tracing::info!("Discovered external IP: {}", sender_ip.ip());
                     }
 
-                    // Add the responding node
                     if let Some(node_id) = msg.get_node_id() {
                         first_node = Some((node_id, *addr_v4));
                         break;
@@ -610,21 +633,18 @@ impl DhtActor {
         if let Some(ip) = external_ip {
             let ip_addr = IpAddr::V4(ip);
 
-            // Check if our current ID is already BEP 42 compliant for this IP
             if self.node_id.is_node_id_secure(ip_addr) {
                 tracing::info!(
                     "Reusing existing BEP 42 compliant node ID: {:?}",
                     self.node_id
                 );
             } else {
-                // IP changed or no valid ID - generate new BEP 42 ID
                 let mut secure_id = NodeId::generate_random();
                 secure_id.secure_node_id(&ip_addr);
                 self.node_id = secure_id;
                 self.routing_table = RoutingTable::new(secure_id);
                 tracing::info!("Generated new BEP 42 secure node ID: {:?}", self.node_id);
 
-                // Save the new ID if persistence is enabled
                 if let Some(ref path) = self.id_file_path {
                     if let Err(e) = self.node_id.save(path) {
                         tracing::warn!("Failed to save node ID to {}: {}", path.display(), e);
@@ -637,11 +657,38 @@ impl DhtActor {
             tracing::warn!("Could not discover external IP, using random node ID");
         }
 
-        // Add the first responding node
+        // Add the first responding bootstrap node
         if let Some((node_id, addr)) = first_node {
             let node = Node::new_good(node_id, addr);
             self.routing_table.try_add_node(node);
             tracing::info!("Added bootstrap node to routing table");
+        }
+
+        // Ping persisted nodes and add responsive ones to the routing table
+        if let Some((_, saved_nodes)) = persisted_nodes {
+            let total = saved_nodes.len();
+            let mut added = 0usize;
+
+            for node_info in &saved_nodes {
+                match self.ping(node_info.addr).await {
+                    Ok((msg, _)) => {
+                        if let Some(resp_id) = msg.get_node_id() {
+                            let node = Node::new_good(resp_id, node_info.addr);
+                            self.routing_table.try_add_node(node);
+                            added += 1;
+                        }
+                    }
+                    Err(_) => {
+                        tracing::debug!("Persisted node {} did not respond", node_info.addr);
+                    }
+                }
+            }
+
+            tracing::info!(
+                "Pinged {} persisted nodes, {} responded and added to routing table",
+                total,
+                added
+            );
         }
 
         // Perform iterative find_node on ourselves to populate routing table
@@ -1525,6 +1572,100 @@ impl DhtActor {
         tracing::debug!("Stored peer {} for {}", peer_addr, info_hash);
 
         KrpcMessage::announce_peer_response(tx_id, self.node_id)
+    }
+
+    /// Save DHT state (node_id + routing table nodes) to disk as a bencode dict.
+    ///
+    /// Format:
+    /// ```text
+    /// d
+    ///   2:id  20:<node_id bytes>
+    ///   5:nodes <compact node info: 26 bytes per node>
+    /// e
+    /// ```
+    fn save_state(&self) {
+        let Some(ref path) = self.state_file_path else {
+            return;
+        };
+
+        let nodes = self.routing_table.get_all_nodes();
+        let compact_nodes = crate::message::encode_compact_nodes_v4(
+            &nodes
+                .iter()
+                .map(|n| CompactNodeInfo {
+                    node_id: n.node_id,
+                    addr: n.addr,
+                })
+                .collect::<Vec<_>>(),
+        );
+
+        let mut dict = std::collections::BTreeMap::<Vec<u8>, Bencode>::new();
+        dict.put("id", &self.node_id.as_bytes().as_slice());
+        dict.put("nodes", &compact_nodes.as_slice());
+        let encoded = Bencode::encoder(&dict.build());
+
+        if let Some(parent) = path.parent() {
+            if let Err(e) = fs::create_dir_all(parent) {
+                tracing::warn!("Failed to create state directory {}: {}", parent.display(), e);
+                return;
+            }
+        }
+
+        match fs::write(path, &encoded) {
+            Ok(()) => tracing::info!(
+                "Saved DHT state: {} nodes to {}",
+                nodes.len(),
+                path.display()
+            ),
+            Err(e) => tracing::warn!("Failed to save DHT state to {}: {}", path.display(), e),
+        }
+    }
+
+    /// Load persisted DHT state from disk.
+    /// Returns (node_id, list of compact node infos) if successful.
+    fn load_state(path: &PathBuf) -> Option<(NodeId, Vec<CompactNodeInfo>)> {
+        let data = match fs::read(path) {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::debug!("No DHT state file at {}: {}", path.display(), e);
+                return None;
+            }
+        };
+
+        let decoded = match Bencode::decode(&data) {
+            Ok(Bencode::Dict(dict)) => dict,
+            _ => {
+                tracing::warn!("Invalid DHT state file at {}", path.display());
+                return None;
+            }
+        };
+
+        let id_bytes = decoded.get_bytes(b"id")?;
+        if id_bytes.len() != 20 {
+            tracing::warn!("Invalid node ID length in DHT state file");
+            return None;
+        }
+        let mut id_arr = [0u8; 20];
+        id_arr.copy_from_slice(id_bytes);
+        let node_id = NodeId::from_bytes(id_arr);
+
+        let nodes_bytes = decoded.get_bytes(b"nodes")?;
+        let nodes = match crate::message::decode_compact_nodes_v4(nodes_bytes) {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!("Failed to decode nodes from DHT state: {}", e);
+                return None;
+            }
+        };
+
+        tracing::info!(
+            "Loaded DHT state: node_id={:?}, {} nodes from {}",
+            node_id,
+            nodes.len(),
+            path.display()
+        );
+
+        Some((node_id, nodes))
     }
 
     /// Try to add a node to the routing table by pinging it first.

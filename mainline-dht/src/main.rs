@@ -38,8 +38,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Creating DHT node...");
     let config = if let Some(id_path) = cli.id_file {
+        let state_path = id_path.parent()
+            .map(|p| p.join("dht_state.dat"));
         DhtConfig {
             id_file_path: Some(id_path),
+            state_file_path: state_path,
             port: 6881,
         }
     } else {

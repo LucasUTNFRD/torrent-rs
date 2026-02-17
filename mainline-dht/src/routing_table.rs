@@ -156,6 +156,13 @@ impl RoutingTable {
         self.buckets.iter().map(|b| b.nodes.len()).sum()
     }
 
+    pub fn get_all_nodes(&self) -> Vec<&Node> {
+        self.buckets
+            .iter()
+            .flat_map(|bucket| bucket.nodes.iter())
+            .collect()
+    }
+
     /// Number of good nodes in the routing table.
     #[allow(dead_code)]
     pub fn good_node_count(&self) -> usize {
@@ -177,7 +184,7 @@ impl RoutingTable {
 mod test {
     use std::net::{Ipv4Addr, SocketAddrV4};
 
-    use super::{K, RoutingTable};
+    use super::{RoutingTable, K};
     use crate::{node::Node, node_id::NodeId};
 
     fn make_node(id_byte: u8) -> Node {
