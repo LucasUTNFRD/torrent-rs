@@ -379,15 +379,15 @@ impl DhtHandler {
         port: u16,
         implied_port: bool,
     ) -> Result<DhtResponse, DhtError> {
-        let result = self.announce_peer_ext(info_hash, port, implied_port).await?;
+        let result = self
+            .announce_peer_ext(info_hash, port, implied_port)
+            .await?;
 
         Ok(DhtResponse {
             peers: result.peers.into_iter().map(SocketAddr::V4).collect(),
         })
     }
 }
-
-
 
 // ============================================================================
 // Internal: Commands

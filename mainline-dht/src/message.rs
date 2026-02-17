@@ -16,11 +16,6 @@ use bittorrent_common::types::InfoHash;
 use crate::{error::DhtError, node_id::NodeId};
 
 ///Transaction ID for correlating requests and responses.
-/// Typically 2 bytes, sufficient for 65536 outstanding queries.
-///
-/// Uses `Vec<u8>` instead of `u16` because BEP 0005 treats transaction IDs as
-/// opaque byte strings - other DHT nodes may send IDs of any length (1, 2, 4+ bytes)
-/// and we must echo them back exactly in responses.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TransactionId(pub [u8; 2]);
 
