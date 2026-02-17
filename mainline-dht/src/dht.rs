@@ -583,10 +583,7 @@ impl DhtActor {
         );
 
         // Try to load persisted state for faster bootstrap
-        let persisted_nodes = self
-            .state_file_path
-            .as_ref()
-            .and_then(|path| DhtActor::load_state(path));
+        let persisted_nodes = self.state_file_path.as_ref().and_then(DhtActor::load_state);
 
         if let Some((saved_id, ref saved_nodes)) = persisted_nodes {
             tracing::info!(
@@ -1610,15 +1607,15 @@ impl DhtActor {
         dict.put("nodes", &compact_nodes.as_slice());
         let encoded = Bencode::encoder(&dict.build());
 
-        if let Some(parent) = path.parent() {
-            if let Err(e) = fs::create_dir_all(parent) {
-                tracing::warn!(
-                    "Failed to create state directory {}: {}",
-                    parent.display(),
-                    e
-                );
-                return;
-            }
+        if let Some(parent) = path.parent()
+            && let Err(e) = fs::create_dir_all(parent)
+        {
+            tracing::warn!(
+                "Failed to create state directory {}: {}",
+                parent.display(),
+                e
+            );
+            return;
         }
 
         match fs::write(path, &encoded) {
