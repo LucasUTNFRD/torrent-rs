@@ -192,7 +192,13 @@ impl DhtHandler {
         let node_id = Arc::new(std::sync::RwLock::new(initial_id));
         let (command_tx, command_rx) = mpsc::channel(32);
 
-        let actor = DhtActor::new(socket, initial_id, command_rx, config.id_file_path.clone(), config.state_file_path.clone());
+        let actor = DhtActor::new(
+            socket,
+            initial_id,
+            command_rx,
+            config.id_file_path.clone(),
+            config.state_file_path.clone(),
+        );
 
         let node_id_clone = node_id.clone();
         tokio::spawn(async move {
@@ -1606,7 +1612,11 @@ impl DhtActor {
 
         if let Some(parent) = path.parent() {
             if let Err(e) = fs::create_dir_all(parent) {
-                tracing::warn!("Failed to create state directory {}: {}", parent.display(), e);
+                tracing::warn!(
+                    "Failed to create state directory {}: {}",
+                    parent.display(),
+                    e
+                );
                 return;
             }
         }

@@ -184,7 +184,7 @@ impl RoutingTable {
 mod test {
     use std::net::{Ipv4Addr, SocketAddrV4};
 
-    use super::{RoutingTable, K};
+    use super::{K, RoutingTable};
     use crate::{node::Node, node_id::NodeId};
 
     fn make_node(id_byte: u8) -> Node {
