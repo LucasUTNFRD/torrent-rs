@@ -239,7 +239,7 @@ impl KrpcMessage {
         let transaction_id = dict
             .get_bytes(b"t")
             .ok_or_else(|| DhtError::Parse("missing transaction id".to_string()))?;
-        let transaction_id = TransactionId(transaction_id.try_into().expect("16 bytes long"));
+        let transaction_id = TransactionId(transaction_id.try_into().expect("2 bytes long"));
 
         // Version (optional)
         let version = dict.get_bytes(b"v").map(|v| v.to_vec());
