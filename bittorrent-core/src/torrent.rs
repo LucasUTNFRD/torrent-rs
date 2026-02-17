@@ -760,7 +760,11 @@ impl Torrent {
         {
             Ok(valid) => valid,
             Err(e) => {
-                tracing::error!("Failed to verify piece {}: {} - resetting for re-download", piece_index, e);
+                tracing::error!(
+                    "Failed to verify piece {}: {} - resetting for re-download",
+                    piece_index,
+                    e
+                );
                 self.piece_mananger
                     .as_mut()
                     .expect("initialized")
@@ -770,7 +774,10 @@ impl Torrent {
         };
 
         if !valid {
-            tracing::warn!("Piece {} failed hash verification - resetting for re-download", piece_index);
+            tracing::warn!(
+                "Piece {} failed hash verification - resetting for re-download",
+                piece_index
+            );
             self.piece_mananger
                 .as_mut()
                 .expect("initialized")
@@ -794,7 +801,11 @@ impl Torrent {
             .write_piece(torrent_id, piece_index, piece)
             .await
         {
-            tracing::error!("Failed to write piece {}: {} - resetting for re-download", piece_index, e);
+            tracing::error!(
+                "Failed to write piece {}: {} - resetting for re-download",
+                piece_index,
+                e
+            );
             // Reset piece so it will be re-downloaded
             self.piece_mananger
                 .as_mut()
