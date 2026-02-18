@@ -925,7 +925,7 @@ impl Torrent {
     // Announce torrent over Tracker and DHT
     // internally creates dedicated tasks in charge of periodic announces
     // it implements max peer control
-    fn announce(&self, announce_tx: &mpsc::Sender<TrackerResponse>) {
+    fn announce(&self, announce_tx: &mpsc::Sender<Vec<SocketAddr>>) {
         let client_state = self.metadata.info().map_or_else(
             || ClientState::new(0, 0, 0, Events::Started),
             |info| {
