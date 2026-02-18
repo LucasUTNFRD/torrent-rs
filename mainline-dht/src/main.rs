@@ -92,29 +92,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn get_peers(dht: &Dht, info_hash: InfoHash) -> Result<(), Box<dyn std::error::Error>> {
     let start = Instant::now();
-    let mut all_peers = Vec::new();
 
-    let mut receiver = dht.get_peers(info_hash).await;
-
-    while let Some(peers) = receiver.recv().await {
-        println!("recv {peers:?}");
-        all_peers.extend(peers);
-    }
-
-    let elapsed = start.elapsed().as_millis();
-
-    if all_peers.is_empty() {
-        println!("Query finished in {} ms, but no peers were found.", elapsed);
-    } else {
-        println!("Got {} peers in {} ms:", all_peers.len(), elapsed);
-
-        for (i, peer) in all_peers.iter().take(20).enumerate() {
-            println!("  {:2}. {}", i + 1, peer);
+    let mut peer_recv = dht.get_peers(info_hash).await;
+    let mut count = 0;
+    while let Some(peers) = peer_recv.recv().await {
+        if count >= 20 {
+            break;
         }
 
-        if all_peers.len() > 20 {
-            println!("  ... and {} more peers", all_peers.len() - 20);
-        }
+        println!("Recv Peers {peers:?}");
+        count += 1;
     }
 
     Ok(())

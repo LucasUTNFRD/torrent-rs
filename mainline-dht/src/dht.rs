@@ -9,7 +9,7 @@
 
 use std::{
     fs,
-    net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, ToSocketAddrs},
+    net::{Ipv4Addr, SocketAddr, SocketAddrV4, ToSocketAddrs},
     path::PathBuf,
     sync::Arc,
     time::Duration,
@@ -237,15 +237,15 @@ impl DhtHandler {
 
     /// Find peers for a torrent infohash.
     ///
-    /// Starts a DHT lookup to discover peers for the given info_hash.
+    /// Performs a DHT lookup to discover peers for the given info_hash.
     /// Returns a receiver that streams peer addresses as they are discovered.
     pub async fn get_peers(&self, info_hash: InfoHash) -> mpsc::Receiver<Vec<SocketAddrV4>> {
         let (peer_tx, peer_rx) = mpsc::channel(32);
 
-        let _ = self.command_tx.send(DhtCommand::GetPeers {
-            info_hash,
-            peer_tx,
-        }).await;
+        let _ = self
+            .command_tx
+            .send(DhtCommand::GetPeers { info_hash, peer_tx })
+            .await;
 
         peer_rx
     }
@@ -496,7 +496,6 @@ impl DhtActor {
                             let _ = resp.send(result);
                         }
                         DhtCommand::GetPeers { info_hash, peer_tx } => {
-                            // Start get_peers lookup - fires queries and streams results
                             self.start_get_peers(info_hash, peer_tx).await;
                         }
                         DhtCommand::Announce { info_hash, port, implied_port, resp } => {
@@ -841,7 +840,6 @@ impl DhtActor {
         use std::collections::HashSet;
 
         let target = NodeId::from(info_hash);
-        let mut queried_nodes: HashSet<SocketAddrV4> = HashSet::new();
 
         let lookup_state = GetPeersLookupState {
             peers: HashSet::new(),
@@ -869,20 +867,14 @@ impl DhtActor {
                 if let Ok(addrs) = node_addr.to_socket_addrs() {
                     for addr in addrs {
                         if let SocketAddr::V4(addr_v4) = addr {
-                            if !queried_nodes.contains(&addr_v4) {
-                                queried_nodes.insert(addr_v4);
-                                let _ = self.send_get_peers(addr_v4, info_hash);
-                            }
+                            let _ = self.send_get_peers(addr_v4, info_hash);
                         }
                     }
                 }
             }
         } else {
             for node_info in closest_nodes.iter().take(3) {
-                if !queried_nodes.contains(&node_info.addr) {
-                    queried_nodes.insert(node_info.addr);
-                    let _ = self.send_get_peers(node_info.addr, info_hash);
-                }
+                let _ = self.send_get_peers(node_info.addr, info_hash);
             }
         }
     }
@@ -1152,88 +1144,84 @@ impl DhtActor {
                             }
                         }
                         QueryType::GetPeers { info_hash } => {
-                            match response {
-                                Response::GetPeers {
-                                    values,
-                                    nodes,
-                                    token,
-                                    ..
-                                } => {
-                                    // Get the sender's node info from the transaction
-                                    let sender_node_info = if let SocketAddr::V4(from_v4) = from {
-                                        // Try to get node ID from response or transaction
-                                        let node_id = msg.get_node_id().unwrap_or(self.node_id);
-                                        Some(CompactNodeInfo {
-                                            node_id,
-                                            addr: from_v4,
-                                        })
-                                    } else {
-                                        None
-                                    };
+                            if let Response::GetPeers {
+                                values,
+                                nodes,
+                                token,
+                                ..
+                            } = response
+                            {
+                                // Get the sender's node info from the transaction
+                                let sender_node_info = if let SocketAddr::V4(from_v4) = from {
+                                    // Try to get node ID from response or transaction
+                                    let node_id = msg.get_node_id().unwrap_or(self.node_id);
+                                    Some(CompactNodeInfo {
+                                        node_id,
+                                        addr: from_v4,
+                                    })
+                                } else {
+                                    None
+                                };
 
-                                    // Update pending lookup state and stream peers to caller
-                                    if let Some(state) = self.pending_get_peers.get_mut(info_hash) {
-                                        if let Some(peers) = values {
-                                            let peer_vec: Vec<SocketAddrV4> = peers
-                                                .iter()
-                                                .filter(|p| state.peers.insert(**p))
-                                                .map(|p| *p)
-                                                .collect();
-                                            
-                                            if !peer_vec.is_empty() {
-                                                let _ = state.peer_tx.send(peer_vec).await;
-                                            }
-                                        }
-                                        if let Some(ref node_info) = sender_node_info {
-                                            state
-                                                .nodes_with_tokens
-                                                .push((node_info.clone(), token.clone()));
-                                        }
-                                    }
-
+                                // Update pending lookup state and stream peers to caller
+                                if let Some(state) = self.pending_get_peers.get_mut(info_hash) {
                                     if let Some(peers) = values {
-                                        // Found peers - add to peer store
-                                        for peer_addr in peers {
-                                            self.peer_store.add_peer(*info_hash, *peer_addr);
+                                        let peer_vec: Vec<SocketAddrV4> = peers
+                                            .iter()
+                                            .filter(|p| state.peers.insert(**p))
+                                            .map(|p| *p)
+                                            .collect();
+
+                                        if !peer_vec.is_empty() {
+                                            let _ = state.peer_tx.send(peer_vec).await;
                                         }
                                     }
-                                    if let Some(node_list) = nodes {
-                                        // No peers found, query closer nodes
-                                        for node_info in node_list {
-                                            // Add to routing
-                                            let new_node =
-                                                Node::new(node_info.node_id, node_info.addr);
-                                            self.routing_table.try_add_node(new_node);
-
-                                            // Send get_peers to this node
-                                            if self
-                                                .transaction_manager
-                                                .get_by_index(
-                                                    "get_peers",
-                                                    &SocketAddr::V4(node_info.addr),
-                                                )
-                                                .is_none()
-                                            {
-                                                let _ =
-                                                    self.send_get_peers(node_info.addr, *info_hash);
-                                            }
-                                        }
+                                    if let Some(ref node_info) = sender_node_info {
+                                        state
+                                            .nodes_with_tokens
+                                            .push((node_info.clone(), token.clone()));
                                     }
+                                }
 
-                                    // If we have an announce_port set, send announce_peer
-                                    if let Some(port) = tx.announce_port {
-                                        if let SocketAddr::V4(from_v4) = from {
-                                            let _ = self.send_announce_peer(
-                                                from_v4,
-                                                *info_hash,
-                                                port,
-                                                token.clone(),
-                                                tx.implied_port,
-                                            );
+                                if let Some(peers) = values {
+                                    // Found peers - add to peer store
+                                    for peer_addr in peers {
+                                        self.peer_store.add_peer(*info_hash, *peer_addr);
+                                    }
+                                }
+                                if let Some(node_list) = nodes {
+                                    // No peers found, query closer nodes
+                                    for node_info in node_list {
+                                        // Add to routing
+                                        let new_node = Node::new(node_info.node_id, node_info.addr);
+                                        self.routing_table.try_add_node(new_node);
+
+                                        // Send get_peers to this node
+                                        if self
+                                            .transaction_manager
+                                            .get_by_index(
+                                                "get_peers",
+                                                &SocketAddr::V4(node_info.addr),
+                                            )
+                                            .is_none()
+                                        {
+                                            let _ = self.send_get_peers(node_info.addr, *info_hash);
                                         }
                                     }
                                 }
-                                _ => {}
+
+                                // If we have an announce_port set, send announce_peer
+                                if let Some(port) = tx.announce_port
+                                    && let SocketAddr::V4(from_v4) = from
+                                {
+                                    let _ = self.send_announce_peer(
+                                        from_v4,
+                                        *info_hash,
+                                        port,
+                                        token.clone(),
+                                        tx.implied_port,
+                                    );
+                                }
                             }
                         }
                         QueryType::AnnouncePeer { .. } => {
