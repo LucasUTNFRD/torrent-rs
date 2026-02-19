@@ -26,6 +26,7 @@ console-subscriber.workspace = true
 once_cell = "1.21.3"
 magnet-uri = { path = "../magnet-uri/" }
 mainline-dht = { path = "../mainline-dht/" }
+directories.workspace = true
 
 [[bench]]
 name = "storage_contention"

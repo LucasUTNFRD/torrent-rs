@@ -2,8 +2,9 @@
 // Torrent metadata Types
 //
 
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
+use bencode::{Bencode, Encode};
 use bittorrent_common::{
     metainfo::{Info, TorrentInfo},
     types::InfoHash,
@@ -378,6 +379,72 @@ impl Metadata {
             Metadata::TorrentFile(_) => false,
             Metadata::MagnetUri { metadata_state, .. } => {
                 matches!(metadata_state, MetadataState::Pending)
+            }
+        }
+    }
+
+    /// Get the bencode-encoded .torrent file content if metadata is complete
+    /// Returns (info_hash, torrent_file_bytes)
+    pub fn to_torrent_file(&self) -> Option<(InfoHash, Vec<u8>)> {
+        match self {
+            Metadata::TorrentFile(info) => {
+                let mut dict = BTreeMap::new();
+                dict.insert(b"announce".to_vec(), info.announce.as_str().to_bencode());
+                if let Some(ref announce_list) = info.announce_list {
+                    let mut list = Vec::new();
+                    for tier in announce_list {
+                        let mut tier_list = Vec::new();
+                        for url in tier {
+                            tier_list.push(url.as_str().to_bencode());
+                        }
+                        list.push(Bencode::List(tier_list));
+                    }
+                    dict.insert(b"announce-list".to_vec(), Bencode::List(list));
+                }
+                if let Some(date) = info.creation_date {
+                    dict.insert(b"creation date".to_vec(), date.to_bencode());
+                }
+                if let Some(ref comment) = info.comment {
+                    dict.insert(b"comment".to_vec(), comment.as_str().to_bencode());
+                }
+                if let Some(ref created_by) = info.created_by {
+                    dict.insert(b"created by".to_vec(), created_by.as_str().to_bencode());
+                }
+                if let Some(ref encoding) = info.encoding {
+                    dict.insert(b"encoding".to_vec(), encoding.as_str().to_bencode());
+                }
+                dict.insert(b"info".to_vec(), info.info.to_bencode());
+
+                let bencode = Bencode::Dict(dict);
+                Some((info.info_hash, Bencode::encoder(&bencode)))
+            }
+            Metadata::MagnetUri {
+                magnet,
+                metadata_state,
+            } => {
+                if let MetadataState::Complete(info) = metadata_state {
+                    let mut dict = BTreeMap::new();
+
+                    if let Some(announce) = magnet.trackers.first() {
+                        dict.insert(b"announce".to_vec(), announce.as_str().to_bencode());
+                    }
+
+                    if !magnet.trackers.is_empty() {
+                        let mut list = Vec::new();
+                        for url in &magnet.trackers {
+                            list.push(Bencode::List(vec![url.as_str().to_bencode()]));
+                        }
+                        dict.insert(b"announce-list".to_vec(), Bencode::List(list));
+                    }
+
+                    dict.insert(b"info".to_vec(), info.to_bencode());
+
+                    let bencode = Bencode::Dict(dict);
+                    let info_hash = magnet.info_hash().expect("info_hash is mandatory");
+                    Some((info_hash, Bencode::encoder(&bencode)))
+                } else {
+                    None
+                }
             }
         }
     }

@@ -220,6 +220,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         port: args.port,
         save_path: save_dir,
         enable_dht: true,
+        ..Default::default()
     };
 
     let session = Session::new(config);
