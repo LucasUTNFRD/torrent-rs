@@ -30,6 +30,7 @@ pub(crate) struct StorageState {
 
 pub struct TorrentCache {
     pub metainfo: Arc<Info>,
+    pub name: String,
     pub files: Arc<[FileInfo]>,
     // Because pread()/pwrite() (used by FileExt::read_exact_at / write_all_at) are atomic -- they don't modify the file descriptor's internal seek position. Multiple threads can safely do positional I/O on the same File concurrently. Arc<File> lets us hand out a clone of the file handle to a spawn_blocking closure without holding the Mutex during the actual I/O.
     pub file_handles: Mutex<HashMap<PathBuf, Arc<File>>>,
@@ -174,27 +175,30 @@ impl StorageState {
             return Ok(Arc::clone(file));
         }
 
+        let torrent_root = self.download_dir.join(&cache.name);
+
         // First file opened for this torrent: ensure parent dirs exist.
         if handles.is_empty() {
             for fi in cache.files.iter() {
-                let full_path = self.download_dir.join(&fi.path);
+                let full_path = torrent_root.join(&fi.path);
                 if let Some(parent) = full_path.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
             }
         }
 
-        let full_path = self.download_dir.join(file_path);
+        let full_path = torrent_root.join(file_path);
         let file = Arc::new(open_file(&full_path)?);
         handles.insert(file_path.to_path_buf(), Arc::clone(&file));
         Ok(file)
     }
 
     pub fn add_torrent(&self, info_hash: InfoHash, meta: Arc<Info>) {
+        let name = meta.mode.name().to_string();
         let files = meta.files();
 
         for fi in &files {
-            let full_path = self.download_dir.join(&fi.path);
+            let full_path = self.download_dir.join(&name).join(&fi.path);
 
             if let Some(parent) = full_path.parent()
                 && let Err(e) = std::fs::create_dir_all(parent)
@@ -210,6 +214,7 @@ impl StorageState {
             info_hash,
             Arc::new(TorrentCache {
                 metainfo: meta,
+                name,
                 files: files.into_boxed_slice().into(),
                 file_handles: Mutex::new(HashMap::new()),
             }),
