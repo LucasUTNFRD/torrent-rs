@@ -121,12 +121,12 @@ impl TrackerManager {
             event: Events::Started,
         };
 
-        let client = clients.select_client_for_scheme(url.scheme()).unwrap();
+        let client = clients.select_client_for_scheme(url.scheme())?;
 
         // client.announce(&params, url).await
         match timeout(Duration::from_secs(10), client.announce(&params, url)).await {
-            Ok(res) => res,                       // result from announce
-            Err(_) => Err(TrackerError::Timeout), // you'd need to add this variant
+            Ok(res) => res,
+            Err(_) => Err(TrackerError::Timeout),
         }
     }
 }
