@@ -229,7 +229,7 @@ impl TrackerClient for UdpTrackerClient {
             .socket_addrs(|| None)
             .map_err(|_| TrackerError::InvalidUrl(tracker_url.to_string()))?
             .into_iter()
-            .next()
+            .find(|a| a.is_ipv4())
             .ok_or_else(|| TrackerError::InvalidUrl(tracker_url.to_string()))?;
 
         let connection_id = self.connect(tracker).await?;
