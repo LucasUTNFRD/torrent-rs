@@ -891,11 +891,7 @@ impl DhtActor {
         }
 
         // Create transaction with announce context
-        let mut tx = Transaction::new(
-            tx_id.clone(),
-            addr,
-            QueryType::GetPeers { info_hash },
-        );
+        let mut tx = Transaction::new(tx_id.clone(), addr, QueryType::GetPeers { info_hash });
         tx.announce_port = Some(port);
         tx.implied_port = implied_port;
 
@@ -970,11 +966,7 @@ impl DhtActor {
         }
 
         // Create and register transaction
-        let tx = Transaction::new(
-            tx_id.clone(),
-            addr,
-            QueryType::FindNode { target },
-        );
+        let tx = Transaction::new(tx_id.clone(), addr, QueryType::FindNode { target });
 
         if !self.transaction_manager.insert(tx) {
             return Ok(()); // Already exists
@@ -1007,11 +999,7 @@ impl DhtActor {
         }
 
         // Create and register transaction
-        let tx = Transaction::new(
-            tx_id.clone(),
-            addr,
-            QueryType::GetPeers { info_hash },
-        );
+        let tx = Transaction::new(tx_id.clone(), addr, QueryType::GetPeers { info_hash });
 
         if !self.transaction_manager.insert(tx) {
             return Ok(()); // Already exists
@@ -1183,10 +1171,7 @@ impl DhtActor {
                                         // Send get_peers to this node
                                         if self
                                             .transaction_manager
-                                            .get_by_index(
-                                                "get_peers",
-                                                &node_info.addr,
-                                            )
+                                            .get_by_index("get_peers", &node_info.addr)
                                             .is_none()
                                         {
                                             let _ = self.send_get_peers(node_info.addr, *info_hash);

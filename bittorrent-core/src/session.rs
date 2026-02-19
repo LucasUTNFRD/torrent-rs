@@ -576,7 +576,6 @@ impl SessionManager {
     }
 
     fn spawn_tcp_listener(&self) {
-        tracing::info!("Starting connection listener on port {}", self.config.port);
         let port = self.config.port;
         let sessions = self.sessions.clone();
 

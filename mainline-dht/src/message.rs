@@ -544,11 +544,7 @@ fn parse_response(dict: &BTreeMap<Vec<u8>, Bencode>) -> Result<MessageBody, DhtE
                     _ => {}
                 }
             }
-            if peers.is_empty() {
-                None
-            } else {
-                Some(peers)
-            }
+            if peers.is_empty() { None } else { Some(peers) }
         } else {
             None
         };
