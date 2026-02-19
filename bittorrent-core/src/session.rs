@@ -232,19 +232,14 @@ impl SessionManager {
         // TODO: Boostrap this in a tokio task to avoid blocking
         // Initialize and bootstrap DHT if enabled
         let dht: Option<Arc<DhtHandler>> = if self.dht_enabled {
-            let config =
-                DhtConfig::with_default_persistence(self.config.port).unwrap_or_else(|e| {
-                    tracing::warn!(
-                        "Failed to create DHT config with persistence: {}, using defaults",
-                        e
-                    );
-                    DhtConfig {
-                        port: self.config.port,
-                        ..Default::default()
-                    }
-                });
+            let config_dir = &self.config.config_dir;
+            let dht_config = DhtConfig {
+                id_file_path: Some(config_dir.join("node.id")),
+                state_file_path: Some(config_dir.join("dht_state.dat")),
+                port: self.config.port,
+            };
 
-            match DhtHandler::with_config(config).await {
+            match DhtHandler::with_config(dht_config).await {
                 Ok(dht) => {
                     tracing::info!("DHT node created, bootstrapping...");
                     match dht.bootstrap().await {
@@ -270,6 +265,15 @@ impl SessionManager {
             tracing::info!("DHT disabled by configuration");
             None
         };
+
+        // Ensure torrents directory exists
+        if let Err(e) = std::fs::create_dir_all(&self.config.torrents_dir) {
+            tracing::warn!(
+                "Failed to create torrents directory {}: {}",
+                self.config.torrents_dir.display(),
+                e
+            );
+        }
 
         let (shutdown_tx, shutdown_rx) = watch::channel(());
 
@@ -351,6 +355,7 @@ impl SessionManager {
             dht.cloned(),
             storage.clone(),
             shutdown_rx.clone(),
+            self.config.torrents_dir.clone(),
         );
 
         let handle = tokio::spawn(async move { torrent.start_session().await });
@@ -410,6 +415,7 @@ impl SessionManager {
             dht.cloned(),
             storage.clone(),
             shutdown_rx.clone(),
+            self.config.torrents_dir.clone(),
         );
 
         let handle = tokio::spawn(async move { torrent.start_session().await });

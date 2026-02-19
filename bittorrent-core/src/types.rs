@@ -6,6 +6,7 @@
 use std::path::PathBuf;
 
 use bittorrent_common::types::InfoHash;
+use directories::ProjectDirs;
 
 /// Torrent identifier - uses ``InfoHash`` for stability across restarts.
 ///
@@ -94,14 +95,26 @@ pub struct SessionConfig {
     pub save_path: PathBuf,
     /// Whether to enable DHT for peer discovery
     pub enable_dht: bool,
+    /// Base config directory (e.g., ~/.config/torrent-rs/)
+    pub config_dir: PathBuf,
+    /// Directory for storing .torrent files (config_dir/torrents/)
+    pub torrents_dir: PathBuf,
 }
 
 impl Default for SessionConfig {
     fn default() -> Self {
+        let config_dir = ProjectDirs::from("com", "torrent-rs", "torrent-rs")
+            .map(|dirs| dirs.config_dir().to_path_buf())
+            .unwrap_or_else(|| PathBuf::from(".config/torrent-rs"));
+
+        let torrents_dir = config_dir.join("torrents");
+
         Self {
             port: 6881,
             save_path: PathBuf::from("."),
             enable_dht: true,
+            config_dir,
+            torrents_dir,
         }
     }
 }

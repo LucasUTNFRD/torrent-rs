@@ -11,7 +11,7 @@ use tracing_subscriber::fmt::writer::MakeWriterExt;
 
 #[derive(Parser)]
 #[command(name = "bittorrent-cli")]
-#[command(about = "A BitTorrent client for leeching torrents")]
+#[command(about = "A lightweight command-line Bittorent client")]
 #[command(version)]
 struct Args {
     /// Path to the torrent file or magnet URI
@@ -116,13 +116,6 @@ fn format_bytes_per_second(bytes_per_sec: u64) -> String {
     format!("{}/s", format_bytes(bytes_per_sec))
 }
 
-fn format_ratio(uploaded: u64, downloaded: u64) -> String {
-    if downloaded == 0 {
-        "0.00".to_string()
-    } else {
-        format!("{:.2}", uploaded as f64 / downloaded as f64)
-    }
-}
 
 fn get_status_line(summary: &TorrentSummary) -> String {
     let progress = summary.progress * 100.0;
@@ -133,26 +126,21 @@ fn get_status_line(summary: &TorrentSummary) -> String {
         }
         bittorrent_core::TorrentState::Downloading => {
             format!(
-                "Progress: {:.1}%, dl from {} of {} peers ({}), ul to {} ({}) [{}]",
+                "Progress: {:.1}%, dl from {} of {} peers ({}), ul to {} ({})",
                 progress,
                 summary.peers_connected,  // connected peers
                 summary.peers_discovered, // discovered peers from trackers/DHT
                 format_bytes_per_second(summary.download_rate),
                 0, // peers_getting_from_us - not tracked yet
                 format_bytes_per_second(summary.upload_rate),
-                format_ratio(
-                    summary.downloaded_bytes,
-                    (summary.size_bytes as f64 * summary.progress) as u64
-                )
             )
         }
         bittorrent_core::TorrentState::Seeding => {
             format!(
-                "Seeding, uploading to {} of {} peer(s), {} [{}]",
+                "Seeding, uploading to {} of {} peer(s), {}",
                 0, // peers_getting_from_us - not tracked yet
                 summary.peers_discovered,
                 format_bytes_per_second(summary.upload_rate),
-                format_ratio(summary.downloaded_bytes, summary.size_bytes)
             )
         }
         bittorrent_core::TorrentState::Paused => "Paused".to_string(),
@@ -232,6 +220,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         port: args.port,
         save_path: save_dir,
         enable_dht: true,
+        ..Default::default()
     };
 
     let session = Session::new(config);

@@ -203,6 +203,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         port: args.port,
         save_path: save_dir,
         enable_dht: !args.no_dht,
+        ..Default::default()
     };
 
     // Create and start session

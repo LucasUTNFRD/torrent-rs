@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     net::SocketAddr,
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -204,6 +205,9 @@ pub struct Torrent {
     shutdown_rx: watch::Receiver<()>,
 
     bitfield: Bitfield,
+
+    /// Directory for persisting .torrent files
+    torrents_dir: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -221,6 +225,7 @@ impl Torrent {
         dht_client: Option<Arc<DhtHandler>>,
         storage: Arc<Storage>,
         shutdown_rx: watch::Receiver<()>,
+        torrents_dir: PathBuf,
     ) -> (Self, mpsc::Sender<TorrentMessage>) {
         let info_hash = torrent_info.info_hash;
         let trackers = torrent_info
@@ -252,6 +257,7 @@ impl Torrent {
                 bitfield,
                 piece_mananger: None,
                 choker: Choker::new(4), // Default 4 upload slots
+                torrents_dir,
             },
             tx,
         )
@@ -264,6 +270,7 @@ impl Torrent {
         dht_client: Option<Arc<DhtHandler>>,
         storage: Arc<Storage>,
         shutdown_rx: watch::Receiver<()>,
+        torrents_dir: PathBuf,
     ) -> (Self, mpsc::Sender<TorrentMessage>) {
         let info_hash = magnet.info_hash().expect("InfoHash is a mandatory field");
 
@@ -293,6 +300,7 @@ impl Torrent {
                 bitfield: Bitfield::new(),
                 piece_mananger: None,
                 choker: Choker::new(4), // Default 4 upload slots
+                torrents_dir,
             },
             tx,
         )
@@ -375,6 +383,15 @@ impl Torrent {
                 self.bitfield = Bitfield::with_size(info.pieces.len());
 
                 self.piece_mananger = Some(PieceManager::new(info.clone()));
+
+                if let Some((_, torrent_bytes)) = self.metadata.to_torrent_file() {
+                    let torrent_path = self.torrents_dir.join(format!("{}.torrent", self.info_hash));
+                    if let Err(e) = std::fs::write(&torrent_path, &torrent_bytes) {
+                        tracing::warn!("Failed to persist .torrent file to {}: {}", torrent_path.display(), e);
+                    } else {
+                        tracing::info!("Persisted .torrent file to {}", torrent_path.display());
+                    }
+                }
             }
             Metadata::MagnetUri { .. } => {
                 panic!("called this in wrong state")
