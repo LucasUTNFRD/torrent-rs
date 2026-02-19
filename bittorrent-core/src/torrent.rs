@@ -563,7 +563,7 @@ impl Torrent {
 
                 // Use the new set_metadata_size method to properly initialize fetching state
                 if let Err(e) = self.metadata.set_metadata_size(metadata_size) {
-                    tracing::warn!("Failed to set metadata size: {}", e);
+                    tracing::debug!("Failed to set metadata size: {}", e);
                 }
             }
             TorrentMessage::FillMetadataRequest {
