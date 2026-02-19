@@ -481,7 +481,7 @@ impl Peer<Connected> {
                 self.update_interest_status().await?;
             }
             PeerMessage::Connected { metrics } => {
-                // Replace internal metrics with shared metrics from torrent
+                metrics.reset_timing();
                 self.state.metrics = metrics;
             }
         }
@@ -1127,6 +1127,9 @@ pub fn spawn_outgoing_peer(
 
         if let Err(e) = result {
             debug!(peer = %addr, error = %e, "Outgoing peer connection failed");
+            let _ = torrent_tx
+                .send(TorrentMessage::PeerError(pid, e, None))
+                .await;
         }
     });
 }

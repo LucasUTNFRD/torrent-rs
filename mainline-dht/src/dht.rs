@@ -618,11 +618,13 @@ impl DhtActor {
             );
         }
 
-        // Resolve bootstrap addresses
+        // Resolve bootstrap addresses (IPv4 only since socket is IPv4-bound)
         let mut addrs: Vec<SocketAddr> = Vec::new();
         for node in bootstrap_nodes {
             match node.to_socket_addrs() {
-                Ok(resolved) => addrs.extend(resolved),
+                Ok(resolved) => {
+                    addrs.extend(resolved.filter(|a| a.is_ipv4()));
+                }
                 Err(e) => tracing::warn!("Failed to resolve {node}: {e}"),
             }
         }
@@ -855,7 +857,7 @@ impl DhtActor {
 
             for node_addr in DEFAULT_BOOTSTRAP_NODES.iter() {
                 if let Ok(addrs) = node_addr.to_socket_addrs() {
-                    for addr in addrs {
+                    for addr in addrs.filter(|a| a.is_ipv4()) {
                         let _ = self.send_get_peers(addr, info_hash);
                     }
                 }

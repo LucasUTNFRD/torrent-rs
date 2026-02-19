@@ -53,6 +53,17 @@ impl PeerMetrics {
         Self::default()
     }
 
+    /// Reset the timing window - call when metrics are first used by a peer
+    pub fn reset_timing(&self) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        self.last_update.store(now, Ordering::Release);
+        self.window_downloaded.store(0, Ordering::Relaxed);
+        self.window_uploaded.store(0, Ordering::Relaxed);
+    }
+
     /// Record downloaded bytes
     pub fn record_download(&self, bytes: u64) {
         self.total_downloaded.fetch_add(bytes, Ordering::Relaxed);
@@ -101,7 +112,7 @@ impl PeerMetrics {
         let last = self.last_update.load(Ordering::Acquire);
         let elapsed_ms = now - last;
 
-        if elapsed_ms < 1 {
+        if elapsed_ms < 500 {
             return;
         }
 
