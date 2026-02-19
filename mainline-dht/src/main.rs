@@ -54,13 +54,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dht.bootstrap().await?;
     println!("Bootstrap successful. Node ID: {}\n", dht.node_id());
 
+    // Wait a bit for bootstrap responses to populate routing table
+    println!("Waiting for bootstrap responses...");
+    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+    println!(
+        "Routing table size: {} nodes\n",
+        dht.routing_table_size().await?
+    );
+
     println!("Looking up peers for info_hash: {} ...", info_hash);
 
-    println!("\n=== DHT QUERY ===");
-    get_peers(&dht, info_hash).await?;
+    // Run get_peers multiple times to allow iterative lookup to progress
+    for attempt in 1..=3 {
+        println!("\n=== DHT QUERY (attempt {}/3) ===", attempt);
+        get_peers(&dht, info_hash).await?;
+
+        // Wait between attempts for responses to come in
+        if attempt < 3 {
+            println!("Waiting for more responses...");
+            tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+        }
+    }
 
     // In a real application, you might want to run it again or keep the node running
     // to participate in the network.
+
+    println!(
+        "\nFinal routing table size: {} nodes",
+        dht.routing_table_size().await?
+    );
 
     // Graceful shutdown
     dht.shutdown().await?;
@@ -71,33 +93,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn get_peers(dht: &Dht, info_hash: InfoHash) -> Result<(), Box<dyn std::error::Error>> {
     let start = Instant::now();
 
-    match dht.get_peers(info_hash).await {
-        Ok(result) => {
-            let elapsed = start.elapsed().as_millis();
-
-            if result.peers.is_empty() {
-                println!("Query finished in {} ms, but no peers were found.", elapsed);
-                println!("Nodes contacted: {}", result.nodes_contacted);
-            } else {
-                println!("Got {} peers in {} ms:", result.peers.len(), elapsed);
-
-                for (i, peer) in result.peers.iter().take(20).enumerate() {
-                    println!("  {:2}. {}", i + 1, peer);
-                }
-
-                if result.peers.len() > 20 {
-                    println!("  ... and {} more peers", result.peers.len() - 20);
-                }
-            }
-
-            println!(
-                "\nNodes with tokens available for announce: {}",
-                result.nodes_with_tokens.len()
-            );
+    let mut peer_recv = dht.get_peers(info_hash).await;
+    let mut count = 0;
+    while let Some(peers) = peer_recv.recv().await {
+        if count >= 20 {
+            break;
         }
-        Err(e) => {
-            eprintln!("DHT lookup failed: {}", e);
-        }
+
+        println!("Recv Peers {peers:?}");
+        count += 1;
     }
 
     Ok(())

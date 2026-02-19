@@ -1,4 +1,4 @@
-use std::{net::SocketAddrV4, time::Instant};
+use std::{net::SocketAddr, time::Instant};
 
 use crate::node_id::NodeId;
 
@@ -6,7 +6,7 @@ use crate::node_id::NodeId;
 #[derive(Debug, Clone)]
 pub struct Node {
     pub node_id: NodeId,
-    pub addr: SocketAddrV4,
+    pub addr: SocketAddr,
     pub status: NodeStatus,
     pub last_seen: Instant,
 }
@@ -14,7 +14,7 @@ pub struct Node {
 impl Node {
     /// Create a new node with the given ID and address.
     /// Initial status is Questionable until we receive a response.
-    pub fn new(node_id: NodeId, addr: SocketAddrV4) -> Self {
+    pub fn new(node_id: NodeId, addr: SocketAddr) -> Self {
         Self {
             node_id,
             addr,
@@ -24,7 +24,7 @@ impl Node {
     }
 
     /// Create a new node marked as Good (just responded to us).
-    pub fn new_good(node_id: NodeId, addr: SocketAddrV4) -> Self {
+    pub fn new_good(node_id: NodeId, addr: SocketAddr) -> Self {
         Self {
             node_id,
             addr,

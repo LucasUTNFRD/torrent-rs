@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::{node::Node, node_id::NodeId};
 
@@ -15,34 +15,74 @@ pub struct RoutingTable {
     /// Our local node ID - used for distance calculations.
     local_node_id: NodeId,
     /// 160 buckets indexed by the bit length of XOR distance.
-    buckets: Vec<Bucket>,
+    pub buckets: Vec<Bucket>,
 }
 
 #[derive(Debug)]
-struct Bucket {
+pub struct Bucket {
     /// Nodes in this bucket, ordered by last seen (oldest first).
-    nodes: Vec<Node>,
+    pub nodes: Vec<Node>,
     /// When this bucket was last modified.
-    last_changed: Instant,
+    pub last_changed: Instant,
+    /// When this bucket last split or grew (for neighborhood maintenance).
+    pub last_grow_time: Instant,
+    /// Index of this bucket (0 = closest to our ID, 159 = furthest).
+    pub index: usize,
+    /// Maximum number of nodes this bucket can hold.
+    pub max_count: usize,
 }
 
 impl Bucket {
-    fn new() -> Self {
+    fn new(index: usize) -> Self {
         Self {
             nodes: Vec::with_capacity(K),
             last_changed: Instant::now(),
+            last_grow_time: Instant::now(),
+            index,
+            max_count: K,
         }
     }
 
     fn touch(&mut self) {
         self.last_changed = Instant::now();
     }
+
+    fn mark_growth(&mut self) {
+        self.last_grow_time = Instant::now();
+        self.touch();
+    }
+
+    /// Check if this bucket is the one containing our own node ID
+    /// (bucket 0 contains IDs closest to ours).
+    pub fn is_own_bucket(&self, local_id: &NodeId) -> bool {
+        self.index == 0
+    }
+
+    /// Calculate timeout for bucket maintenance based on bucket depth.
+    /// Rule: timeout = max(600 / (bucket.max_count / 8), 30) seconds
+    /// This gives 30s to 10min range.
+    pub fn maintenance_timeout(&self) -> Duration {
+        let base = 600u64;
+        let divisor = (self.max_count / 8).max(1) as u64;
+        let timeout_secs = (base / divisor).max(30);
+        Duration::from_secs(timeout_secs)
+    }
+
+    /// Check if bucket needs maintenance (hasn't been updated in timeout).
+    pub fn needs_maintenance(&self) -> bool {
+        self.last_changed.elapsed() > self.maintenance_timeout()
+    }
+
+    /// Check if this bucket is "growing" (recently split/updated within 150s).
+    pub fn is_growing(&self) -> bool {
+        self.last_grow_time.elapsed() < Duration::from_secs(150)
+    }
 }
 
 impl RoutingTable {
     /// Create a new routing table for the given local node ID.
     pub fn new(local_node_id: NodeId) -> Self {
-        let buckets = (0..NUM_BUCKETS).map(|_| Bucket::new()).collect();
+        let buckets = (0..NUM_BUCKETS).map(|i| Bucket::new(i)).collect();
         Self {
             local_node_id,
             buckets,
@@ -88,7 +128,7 @@ impl RoutingTable {
         // If bucket has space, add the node
         if bucket.nodes.len() < K {
             bucket.nodes.push(node);
-            bucket.touch();
+            bucket.mark_growth();
             return true;
         }
 
@@ -178,11 +218,127 @@ impl RoutingTable {
     pub fn is_empty(&self) -> bool {
         self.node_count() == 0
     }
+
+    /// Get all buckets that need maintenance (haven't been updated in timeout).
+    pub fn get_buckets_needing_maintenance(&self) -> Vec<&Bucket> {
+        self.buckets
+            .iter()
+            .filter(|b| !b.nodes.is_empty() && b.needs_maintenance())
+            .collect()
+    }
+
+    /// Get the bucket containing our own node ID (bucket 0 - closest to us).
+    pub fn get_own_bucket(&self) -> &Bucket {
+        &self.buckets[0]
+    }
+
+    /// Get a mutable reference to the bucket containing our own node ID.
+    pub fn get_own_bucket_mut(&mut self) -> &mut Bucket {
+        &mut self.buckets[0]
+    }
+
+    /// Get a random node from a specific bucket.
+    pub fn get_random_node_from_bucket(&self, bucket_index: usize) -> Option<&Node> {
+        self.buckets.get(bucket_index).and_then(|b| {
+            if b.nodes.is_empty() {
+                None
+            } else {
+                use rand::Rng;
+                let idx = rand::rng().random_range(0..b.nodes.len());
+                b.nodes.get(idx)
+            }
+        })
+    }
+
+    /// Get a random node from any non-empty bucket (for neighbor queries).
+    pub fn get_random_node(&self) -> Option<&Node> {
+        let non_empty_buckets: Vec<_> = self
+            .buckets
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| !b.nodes.is_empty())
+            .collect();
+
+        if non_empty_buckets.is_empty() {
+            return None;
+        }
+
+        use rand::Rng;
+        let bucket_idx = rand::rng().random_range(0..non_empty_buckets.len());
+        let (_, bucket) = &non_empty_buckets[bucket_idx];
+
+        if bucket.nodes.is_empty() {
+            return None;
+        }
+
+        let node_idx = rand::rng().random_range(0..bucket.nodes.len());
+        bucket.nodes.get(node_idx)
+    }
+
+    /// Get a random ID within a bucket's range.
+    /// Bucket i covers IDs with XOR distance having bit length (i+1).
+    pub fn random_id_in_bucket_range(&self, bucket_index: usize) -> NodeId {
+        use rand::Rng;
+        let mut rng = rand::rng();
+
+        // For bucket i, we want IDs with bitlen(distance) == i + 1
+        // This means the (i)th bit of the distance should be set
+        let mut id_bytes = self.local_node_id.as_bytes();
+        let mut result = [0u8; 20];
+        result.copy_from_slice(&id_bytes);
+
+        // Calculate which byte and bit to flip
+        let bit_pos = 159 - bucket_index; // 0-indexed from MSB
+        let byte_idx = bit_pos / 8;
+        let bit_in_byte = 7 - (bit_pos % 8);
+
+        // Set that bit (to ensure it's in the bucket's range)
+        result[byte_idx] ^= 1 << bit_in_byte;
+
+        // Randomize remaining lower bits
+        for i in (byte_idx + 1)..20 {
+            result[i] = rng.random();
+        }
+
+        // Randomize the lower bits in the same byte
+        let mask = (1 << bit_in_byte) - 1;
+        result[byte_idx] = (result[byte_idx] & !mask) | (rng.random::<u8>() & mask);
+
+        NodeId::from_bytes(result)
+    }
+
+    /// Generate a random ID in our own bucket with randomized last byte.
+    /// Used for aggressive neighborhood maintenance.
+    pub fn random_id_in_own_bucket(&self) -> NodeId {
+        use rand::Rng;
+        let mut rng = rand::rng();
+
+        let mut result = self.local_node_id.as_bytes();
+        result[19] = rng.random(); // Randomize last byte
+
+        NodeId::from_bytes(result)
+    }
+
+    /// Get all buckets that are empty and could potentially be filled.
+    pub fn get_empty_buckets(&self) -> Vec<&Bucket> {
+        self.buckets.iter().filter(|b| b.nodes.is_empty()).collect()
+    }
+
+    /// Get a random empty bucket (for proactive recovery).
+    pub fn get_random_empty_bucket(&self) -> Option<&Bucket> {
+        let empty: Vec<_> = self.get_empty_buckets();
+        if empty.is_empty() {
+            return None;
+        }
+        use rand::Rng;
+        let idx = rand::rng().random_range(0..empty.len());
+        empty.get(idx).copied()
+    }
 }
 
 #[cfg(test)]
 mod test {
-    use std::net::{Ipv4Addr, SocketAddrV4};
+    use std::net::{Ipv4Addr, SocketAddr};
 
     use super::{K, RoutingTable};
     use crate::{node::Node, node_id::NodeId};
@@ -191,7 +347,7 @@ mod test {
         let mut id_bytes = [0u8; 20];
         id_bytes[19] = id_byte;
         let node_id = NodeId::from_bytes(id_bytes);
-        let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 6881);
+        let addr = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 6881);
         Node::new_good(node_id, addr)
     }
 
@@ -228,7 +384,7 @@ mod test {
             id_bytes[0] = 0x80; // High bit set -> bucket 159
             id_bytes[19] = suffix;
             let node_id = NodeId::from_bytes(id_bytes);
-            let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 6881 + suffix as u16);
+            let addr = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 6881 + suffix as u16);
             Node::new_good(node_id, addr)
         }
 

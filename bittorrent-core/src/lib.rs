@@ -27,6 +27,7 @@
 //! - **storage**: Disk I/O for reading/writing pieces
 //! - **bitfield**: Compact representation of available pieces
 //! - **metadata**: BEP 9 metadata exchange for magnet links
+//! - **choker**: manages which peers are choked/unchoked (currently round-robin)
 //!
 //! ## Peer Discovery
 //!
@@ -37,6 +38,7 @@
 //! Both sources feed peers into the same channel for connection attempts.
 
 mod bitfield;
+mod choker;
 mod metadata;
 mod peer;
 mod piece_picker;
@@ -47,4 +49,5 @@ mod types;
 
 pub use session::{Session, SessionError};
 pub use storage::Storage;
+pub use torrent::{TorrentState as InternalTorrentState, TorrentStats};
 pub use types::{SessionConfig, SessionStats, TorrentId, TorrentState, TorrentSummary};

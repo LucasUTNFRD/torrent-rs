@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::{
     collections::HashMap,
     net::SocketAddr,
@@ -31,6 +29,7 @@ use url::Url;
 use crate::{
     Storage,
     bitfield::Bitfield,
+    choker::Choker,
     metadata::{Metadata, MetadataState},
     peer::{
         PeerMessage, PeerState,
@@ -42,7 +41,7 @@ use crate::{
 
 // Peer related
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
-pub struct Pid(usize);
+pub struct Pid(pub usize);
 
 impl std::fmt::Display for Pid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -59,7 +58,7 @@ pub enum PeerSource {
     },
     Outbound(SocketAddr), // Socket to connect + Our peer id
 }
-//
+
 impl PeerSource {
     pub const fn get_addr(&self) -> &SocketAddr {
         match self {
@@ -114,6 +113,11 @@ pub enum TorrentMessage {
         block_tx: oneshot::Sender<Vec<BlockInfo>>,
     },
 
+    RemoteBlockRequest {
+        pid: Pid,
+        block_info: BlockInfo,
+    },
+
     // -- METADATA REQUEST --
     PeerWithMetadata {
         pid: Pid,
@@ -138,6 +142,23 @@ pub enum TorrentMessage {
         remote_addr: SocketAddr,
         supports_ext: bool,
     },
+    /// Get torrent statistics
+    GetStats {
+        resp: oneshot::Sender<TorrentStats>,
+    },
+}
+
+/// Statistics for a torrent
+#[derive(Debug, Clone)]
+pub struct TorrentStats {
+    pub state: TorrentState,
+    pub progress: f64,
+    pub download_rate: u64,
+    pub upload_rate: u64,
+    pub peers_connected: usize,
+    pub peers_discovered: usize,
+    pub downloaded_bytes: u64,
+    pub uploaded_bytes: u64,
 }
 
 //
@@ -148,7 +169,8 @@ pub enum TorrentMessage {
 pub struct Metrics {
     pub downloaded_bytes: AtomicU64,
     pub uploaded_bytes: AtomicU64,
-    pub connected_peers: AtomicUsize,
+    /// Total number of unique peers discovered from trackers/DHT (cumulative, never decrements)
+    pub peers_discovered: AtomicUsize,
 }
 
 //
@@ -177,6 +199,7 @@ pub struct Torrent {
 
     // Download related
     piece_mananger: Option<PieceManager>,
+    choker: Choker,
     //
     shutdown_rx: watch::Receiver<()>,
 
@@ -209,7 +232,6 @@ impl Torrent {
         let bitfield = Bitfield::with_size(torrent_info.num_pieces());
 
         let metadata = Metadata::TorrentFile(Arc::new(torrent_info));
-        // let metadata = Arc::new(metadata);
 
         let (tx, rx) = mpsc::channel(64);
 
@@ -229,8 +251,7 @@ impl Torrent {
                 rx,
                 bitfield,
                 piece_mananger: None,
-                // piece_picker: None,
-                // piece_collector: None,
+                choker: Choker::new(4), // Default 4 upload slots
             },
             tx,
         )
@@ -253,8 +274,6 @@ impl Torrent {
             metadata_state: MetadataState::Pending,
         };
 
-        // let metadata = Arc::new(metadata);
-
         let (tx, rx) = mpsc::channel(300);
 
         (
@@ -273,7 +292,7 @@ impl Torrent {
                 rx,
                 bitfield: Bitfield::new(),
                 piece_mananger: None,
-                // piece_collector: None,
+                choker: Choker::new(4), // Default 4 upload slots
             },
             tx,
         )
@@ -286,23 +305,14 @@ impl Torrent {
         self.init_interal().await;
 
         // Star announcing to Trackers/DHT
-        let (announce_tx, mut announce_rx) = mpsc::channel(16);
-        self.announce(&announce_tx);
+        let (discovered_peers_tx, mut discovered_peers_rx) = mpsc::channel(16);
+        self.announce(&discovered_peers_tx);
 
-        // let mut debug_interval = tokio::time::interval(Duration::from_secs(60));
+        // Periodic choker tick (every 10 seconds)
+        let mut choker_ticker = tokio::time::interval(Duration::from_secs(10));
+        choker_ticker.tick().await;
 
         loop {
-            if let Some(piece_manager) = self.piece_mananger.as_ref()
-                && piece_manager.have_all_pieces()
-            {
-                if let Some(name) = self.metadata.display_name() {
-                    info!("Torrent-{} Download Completed", name);
-                } else {
-                    info!("Torrent Download Completed");
-                }
-                //  TODO: BEFORFE BREAKING WE SHOULD DO SOME MERCIFUL SHUTDOWN OF PEER CONNECTIONS
-                break;
-            }
             tokio::select! {
                 Ok(()) = self.shutdown_rx.changed() => {
                     tracing::info!("Shutting down...");
@@ -314,17 +324,15 @@ impl Torrent {
                         None => break,
                     }
                 }
-                Some(announce_msg) = announce_rx.recv() => {
-                    for peer in &announce_msg.peers {
+                Some(discovered_peers) = discovered_peers_rx.recv() => {
+                    for peer in &discovered_peers {
                         self.add_peer(PeerSource::Outbound(*peer));
                     }
 
                 }
-                // _ = debug_interval.tick() => {
-                //       if let Some(ref piece_manager) = self.piece_mananger {
-                //         piece_manager.debug_print_state();
-                //     }
-                // }
+                _ = choker_ticker.tick() => {
+                    self.run_choker().await;
+                }
             }
         }
 
@@ -382,7 +390,8 @@ impl Torrent {
             return;
         }
 
-        if self.peers.len() >= 50 {
+        if self.peers.len() >= 500 {
+            // TODO: This is silently discarding peers we NEED a retry-mechanism
             return;
         }
 
@@ -393,9 +402,15 @@ impl Torrent {
         let (peer_tx, peer_rx) = mpsc::channel(64);
 
         let peer_addr = *peer.get_addr();
-        info!("connecting to {}", peer_addr);
 
-        self.metrics.connected_peers.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .peers_discovered
+            .fetch_add(1, Ordering::Relaxed);
+
+        // Create shared metrics that both torrent and peer connection will use
+        let shared_metrics = Arc::new(PeerMetrics::new());
+        let metrics_clone = shared_metrics.clone();
+
         match peer {
             PeerSource::Inbound {
                 stream,
@@ -419,10 +434,15 @@ impl Torrent {
             ),
         }
 
+        // Send the shared metrics to the peer connection
+        let _ = peer_tx.try_send(PeerMessage::Connected {
+            metrics: metrics_clone,
+        });
+
         let peer = PeerState {
             addr: peer_addr,
             tx: peer_tx,
-            metrics: PeerMetrics::new(),
+            metrics: shared_metrics,
             pending_requests: Vec::new(),
         };
 
@@ -431,13 +451,43 @@ impl Torrent {
 
     async fn handle_message(&mut self, msg: TorrentMessage) -> Result<(), TorrentError> {
         match msg {
-            TorrentMessage::PeerDisconnected(pid, bitfield) => self.clean_up_peer(pid, bitfield),
+            TorrentMessage::RemoteBlockRequest { pid, block_info } => {
+                let Some(peer) = self.peers.get(&pid) else {
+                    tracing::debug!("Peer {} disconnected before block could be served", pid);
+                    return Ok(());
+                };
+
+                match self.storage.read_block(self.info_hash, block_info).await {
+                    Ok(block) => {
+                        // Send piece to peer (upload tracking happens in peer_connection)
+                        if let Err(e) = peer
+                            .tx
+                            .send(PeerMessage::SendMessage(Message::Piece(block)))
+                            .await
+                        {
+                            tracing::warn!("Failed to send piece to peer {}: {}", pid, e);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to read block {} offset {} for peer {}: {}",
+                            block_info.index,
+                            block_info.begin,
+                            pid,
+                            e
+                        );
+                    }
+                }
+            }
+            TorrentMessage::PeerDisconnected(pid, bitfield) => {
+                self.clean_up_peer(pid, bitfield).await
+            }
             TorrentMessage::PeerError(pid, err, bitfield) => {
-                self.clean_up_peer(pid, bitfield);
+                self.clean_up_peer(pid, bitfield).await;
             }
             TorrentMessage::Have { pid, piece_idx } => {
-                // let p = self.piece_picker.as_mut().expect("init");
-                // p.increment_availability(AvailabilityUpdate::Have(piece_idx));
+                let p = self.piece_mananger.as_mut().expect("init");
+                p.increment_availability(&AvailabilityUpdate::Have(piece_idx));
             }
             TorrentMessage::ReceiveBlock(pid, block) => {
                 tracing::debug!("Incoming block {block:?}");
@@ -445,11 +495,19 @@ impl Torrent {
             }
             TorrentMessage::Interest(pid) => {
                 tracing::debug!("Peer {pid:?} is interested in our pieces");
-                // TODO: Consider unchoking this peer
+                let should_unchoke = self.choker.on_peer_interested(pid);
+                if should_unchoke {
+                    self.send_to_peer(pid, PeerMessage::SendUnchoke).await;
+                    tracing::debug!("Unchoked peer {pid:?}");
+                }
             }
             TorrentMessage::NotInterest(pid) => {
                 tracing::debug!("Peer {pid:?} is no longer interested in our pieces");
-                // TODO: Consider choking this peer to save resources
+                let was_unchoked = self.choker.on_peer_not_interested(pid);
+                if was_unchoked {
+                    self.send_to_peer(pid, PeerMessage::SendChoke).await;
+                    tracing::debug!("Choked peer {pid:?}");
+                }
             }
             TorrentMessage::ShouldBeInterested {
                 pid: _,
@@ -505,7 +563,7 @@ impl Torrent {
 
                 // Use the new set_metadata_size method to properly initialize fetching state
                 if let Err(e) = self.metadata.set_metadata_size(metadata_size) {
-                    tracing::warn!("Failed to set metadata size: {}", e);
+                    tracing::debug!("Failed to set metadata size: {}", e);
                 }
             }
             TorrentMessage::FillMetadataRequest {
@@ -532,7 +590,7 @@ impl Torrent {
 
                 // Put the metadata piece into the buffer
                 if let Err(e) = self.metadata.put_metadata_piece(metadata, piece_idx) {
-                    tracing::warn!("Failed to put metadata piece {}: {}", piece_idx, e);
+                    tracing::debug!("Failed to put metadata piece {}: {}", piece_idx, e);
                     return Ok(());
                 }
 
@@ -585,13 +643,57 @@ impl Torrent {
                     supports_ext,
                 });
             }
+            TorrentMessage::GetStats { resp } => {
+                let stats = self.get_stats();
+                let _ = resp.send(stats);
+            }
         }
         Ok(())
     }
 
-    // async fn incoming_have(&self) {
-    //     todo!()
-    // }
+    /// Get current torrent statistics
+    fn get_stats(&self) -> TorrentStats {
+        // Aggregate peer metrics
+        let mut total_download_rate = 0u64;
+        let mut total_upload_rate = 0u64;
+        let mut downloaded_bytes = 0u64;
+        let mut uploaded_bytes = 0u64;
+
+        for peer in self.peers.values() {
+            total_download_rate += peer.metrics.get_download_rate();
+            total_upload_rate += peer.metrics.get_upload_rate();
+            downloaded_bytes += peer.metrics.get_bytes_downloaded();
+            uploaded_bytes += peer.metrics.get_bytes_uploaded();
+        }
+
+        let progress = self
+            .piece_mananger
+            .as_ref()
+            .map_or(0.0, PieceManager::get_progress);
+
+        // Determine state based on progress and piece manager state
+        let state = if self.metadata.has_metadata() {
+            if progress >= 1.0 {
+                TorrentState::Seeding
+            } else {
+                TorrentState::Leeching
+            }
+        } else {
+            // No metadata yet, still fetching
+            TorrentState::Leeching
+        };
+
+        TorrentStats {
+            state,
+            progress,
+            download_rate: total_download_rate,
+            upload_rate: total_upload_rate,
+            peers_connected: self.peers.len(),
+            peers_discovered: self.metrics.peers_discovered.load(Ordering::Relaxed),
+            downloaded_bytes,
+            uploaded_bytes,
+        }
+    }
 
     async fn incoming_block(&mut self, pid: Pid, block: Block) {
         let piece_index = block.index;
@@ -630,9 +732,6 @@ impl Torrent {
             .await;
         }
 
-        // TODO: IF OTHER PEER IS ALSO REQUESTING THIS PIECE WE SHOULD SEND CANCEL
-        //  AND REMOVEIT from its pending requests
-
         if let Some(piece) = self
             .piece_mananger
             .as_mut()
@@ -661,21 +760,28 @@ impl Torrent {
         {
             Ok(valid) => valid,
             Err(e) => {
-                tracing::error!("Failed to verify piece {}: {}", piece_index, e);
+                tracing::error!(
+                    "Failed to verify piece {}: {} - resetting for re-download",
+                    piece_index,
+                    e
+                );
                 self.piece_mananger
                     .as_mut()
                     .expect("initialized")
-                    .set_piece_as(piece_index as usize, PieceState::NotRequested);
+                    .reset_piece(piece_index as usize);
                 return;
             }
         };
 
         if !valid {
-            tracing::warn!("Piece {} failed hash verification", piece_index);
+            tracing::warn!(
+                "Piece {} failed hash verification - resetting for re-download",
+                piece_index
+            );
             self.piece_mananger
                 .as_mut()
                 .expect("initialized")
-                .set_piece_as(piece_index as usize, PieceState::NotRequested);
+                .reset_piece(piece_index as usize);
             return;
         }
 
@@ -689,23 +795,36 @@ impl Torrent {
         self.broadcast_to_peers(PeerMessage::SendHave { piece_index })
             .await;
 
-        self.piece_mananger
-            .as_ref()
-            .expect("initialized")
-            .info_progress();
-
         // Write piece to disk
         if let Err(e) = self
             .storage
             .write_piece(torrent_id, piece_index, piece)
             .await
         {
-            tracing::error!("Failed to write piece {}: {}", piece_index, e);
-            // Mark piece as not downloaded so it will be retried
+            tracing::error!(
+                "Failed to write piece {}: {} - resetting for re-download",
+                piece_index,
+                e
+            );
+            // Reset piece so it will be re-downloaded
             self.piece_mananger
                 .as_mut()
                 .expect("initialized")
-                .set_piece_as(piece_index as usize, PieceState::NotRequested);
+                .reset_piece(piece_index as usize);
+        }
+
+        if self
+            .piece_mananger
+            .as_ref()
+            .expect("initalized")
+            .have_all_pieces()
+        {
+            self.state = TorrentState::Seeding;
+            if let Some(name) = self.metadata.display_name() {
+                info!("Torrent-{} Download Completed", name);
+            } else {
+                info!("Torrent Download Completed");
+            }
         }
     }
 
@@ -724,7 +843,7 @@ impl Torrent {
                 .info()
                 .expect("metadata was not successfully constructed");
 
-            tracing::info!("Metadata Info: {:#?}", info);
+            // tracing::info!("Metadata Info: {:#?}", info);
 
             self.broadcast_to_peers(PeerMessage::HaveMetadata(info))
                 .await;
@@ -733,8 +852,17 @@ impl Torrent {
         Ok(())
     }
 
-    fn clean_up_peer(&mut self, pid: Pid, bitfield: Option<Bitfield>) {
-        info!("peer disconnected {pid:?}");
+    async fn clean_up_peer(&mut self, pid: Pid, bitfield: Option<Bitfield>) {
+        // Notify choker that peer disconnected
+        // Returns the peer that got unchoked to fill the slot (if any)
+        if let Some(unchoked_pid) = self.choker.on_peer_disconnected(pid) {
+            self.send_to_peer(unchoked_pid, PeerMessage::SendUnchoke)
+                .await;
+            tracing::debug!(
+                "Peer disconnect: unchoked peer {:?} to fill slot",
+                unchoked_pid
+            );
+        }
 
         let p = self.peers.remove(&pid);
 
@@ -752,7 +880,26 @@ impl Torrent {
             mananger.cancel_peer_requests(&requests);
         }
 
-        self.metrics.connected_peers.fetch_sub(1, Ordering::Relaxed);
+        // Note: We do NOT decrement peers_discovered here because it tracks
+        // cumulative discovered peers, not currently connected peers.
+        // peers_connected (self.peers.len()) tracks current connections.
+    }
+
+    /// Run the choker algorithm periodically to rotate upload slots
+    async fn run_choker(&mut self) {
+        let (to_choke, to_unchoke) = self.choker.re_evaluate_unchokes();
+
+        // Apply choke decisions
+        for pid in to_choke {
+            self.send_to_peer(pid, PeerMessage::SendChoke).await;
+            tracing::debug!("Periodic choker: choked peer {pid:?}");
+        }
+
+        // Apply unchoke decisions
+        for pid in to_unchoke {
+            self.send_to_peer(pid, PeerMessage::SendUnchoke).await;
+            tracing::debug!("Periodic choker: unchoked peer {pid:?}");
+        }
     }
 
     /// Send a message to a specific peer
@@ -778,7 +925,8 @@ impl Torrent {
     // Announce torrent over Tracker and DHT
     // internally creates dedicated tasks in charge of periodic announces
     // it implements max peer control
-    fn announce(&self, announce_tx: &mpsc::Sender<TrackerResponse>) {
+    // TODO: Have a signal handler that on SIGHUP Forces announce
+    fn announce(&self, discovered_peers_tx: &mpsc::Sender<Vec<SocketAddr>>) {
         let client_state = self.metadata.info().map_or_else(
             || ClientState::new(0, 0, 0, Events::Started),
             |info| {
@@ -798,7 +946,7 @@ impl Torrent {
             let tracker_client = self.tracker_client.clone();
             let info_hash = self.info_hash;
             let announce = announce_url.to_string();
-            let announce_tx = announce_tx.clone();
+            let discovered_peers_tx = discovered_peers_tx.clone();
             tokio::spawn(async move {
                 loop {
                     let response = tracker_client
@@ -816,7 +964,7 @@ impl Torrent {
                     };
 
                     let sleep_duration = response.interval;
-                    let _ = announce_tx.send(response).await;
+                    let _ = discovered_peers_tx.send(response.peers).await;
 
                     sleep(Duration::from_secs(
                         u64::try_from(sleep_duration)
@@ -830,39 +978,26 @@ impl Torrent {
         // Spawn DHT discovery task (runs in parallel with tracker announces)
         if let Some(dht) = self.dht_client.clone() {
             let info_hash = self.info_hash;
-            let announce_tx = announce_tx.clone();
+            let discovered_peers_tx = discovered_peers_tx.clone();
             let port = 6881_u16; // TODO: Use actual listening port from session
 
             tokio::spawn(async move {
                 // DHT re-announce interval (15 minutes as per BEP 5 recommendation)
                 const DHT_ANNOUNCE_INTERVAL: Duration = Duration::from_secs(15 * 60);
 
-                loop {
-                    // Perform DHT announce (get_peers + announce_peer)
-                    match dht.announce(info_hash, port).await {
-                        Ok(response) => {
-                            let peer_count = response.peers.len();
-                            if peer_count > 0 {
-                                tracing::info!("DHT: found {} peers for {}", peer_count, info_hash);
+                const MAX_RESPONSES: usize = 50;
 
-                                // Convert DhtResponse to TrackerResponse for unified handling
-                                let tracker_response = TrackerResponse {
-                                    peers: response.peers,
-                                    interval: i32::try_from(DHT_ANNOUNCE_INTERVAL.as_secs())
-                                        .expect("DHT_ANNOUNCE_INTERVAL exceeds i32 range"),
-                                    leechers: 0,
-                                    seeders: 0,
-                                };
-                                let _ = announce_tx.send(tracker_response).await;
-                            } else {
-                                tracing::debug!(
-                                    "DHT: no peers found for {}, will retry",
-                                    info_hash
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!("DHT announce failed for {}: {}", info_hash, e);
+                let _ = dht.announce_peer(info_hash, port).await;
+
+                loop {
+                    let mut discovered_peers_stream = dht.get_peers(info_hash).await;
+                    let mut response_count = 0;
+
+                    while let Some(peers) = discovered_peers_stream.recv().await {
+                        let _ = discovered_peers_tx.send(peers).await;
+                        response_count += 1;
+                        if response_count >= MAX_RESPONSES {
+                            break;
                         }
                     }
 

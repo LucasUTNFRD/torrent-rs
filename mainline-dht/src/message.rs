@@ -7,7 +7,7 @@
 
 use std::{
     collections::BTreeMap,
-    net::{Ipv4Addr, SocketAddrV4},
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4},
 };
 
 use bencode::{Bencode, BencodeBuilder, BencodeDict};
@@ -37,7 +37,7 @@ pub struct KrpcMessage {
     /// Client version string (optional, 4 bytes: 2-char client ID + 2-char version).
     pub version: Option<Vec<u8>>,
     /// Sender's external IP as seen by responder (BEP 42).
-    pub sender_ip: Option<SocketAddrV4>,
+    pub sender_ip: Option<SocketAddr>,
     /// The message body (query, response, or error).
     pub body: MessageBody,
 }
@@ -92,7 +92,7 @@ pub enum Response {
         /// Opaque write token for future announce_peer.
         token: Vec<u8>,
         /// Peers for the info_hash (if we have them).
-        values: Option<Vec<SocketAddrV4>>,
+        values: Option<Vec<SocketAddr>>,
         /// Closer nodes (if we don't have peers).
         nodes: Option<Vec<CompactNodeInfo>>,
     },
@@ -102,11 +102,11 @@ pub enum Response {
     },
 }
 
-/// Compact node info: 20-byte node ID + 6-byte IP:port.
+/// Compact node info: 20-byte node ID + 6-byte IP:port (IPv4) or 18-byte IP:port (IPv6).
 #[derive(Debug, Clone)]
 pub struct CompactNodeInfo {
     pub node_id: NodeId,
-    pub addr: SocketAddrV4,
+    pub addr: SocketAddr,
 }
 
 // ============================================================================
@@ -195,7 +195,7 @@ impl KrpcMessage {
                         if let Some(peers) = values {
                             let values_list: Vec<Bencode> = peers
                                 .iter()
-                                .map(|p| Bencode::Bytes(encode_compact_peer_v4(p)))
+                                .map(|p| Bencode::Bytes(encode_compact_peer(p)))
                                 .collect();
                             r.insert(b"values".to_vec(), Bencode::List(values_list));
                         }
@@ -234,7 +234,13 @@ impl KrpcMessage {
         let transaction_id = dict
             .get_bytes(b"t")
             .ok_or_else(|| DhtError::Parse("missing transaction id".to_string()))?;
-        let transaction_id = TransactionId(transaction_id.try_into().expect("2 bytes long"));
+        let transaction_id = match transaction_id.try_into() as Result<[u8; 2], _> {
+            Ok(arr) => TransactionId(arr),
+            Err(_) => {
+                tracing::debug!("Invalid transaction ID length: {}", transaction_id.len());
+                return Err(DhtError::Parse("invalid transaction id length".to_string()));
+            }
+        };
 
         // Version (optional)
         let version = dict.get_bytes(b"v").map(|v| v.to_vec());
@@ -242,7 +248,9 @@ impl KrpcMessage {
         // Sender IP (optional, BEP 42)
         let sender_ip = dict.get_bytes(b"ip").and_then(|ip_bytes| {
             if ip_bytes.len() == 6 {
-                Some(decode_compact_addr_v4(ip_bytes))
+                Some(SocketAddr::V4(decode_compact_addr_v4(ip_bytes)))
+            } else if ip_bytes.len() == 18 {
+                decode_compact_addr_v6(ip_bytes)
             } else {
                 None
             }
@@ -343,7 +351,7 @@ impl KrpcMessage {
         tx_id: TransactionId,
         node_id: NodeId,
         token: Vec<u8>,
-        peers: Vec<SocketAddrV4>,
+        peers: Vec<SocketAddr>,
     ) -> Self {
         Self {
             transaction_id: tx_id,
@@ -522,15 +530,20 @@ fn parse_response(dict: &BTreeMap<Vec<u8>, Bencode>) -> Result<MessageBody, DhtE
 
         // Parse values (list of compact peer info strings)
         let values = if let Some(Bencode::List(list)) = r.get(b"values".as_slice()) {
-            let peers: Vec<SocketAddrV4> = list
-                .iter()
-                .filter_map(|b| match b {
+            let mut peers: Vec<SocketAddr> = Vec::new();
+            for b in list.iter() {
+                match b {
                     Bencode::Bytes(bytes) if bytes.len() == 6 => {
-                        Some(decode_compact_addr_v4(bytes))
+                        peers.push(SocketAddr::V4(decode_compact_addr_v4(bytes)));
                     }
-                    _ => None,
-                })
-                .collect();
+                    Bencode::Bytes(bytes) if bytes.len() == 18 => {
+                        if let Some(addr) = decode_compact_addr_v6(bytes) {
+                            peers.push(addr);
+                        }
+                    }
+                    _ => {}
+                }
+            }
             if peers.is_empty() { None } else { Some(peers) }
         } else {
             None
@@ -607,21 +620,33 @@ fn parse_node_id(dict: &BTreeMap<Vec<u8>, Bencode>, key: &[u8]) -> Result<NodeId
 }
 
 // ============================================================================
-// Compact encoding for nodes (26 bytes each: 20-byte ID + 4-byte IP + 2-byte port)
+// Compact encoding for nodes (26 bytes each: 20-byte ID + 4-byte IP + 2-byte port for IPv4)
 // ============================================================================
 
-/// Encode a list of nodes to compact format (26 bytes per node).
+/// Encode a list of nodes to compact format (26 bytes per node for IPv4).
 pub fn encode_compact_nodes_v4(nodes: &[CompactNodeInfo]) -> Vec<u8> {
     let mut result = Vec::with_capacity(nodes.len() * 26);
     for node in nodes {
-        result.extend_from_slice(&node.node_id.as_bytes());
-        result.extend_from_slice(&node.addr.ip().octets());
-        result.extend_from_slice(&node.addr.port().to_be_bytes());
+        if let SocketAddr::V4(v4) = node.addr {
+            result.extend_from_slice(&node.node_id.as_bytes());
+            result.extend_from_slice(&v4.ip().octets());
+            result.extend_from_slice(&v4.port().to_be_bytes());
+        }
     }
     result
 }
 
-/// Decode compact node info (26 bytes per node).
+/// Encode a list of nodes to compact format (supports both IPv4 and IPv6).
+pub fn encode_compact_nodes(nodes: &[CompactNodeInfo]) -> Vec<u8> {
+    let mut result = Vec::new();
+    for node in nodes {
+        result.extend_from_slice(&node.node_id.as_bytes());
+        result.extend_from_slice(&encode_compact_peer(&node.addr));
+    }
+    result
+}
+
+/// Decode compact node info (26 bytes per node for IPv4).
 pub fn decode_compact_nodes_v4(data: &[u8]) -> Result<Vec<CompactNodeInfo>, DhtError> {
     if data.len() % 26 != 0 {
         return Err(DhtError::Parse(format!(
@@ -636,7 +661,37 @@ pub fn decode_compact_nodes_v4(data: &[u8]) -> Result<Vec<CompactNodeInfo>, DhtE
         id_bytes.copy_from_slice(&chunk[0..20]);
         let node_id = NodeId::from_bytes(id_bytes);
 
-        let addr = decode_compact_addr_v4(&chunk[20..26]);
+        let addr = SocketAddr::V4(decode_compact_addr_v4(&chunk[20..26]));
+
+        nodes.push(CompactNodeInfo { node_id, addr });
+    }
+
+    Ok(nodes)
+}
+
+/// Decode compact node info (supports both IPv4 and IPv6).
+pub fn decode_compact_nodes(data: &[u8]) -> Result<Vec<CompactNodeInfo>, DhtError> {
+    if data.len() % 26 != 0 && data.len() % 38 != 0 {
+        return Err(DhtError::Parse(format!(
+            "compact nodes length {} not divisible by 26 or 38",
+            data.len()
+        )));
+    }
+
+    let node_size = if data.len() % 38 == 0 { 38 } else { 26 };
+    let mut nodes = Vec::with_capacity(data.len() / node_size);
+
+    for chunk in data.chunks_exact(node_size) {
+        let mut id_bytes = [0u8; 20];
+        id_bytes.copy_from_slice(&chunk[0..20]);
+        let node_id = NodeId::from_bytes(id_bytes);
+
+        let addr = if node_size == 38 {
+            decode_compact_addr_v6(&chunk[20..38])
+                .ok_or_else(|| DhtError::Parse("Invalid IPv6 address".to_string()))?
+        } else {
+            SocketAddr::V4(decode_compact_addr_v4(&chunk[20..26]))
+        };
 
         nodes.push(CompactNodeInfo { node_id, addr });
     }
@@ -651,9 +706,43 @@ fn decode_compact_addr_v4(data: &[u8]) -> SocketAddrV4 {
     SocketAddrV4::new(ip, port)
 }
 
+/// Decode 18-byte compact IPv6 address (16-byte IP + 2-byte port).
+fn decode_compact_addr_v6(data: &[u8]) -> Option<SocketAddr> {
+    if data.len() != 18 {
+        return None;
+    }
+    let ip = Ipv6Addr::from([
+        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7], data[8], data[9],
+        data[10], data[11], data[12], data[13], data[14], data[15],
+    ]);
+    let port = u16::from_be_bytes([data[16], data[17]]);
+    Some(SocketAddr::new(ip.into(), port))
+}
+
 // ============================================================================
 // Compact encoding for peers (6 bytes each: 4-byte IP + 2-byte port)
 // ============================================================================
+
+/// Encode a single peer to compact format (6 bytes for IPv4, 18 bytes for IPv6).
+pub fn encode_compact_peer(addr: &SocketAddr) -> Vec<u8> {
+    let mut result = if addr.is_ipv6() {
+        Vec::with_capacity(18)
+    } else {
+        Vec::with_capacity(6)
+    };
+
+    match addr {
+        SocketAddr::V4(v4) => {
+            result.extend_from_slice(&v4.ip().octets());
+            result.extend_from_slice(&v4.port().to_be_bytes());
+        }
+        SocketAddr::V6(v6) => {
+            result.extend_from_slice(&v6.ip().octets());
+            result.extend_from_slice(&v6.port().to_be_bytes());
+        }
+    }
+    result
+}
 
 /// Encode a single peer to compact format (6 bytes).
 fn encode_compact_peer_v4(addr: &SocketAddrV4) -> Vec<u8> {
@@ -663,8 +752,8 @@ fn encode_compact_peer_v4(addr: &SocketAddrV4) -> Vec<u8> {
     result
 }
 
-/// Decode compact peer info (6 bytes per peer).
-pub fn decode_compact_peers_v4(data: &[u8]) -> Result<Vec<SocketAddrV4>, DhtError> {
+/// Decode compact peer info (6 bytes per peer - IPv4 only).
+pub fn decode_compact_peers_v4(data: &[u8]) -> Result<Vec<SocketAddr>, DhtError> {
     if data.len() % 6 != 0 {
         return Err(DhtError::Parse(format!(
             "compact peers length {} not divisible by 6",
@@ -674,7 +763,7 @@ pub fn decode_compact_peers_v4(data: &[u8]) -> Result<Vec<SocketAddrV4>, DhtErro
 
     let mut peers = Vec::with_capacity(data.len() / 6);
     for chunk in data.chunks_exact(6) {
-        peers.push(decode_compact_addr_v4(chunk));
+        peers.push(SocketAddr::V4(decode_compact_addr_v4(chunk)));
     }
 
     Ok(peers)
@@ -736,11 +825,11 @@ mod tests {
         let nodes = vec![
             CompactNodeInfo {
                 node_id: NodeId::generate_random(),
-                addr: SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 1), 6881),
+                addr: SocketAddr::new(Ipv4Addr::new(192, 168, 1, 1).into(), 6881),
             },
             CompactNodeInfo {
                 node_id: NodeId::generate_random(),
-                addr: SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 1), 8080),
+                addr: SocketAddr::new(Ipv4Addr::new(10, 0, 0, 1).into(), 8080),
             },
         ];
 
@@ -768,7 +857,7 @@ mod tests {
     fn compact_node_encoding() {
         let nodes = vec![CompactNodeInfo {
             node_id: NodeId::from_bytes([1u8; 20]),
-            addr: SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 1), 6881),
+            addr: SocketAddr::new(Ipv4Addr::new(192, 168, 1, 1).into(), 6881),
         }];
 
         let encoded = encode_compact_nodes_v4(&nodes);
@@ -803,8 +892,8 @@ mod tests {
         let node_id = NodeId::generate_random();
         let token = vec![0x01, 0x02, 0x03, 0x04];
         let peers = vec![
-            SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 1), 6881),
-            SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 1), 8080),
+            SocketAddr::new(Ipv4Addr::new(192, 168, 1, 1).into(), 6881),
+            SocketAddr::new(Ipv4Addr::new(10, 0, 0, 1).into(), 8080),
         ];
 
         let tx_id = TransactionId::new(123);
@@ -841,7 +930,7 @@ mod tests {
         let token = vec![0x01, 0x02, 0x03, 0x04];
         let nodes = vec![CompactNodeInfo {
             node_id: NodeId::generate_random(),
-            addr: SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 1), 6881),
+            addr: SocketAddr::new(Ipv4Addr::new(192, 168, 1, 1).into(), 6881),
         }];
 
         let tx_id = TransactionId::new(456);

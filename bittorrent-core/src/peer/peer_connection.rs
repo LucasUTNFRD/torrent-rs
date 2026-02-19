@@ -29,7 +29,7 @@ use tokio::{
 };
 
 use tokio_util::codec::Framed;
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, instrument};
 
 use crate::{
     bitfield::{Bitfield, BitfieldError},
@@ -132,7 +132,7 @@ impl Peer<Handshaking> {
         tracing::debug!("Validating remote handshake");
 
         if remote_handshake.info_hash != self.info_hash {
-            warn!("Handshake failed: info hash mismatch");
+            debug!("Handshake failed: info hash mismatch");
             return Err(ConnectionError::InvalidHandshake);
         }
 
@@ -244,6 +244,14 @@ impl BitfieldState {
 impl ConnectionState for Connected {}
 impl Connected {
     pub fn new(stream: TcpStream, supports_extended: bool) -> Self {
+        Self::new_with_metrics(stream, supports_extended, Arc::new(PeerMetrics::new()))
+    }
+
+    pub fn new_with_metrics(
+        stream: TcpStream,
+        supports_extended: bool,
+        metrics: Arc<PeerMetrics>,
+    ) -> Self {
         let framed = Framed::new(stream, MessageCodec {});
         let (sink, stream) = framed.split();
 
@@ -263,7 +271,7 @@ impl Connected {
             bitfield: BitfieldState::new(),
             metadata: None,
             request_queue: Vec::new(),
-            metrics: Arc::new(PeerMetrics::new()),
+            metrics,
             last_block_request: Instant::now(),
             target_request_queue: 2,
             prev_download_rate: 0,
@@ -285,7 +293,7 @@ impl Peer<Connected> {
     )
     )]
     pub async fn start(mut self) -> Result<(), ConnectionError> {
-        info!("connection established");
+        debug!("connection established");
 
         self.have_valid_metadata().await;
 
@@ -319,8 +327,8 @@ impl Peer<Connected> {
                 _=heartbeat_ticker.tick()=>{
 
                     let time_since_last_request = self.state.last_block_request.elapsed();
-                    if self.state.interesting && time_since_last_request > Duration::from_secs(30) || self.state.last_recv_msg.elapsed() > Duration::from_secs(60) {
-                        warn!(
+                    if self.state.interesting && time_since_last_request > Duration::from_secs(30) || self.state.last_recv_msg.elapsed() > Duration::from_secs(45) {
+                        debug!(
                             "Disconnecting peer: interested but no block request activity for {} seconds",
                             time_since_last_request.as_secs()
                         );
@@ -355,7 +363,7 @@ impl Peer<Connected> {
     fn metric_update(&mut self) {
         self.state.metrics.update_rates();
 
-        info!(
+        debug!(
             "dr : {} | choked: {} | interested: {} | max_queue_size : {}, outgoing_requests: {} | slow_start : {}",
             self.state.metrics.get_download_rate_human(),
             self.state.choked,
@@ -375,7 +383,7 @@ impl Peer<Connected> {
             let threshold = std::cmp::max(current_rate / 20, 10_240);
 
             if current_rate > 0 && rate_increase < threshold {
-                info!(
+                debug!(
                     "Leaving slow start. Rate: {} B/s, Increase: {}",
                     current_rate, rate_increase
                 );
@@ -406,13 +414,13 @@ impl Peer<Connected> {
 
         match msg {
             Message::KeepAlive => self.on_keepalive().await?,
-            Message::Choke => self.on_choke().await?,
+            Message::Choke => self.on_choke()?,
             Message::Unchoke => self.on_unchoke().await?,
             Message::Interested => self.on_interested().await?,
             Message::NotInterested => self.on_not_interested().await?,
             Message::Have { piece_index } => self.on_have(piece_index).await?,
             Message::Bitfield(payload) => self.on_bitfield(payload).await?,
-            Message::Request(block) => self.on_request().await?,
+            Message::Request(request_block) => self.on_request(request_block).await?,
             Message::Piece(block) => self.on_incoming_piece(block).await?,
             Message::Cancel(block) => self.on_cancel().await?,
             Message::Port { port } => {
@@ -446,10 +454,21 @@ impl Peer<Connected> {
                 }
             }
             PeerMessage::SendBitfield { bitfield } => todo!(),
-            PeerMessage::SendChoke => todo!(),
-            PeerMessage::SendUnchoke => todo!(),
+            PeerMessage::SendChoke => {
+                self.state.metrics.reset_since_unchoked();
+                self.state.choked = true;
+                self.state.sink.send(Message::Choke).await?;
+            }
+            PeerMessage::SendUnchoke => {
+                self.state.choked = false;
+                self.state.sink.send(Message::Unchoke).await?;
+            }
             PeerMessage::Disconnect => todo!(),
-            PeerMessage::SendMessage(protocol_msg) => self.state.sink.send(protocol_msg).await?,
+            PeerMessage::SendMessage(protocol_msg) => {
+                if let Message::Piece(block) = &protocol_msg {}
+                self.state.sink.send(protocol_msg).await?;
+            }
+
             PeerMessage::HaveMetadata(metadata) => {
                 debug!("Received metadata from torrent");
 
@@ -460,6 +479,10 @@ impl Peer<Connected> {
 
                 // Update interest status now that we have metadata
                 self.update_interest_status().await?;
+            }
+            PeerMessage::Connected { metrics } => {
+                metrics.reset_timing();
+                self.state.metrics = metrics;
             }
         }
         Ok(())
@@ -516,11 +539,13 @@ impl Peer<Connected> {
         debug!("recv keepalive");
         Ok(())
     }
-    async fn on_choke(&mut self) -> Result<(), ConnectionError> {
-        // todo!(
+
+    fn on_choke(&mut self) -> Result<(), ConnectionError> {
         debug!("RECV CHOKE");
+        self.state.peer_choked = true;
         Ok(())
     }
+
     async fn on_unchoke(&mut self) -> Result<(), ConnectionError> {
         debug!("UNCHOKE Received");
         self.state.peer_choked = false;
@@ -612,11 +637,25 @@ impl Peer<Connected> {
     }
 
     async fn on_interested(&mut self) -> Result<(), ConnectionError> {
-        todo!("Received interested message")
+        let _ = self
+            .torrent_tx
+            .send(TorrentMessage::Interest(self.pid))
+            .await;
+
+        self.state.peer_interested = true;
+
+        Ok(())
     }
 
     async fn on_not_interested(&mut self) -> Result<(), ConnectionError> {
-        todo!("Received not interested message")
+        let _ = self
+            .torrent_tx
+            .send(TorrentMessage::NotInterest(self.pid))
+            .await;
+
+        self.state.peer_interested = false;
+
+        Ok(())
     }
 
     // Updates piece availability - Affects which pieces the torrent tries to download next
@@ -643,7 +682,7 @@ impl Peer<Connected> {
             let num_pieces = metadata.pieces.len();
 
             if have_idx as usize >= num_pieces {
-                warn!(
+                debug!(
                     "Received HAVE for invalid piece index {} (max: {})",
                     have_idx,
                     num_pieces - 1
@@ -655,7 +694,7 @@ impl Peer<Connected> {
         } else {
             // Pre-metadata validation - cap at 64k pieces
             if have_idx >= 65536 {
-                warn!(
+                debug!(
                     "Received HAVE for piece index {} exceeding 64k limit",
                     have_idx
                 );
@@ -667,6 +706,13 @@ impl Peer<Connected> {
 
         // Update the bitfield if we don't already have this piece
         if let Some(bitfield) = self.state.bitfield.get_bitfield_mut() {
+            // Skip if bitfield hasn't been validated yet (num_pieces == 0)
+            // or if the index is out of bounds
+            let num_pieces = bitfield.num_pieces;
+            if num_pieces == 0 || have_idx as usize >= num_pieces {
+                return Ok(());
+            }
+
             if bitfield.has(have_idx as usize) {
                 return Ok(());
             }
@@ -699,7 +745,7 @@ impl Peer<Connected> {
 
         // Check if we already received a bitfield
         if self.state.bitfield.is_received() {
-            warn!("Received duplicate bitfield from peer");
+            debug!("Received duplicate bitfield from peer");
             return Err(ConnectionError::Protocol(
                 "Duplicate bitfield message".to_string(),
             ));
@@ -713,7 +759,7 @@ impl Peer<Connected> {
                     self.state.bitfield = BitfieldState::Validated(bitfield);
                 }
                 Err(e) => {
-                    warn!("Invalid bitfield received: {}", e);
+                    debug!("Invalid bitfield received: {}", e);
                     return Err(ConnectionError::BitfieldError(e));
                 }
             }
@@ -730,8 +776,32 @@ impl Peer<Connected> {
         Ok(())
     }
 
-    async fn on_request(&mut self) -> Result<(), ConnectionError> {
-        todo!()
+    async fn on_request(&mut self, request_block: BlockInfo) -> Result<(), ConnectionError> {
+        // Don't serve requests to choked peers
+        if self.state.choked {
+            debug!(
+                "Ignoring request from choked peer: piece {} offset {}",
+                request_block.index, request_block.begin
+            );
+            return Ok(());
+        }
+
+        // TODO: Fetch piece data from storage and send it
+        // For now, just log that we would serve it
+        debug!(
+            "Peer requested piece {} offset {} length {} - would serve if implemented",
+            request_block.index, request_block.begin, request_block.length
+        );
+
+        let _ = self
+            .torrent_tx
+            .send(TorrentMessage::RemoteBlockRequest {
+                pid: self.pid,
+                block_info: request_block,
+            })
+            .await;
+
+        Ok(())
     }
 
     async fn on_incoming_piece(&mut self, block: Block) -> Result<(), ConnectionError> {
@@ -766,7 +836,7 @@ impl Peer<Connected> {
                         self.state.target_request_queue = self.state.max_outgoing_request;
                     }
                 } else {
-                    warn!(
+                    debug!(
                         "Bufferbloat detected ({}s queue). Exiting slow start.",
                         queue_duration_secs
                     );
@@ -792,7 +862,7 @@ impl Peer<Connected> {
                     self.state.target_request_queue = self.state.max_outgoing_request;
                 }
             } else {
-                warn!(
+                debug!(
                     "Bufferbloat detected ({}s queue). Exiting slow start.",
                     queue_duration_secs
                 );
@@ -1056,7 +1126,10 @@ pub fn spawn_outgoing_peer(
         .await;
 
         if let Err(e) = result {
-            warn!(?e);
+            debug!(peer = %addr, error = %e, "Outgoing peer connection failed");
+            let _ = torrent_tx
+                .send(TorrentMessage::PeerError(pid, e, None))
+                .await;
         }
     });
 }
@@ -1082,7 +1155,7 @@ pub fn spawn_inbound_peer(
         };
 
         if let Err(e) = peer.start().await {
-            warn!(?e, "Inbound peer error");
+            debug!(?e, "Inbound peer error");
         }
     });
 }

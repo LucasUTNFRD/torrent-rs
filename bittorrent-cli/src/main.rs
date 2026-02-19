@@ -1,15 +1,18 @@
-use bittorrent_core::{Session, SessionConfig};
-use clap::Parser;
+use std::io::Write;
 use std::path::PathBuf;
-use tracing::info;
-use tracing_subscriber::Layer;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use bittorrent_core::{Session, SessionConfig, TorrentSummary};
+use clap::Parser;
+use tokio::time::interval;
+use tracing_subscriber::fmt::writer::MakeWriterExt;
 
 #[derive(Parser)]
 #[command(name = "bittorrent-cli")]
 #[command(about = "A BitTorrent client for leeching torrents")]
-#[command(long_about = "First iteration of the BitTorrent client CLI")]
+#[command(version)]
 struct Args {
     /// Path to the torrent file or magnet URI
     torrent: String,
@@ -22,7 +25,7 @@ struct Args {
     #[arg(short = 'd', long)]
     save_dir: Option<PathBuf>,
 
-    // Set log level (critical, error, warn, info, debug, trace)
+    /// Set log level (error, warn, info, debug, trace)
     #[arg(long, value_enum, default_value_t = LogLevel::Info)]
     log_level: LogLevel,
 }
@@ -48,30 +51,125 @@ impl From<LogLevel> for tracing::Level {
     }
 }
 
+/// Shared state for the status line
+struct StatusState {
+    current_line: Mutex<String>,
+    needs_clear: AtomicBool,
+}
+
+impl StatusState {
+    fn new() -> Self {
+        Self {
+            current_line: Mutex::new(String::new()),
+            needs_clear: AtomicBool::new(false),
+        }
+    }
+}
+
+/// Custom writer that handles status line clearing
+struct StatusLineWriter {
+    state: Arc<StatusState>,
+}
+
+impl std::io::Write for StatusLineWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let mut stderr = std::io::stderr();
+
+        // Clear the current status line before writing log message
+        if self.state.needs_clear.load(Ordering::SeqCst) {
+            let line = self.state.current_line.lock().unwrap();
+            if !line.is_empty() {
+                // Move to start of line and clear it
+                write!(stderr, "\r{:<width$}\r", "", width = line.len())?;
+            }
+            self.state.needs_clear.store(false, Ordering::SeqCst);
+        }
+
+        stderr.write_all(buf)?;
+        stderr.flush()?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        std::io::stderr().flush()
+    }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];
+    let mut size = bytes as f64;
+    let mut unit_index = 0;
+
+    while size >= 1024.0 && unit_index < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit_index += 1;
+    }
+
+    if unit_index == 0 {
+        format!("{} {}", bytes, UNITS[unit_index])
+    } else {
+        format!("{:.2} {}", size, UNITS[unit_index])
+    }
+}
+
+fn format_bytes_per_second(bytes_per_sec: u64) -> String {
+    format!("{}/s", format_bytes(bytes_per_sec))
+}
+
+fn format_ratio(uploaded: u64, downloaded: u64) -> String {
+    if downloaded == 0 {
+        "0.00".to_string()
+    } else {
+        format!("{:.2}", uploaded as f64 / downloaded as f64)
+    }
+}
+
+fn get_status_line(summary: &TorrentSummary) -> String {
+    let progress = summary.progress * 100.0;
+    let state_str = match summary.state {
+        bittorrent_core::TorrentState::FetchingMetadata => "Fetching metadata".to_string(),
+        bittorrent_core::TorrentState::Checking => {
+            format!("Verifying local files ({:.1}%)", progress)
+        }
+        bittorrent_core::TorrentState::Downloading => {
+            format!(
+                "Progress: {:.1}%, dl from {} of {} peers ({}), ul to {} ({}) [{}]",
+                progress,
+                summary.peers_connected,  // connected peers
+                summary.peers_discovered, // discovered peers from trackers/DHT
+                format_bytes_per_second(summary.download_rate),
+                0, // peers_getting_from_us - not tracked yet
+                format_bytes_per_second(summary.upload_rate),
+                format_ratio(
+                    summary.downloaded_bytes,
+                    (summary.size_bytes as f64 * summary.progress) as u64
+                )
+            )
+        }
+        bittorrent_core::TorrentState::Seeding => {
+            format!(
+                "Seeding, uploading to {} of {} peer(s), {} [{}]",
+                0, // peers_getting_from_us - not tracked yet
+                summary.peers_discovered,
+                format_bytes_per_second(summary.upload_rate),
+                format_ratio(summary.downloaded_bytes, summary.size_bytes)
+            )
+        }
+        bittorrent_core::TorrentState::Paused => "Paused".to_string(),
+        bittorrent_core::TorrentState::Error => "Error".to_string(),
+    };
+
+    // Pad to clear previous longer lines (typical terminal width consideration)
+    format!("{:<80}", state_str)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let console_layer = console_subscriber::spawn();
-
     let args = Args::parse();
-
-    let log_level = tracing::Level::from(args.log_level);
-
-    tracing_subscriber::registry()
-        .with(console_layer)
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_target(false)
-                .with_thread_ids(false)
-                .with_file(false)
-                .with_line_number(true)
-                .with_filter(tracing_subscriber::filter::LevelFilter::from(log_level)),
-        )
-        .init();
 
     let is_magnet = args.torrent.starts_with("magnet:");
 
     if !is_magnet {
-        // Validate torrent file
         let torrent_path = PathBuf::from(&args.torrent);
         if !torrent_path.exists() {
             eprintln!(
@@ -96,10 +194,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         PathBuf::from(home).join("Downloads").join("Torrents")
     });
 
-    // Ensure save directory exists
     if let Err(e) = std::fs::create_dir_all(&save_dir) {
         eprintln!(
-            " Error: Failed to create save directory {}: {}",
+            "Error: Failed to create save directory {}: {}",
             save_dir.display(),
             e
         );
@@ -107,9 +204,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
-    info!("Torrent: {}", args.torrent);
-    info!("Save directory: {}", save_dir.display());
-    info!("Listening on port: {}", args.port);
+    // Set up status line handling
+    let status_state = Arc::new(StatusState::new());
+    let status_state_for_writer = status_state.clone();
+
+    let log_level = tracing::Level::from(args.log_level);
+
+    // Create a custom layer that writes to stderr with status line handling
+    let stderr_writer = move || StatusLineWriter {
+        state: status_state_for_writer.clone(),
+    };
+
+    tracing_subscriber::fmt()
+        .with_writer(stderr_writer.with_max_level(log_level))
+        .with_target(false)
+        .with_thread_ids(false)
+        .with_file(false)
+        .with_line_number(false)
+        .with_ansi(true)
+        .init();
+
+    // Print version info like transmission-cli
+    println!("bittorrent-cli 0.1.0");
+    println!();
 
     let config = SessionConfig {
         port: args.port,
@@ -137,18 +254,66 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    println!("Added torrent: {:?}", torrent_id);
-    println!("Starting download...");
-    println!("Press Ctrl+C to stop");
-    println!();
+    // Create shutdown signal
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
+    let shutdown_tx_clone = shutdown_tx.clone();
 
-    // Wait for shutdown signal
-    tokio::signal::ctrl_c().await?;
+    // Spawn Ctrl+C handler
+    tokio::spawn(async move {
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            eprintln!("Failed to listen for Ctrl+C: {}", e);
+        }
+        let _ = shutdown_tx_clone.send(()).await;
+    });
 
-    info!("Received shutdown signal, stopping session...");
+    // Status line updater
+    let status_state_for_updater = status_state.clone();
+    let mut status_ticker = interval(Duration::from_millis(500));
+    let mut shutting_down = false;
 
-    if let Err(e) = session.shutdown().await {
-        eprintln!("Error during shutdown: {}", e);
+    loop {
+        tokio::select! {
+            _ = status_ticker.tick() => {
+                if shutting_down {
+                    continue;
+                }
+
+                // Get torrent info and update status line
+                match session.get_torrent(torrent_id).await {
+                    Ok(Some(summary)) => {
+                        let line = get_status_line(&summary);
+
+                        // Update shared state
+                        {
+                            let mut current = status_state_for_updater.current_line.lock().unwrap();
+                            *current = line.clone();
+                        }
+                        status_state_for_updater.needs_clear.store(true, Ordering::SeqCst);
+
+                        // Print status line (overwrites previous)
+                        print!("\r{}", line);
+                        std::io::stdout().flush()?;
+                    }
+                    Ok(None) => {
+                        // Torrent not found (shouldn't happen normally)
+                    }
+                    Err(e) => {
+                        eprintln!("\nError getting torrent stats: {}", e);
+                    }
+                }
+            }
+            _ = shutdown_rx.recv() => {
+                if !shutting_down {
+                    shutting_down = true;
+                    println!("\nStopping torrent...");
+
+                    if let Err(e) = session.shutdown().await {
+                        eprintln!("Error during shutdown: {}", e);
+                    }
+                    break;
+                }
+            }
+        }
     }
 
     Ok(())
