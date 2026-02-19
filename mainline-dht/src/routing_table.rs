@@ -338,16 +338,16 @@ impl RoutingTable {
 
 #[cfg(test)]
 mod test {
-    use std::net::{Ipv4Addr, SocketAddrV4};
+    use std::net::{Ipv4Addr, SocketAddr};
 
-    use super::{K, RoutingTable};
+    use super::{RoutingTable, K};
     use crate::{node::Node, node_id::NodeId};
 
     fn make_node(id_byte: u8) -> Node {
         let mut id_bytes = [0u8; 20];
         id_bytes[19] = id_byte;
         let node_id = NodeId::from_bytes(id_bytes);
-        let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 6881);
+        let addr = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 6881);
         Node::new_good(node_id, addr)
     }
 
@@ -384,7 +384,7 @@ mod test {
             id_bytes[0] = 0x80; // High bit set -> bucket 159
             id_bytes[19] = suffix;
             let node_id = NodeId::from_bytes(id_bytes);
-            let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 6881 + suffix as u16);
+            let addr = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 6881 + suffix as u16);
             Node::new_good(node_id, addr)
         }
 

@@ -9,7 +9,7 @@
 
 use std::{
     fs,
-    net::{Ipv4Addr, SocketAddr, SocketAddrV4, ToSocketAddrs},
+    net::{Ipv4Addr, SocketAddr, ToSocketAddrs},
     path::PathBuf,
     sync::Arc,
     time::Duration,
@@ -103,7 +103,7 @@ impl DhtConfig {
 #[derive(Debug, Clone)]
 pub struct GetPeersResult {
     /// Peers found for the infohash.
-    pub peers: Vec<SocketAddrV4>,
+    pub peers: Vec<SocketAddr>,
     /// Number of nodes that responded.
     pub nodes_contacted: usize,
     /// Closest nodes with their tokens (for subsequent announce).
@@ -148,7 +148,7 @@ impl DhtHandler {
 
     /// Create a new DHT node with full configuration
     pub async fn with_config(config: DhtConfig) -> Result<Self, DhtError> {
-        let bind_addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, config.port);
+        let bind_addr = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), config.port);
         let socket = UdpSocket::bind(bind_addr).await?;
         let socket = Arc::new(socket);
 
@@ -239,7 +239,7 @@ impl DhtHandler {
     ///
     /// Performs a DHT lookup to discover peers for the given info_hash.
     /// Returns a receiver that streams peer addresses as they are discovered.
-    pub async fn get_peers(&self, info_hash: InfoHash) -> mpsc::Receiver<Vec<SocketAddrV4>> {
+    pub async fn get_peers(&self, info_hash: InfoHash) -> mpsc::Receiver<Vec<SocketAddr>> {
         let (peer_tx, peer_rx) = mpsc::channel(32);
 
         let _ = self
@@ -370,7 +370,7 @@ enum DhtCommand {
     },
     GetPeers {
         info_hash: InfoHash,
-        peer_tx: mpsc::Sender<Vec<SocketAddrV4>>,
+        peer_tx: mpsc::Sender<Vec<SocketAddr>>,
     },
     Announce {
         info_hash: InfoHash,
@@ -424,13 +424,13 @@ struct DhtActor {
 #[derive(Debug)]
 struct GetPeersLookupState {
     /// Peers discovered so far
-    peers: std::collections::HashSet<SocketAddrV4>,
+    peers: std::collections::HashSet<SocketAddr>,
     /// Nodes with tokens for potential announce
     nodes_with_tokens: Vec<(CompactNodeInfo, Vec<u8>)>,
     /// Nodes we've queried
-    queried_nodes: std::collections::HashSet<SocketAddrV4>,
+    queried_nodes: std::collections::HashSet<SocketAddr>,
     /// Channel to stream discovered peers to caller
-    peer_tx: mpsc::Sender<Vec<SocketAddrV4>>,
+    peer_tx: mpsc::Sender<Vec<SocketAddr>>,
     /// When the lookup started
     started_at: std::time::Instant,
 }
@@ -554,33 +554,27 @@ impl DhtActor {
                         // Resend based on query type
                         match &tx.query_type {
                             QueryType::Ping => {
-                                if let SocketAddr::V4(addr_v4) = tx.addr {
-                                    let msg = KrpcMessage::ping_query(
-                                        u16::from_be_bytes(tx.tx_id.0),
-                                        self.node_id
-                                    );
-                                    let _ = self.socket.try_send_to(&msg.to_bytes(), SocketAddr::V4(addr_v4));
-                                }
+                                let msg = KrpcMessage::ping_query(
+                                    u16::from_be_bytes(tx.tx_id.0),
+                                    self.node_id
+                                );
+                                let _ = self.socket.try_send_to(&msg.to_bytes(), tx.addr);
                             }
                             QueryType::FindNode { target } => {
-                                if let SocketAddr::V4(addr_v4) = tx.addr {
-                                    let msg = KrpcMessage::find_node_query(
-                                        u16::from_be_bytes(tx.tx_id.0),
-                                        self.node_id,
-                                        *target
-                                    );
-                                    let _ = self.socket.try_send_to(&msg.to_bytes(), SocketAddr::V4(addr_v4));
-                                }
+                                let msg = KrpcMessage::find_node_query(
+                                    u16::from_be_bytes(tx.tx_id.0),
+                                    self.node_id,
+                                    *target
+                                );
+                                let _ = self.socket.try_send_to(&msg.to_bytes(), tx.addr);
                             }
                             QueryType::GetPeers { info_hash } => {
-                                if let SocketAddr::V4(addr_v4) = tx.addr {
-                                    let msg = KrpcMessage::get_peers_query(
-                                        u16::from_be_bytes(tx.tx_id.0),
-                                        self.node_id,
-                                        *info_hash
-                                    );
-                                    let _ = self.socket.try_send_to(&msg.to_bytes(), SocketAddr::V4(addr_v4));
-                                }
+                                let msg = KrpcMessage::get_peers_query(
+                                    u16::from_be_bytes(tx.tx_id.0),
+                                    self.node_id,
+                                    *info_hash
+                                );
+                                let _ = self.socket.try_send_to(&msg.to_bytes(), tx.addr);
                             }
                             _ => {}
                         }
@@ -652,11 +646,7 @@ impl DhtActor {
         // Send ping to bootstrap nodes - this is how we initially populate the routing table
         // The ping->pong handshake lets us learn their node IDs
         for addr in &addrs {
-            let SocketAddr::V4(addr_v4) = addr else {
-                continue;
-            };
-
-            self.send_ping(*addr_v4)?;
+            self.send_ping(*addr)?;
         }
 
         tracing::info!(
@@ -770,7 +760,7 @@ impl DhtActor {
     ) -> Result<Vec<CompactNodeInfo>, DhtError> {
         use std::collections::HashSet;
 
-        let mut queried_nodes: HashSet<SocketAddrV4> = HashSet::new();
+        let mut queried_nodes: HashSet<SocketAddr> = HashSet::new();
         let mut closest_nodes: Vec<CompactNodeInfo> = self
             .routing_table
             .get_closest_nodes(&target, K)
@@ -835,7 +825,7 @@ impl DhtActor {
     async fn start_get_peers(
         &mut self,
         info_hash: InfoHash,
-        peer_tx: mpsc::Sender<Vec<SocketAddrV4>>,
+        peer_tx: mpsc::Sender<Vec<SocketAddr>>,
     ) {
         use std::collections::HashSet;
 
@@ -866,9 +856,7 @@ impl DhtActor {
             for node_addr in DEFAULT_BOOTSTRAP_NODES.iter() {
                 if let Ok(addrs) = node_addr.to_socket_addrs() {
                     for addr in addrs {
-                        if let SocketAddr::V4(addr_v4) = addr {
-                            let _ = self.send_get_peers(addr_v4, info_hash);
-                        }
+                        let _ = self.send_get_peers(addr, info_hash);
                     }
                 }
             }
@@ -886,7 +874,7 @@ impl DhtActor {
     /// Send get_peers query with context to trigger announce after receiving token.
     fn send_get_peers_with_announce(
         &mut self,
-        addr: SocketAddrV4,
+        addr: SocketAddr,
         info_hash: InfoHash,
         port: u16,
         implied_port: bool,
@@ -896,7 +884,7 @@ impl DhtActor {
         // Check for duplicate
         if self
             .transaction_manager
-            .get_by_index("get_peers", &SocketAddr::V4(addr))
+            .get_by_index("get_peers", &addr)
             .is_some()
         {
             return Ok(());
@@ -905,7 +893,7 @@ impl DhtActor {
         // Create transaction with announce context
         let mut tx = Transaction::new(
             tx_id.clone(),
-            SocketAddr::V4(addr),
+            addr,
             QueryType::GetPeers { info_hash },
         );
         tx.announce_port = Some(port);
@@ -920,7 +908,7 @@ impl DhtActor {
             KrpcMessage::get_peers_query(u16::from_be_bytes(tx_id.0), self.node_id, info_hash);
         let bytes = msg.to_bytes();
 
-        match self.socket.try_send_to(&bytes, SocketAddr::V4(addr)) {
+        match self.socket.try_send_to(&bytes, addr) {
             Ok(_) => Ok(()),
             Err(e) => {
                 self.transaction_manager.finish_by_trans_id(&tx_id);
@@ -935,20 +923,20 @@ impl DhtActor {
 
     /// Send a ping query without awaiting response.
     /// Response will be processed in handle_incoming when it arrives.
-    fn send_ping(&mut self, addr: SocketAddrV4) -> Result<(), DhtError> {
+    fn send_ping(&mut self, addr: SocketAddr) -> Result<(), DhtError> {
         let tx_id = self.transaction_manager.gen_id();
 
         // Check for duplicate
         if self
             .transaction_manager
-            .get_by_index("ping", &SocketAddr::V4(addr))
+            .get_by_index("ping", &addr)
             .is_some()
         {
             return Ok(());
         }
 
         // Create and register transaction
-        let tx = Transaction::new(tx_id.clone(), SocketAddr::V4(addr), QueryType::Ping);
+        let tx = Transaction::new(tx_id.clone(), addr, QueryType::Ping);
 
         if !self.transaction_manager.insert(tx) {
             return Ok(()); // Already exists
@@ -958,7 +946,7 @@ impl DhtActor {
         let msg = KrpcMessage::ping_query(u16::from_be_bytes(tx_id.0), self.node_id);
         let bytes = msg.to_bytes();
 
-        match self.socket.try_send_to(&bytes, SocketAddr::V4(addr)) {
+        match self.socket.try_send_to(&bytes, addr) {
             Ok(_) => Ok(()),
             Err(e) => {
                 // Remove transaction if send failed
@@ -969,13 +957,13 @@ impl DhtActor {
     }
 
     /// Send a find_node query without awaiting response.
-    fn send_find_node(&mut self, addr: SocketAddrV4, target: NodeId) -> Result<(), DhtError> {
+    fn send_find_node(&mut self, addr: SocketAddr, target: NodeId) -> Result<(), DhtError> {
         let tx_id = self.transaction_manager.gen_id();
 
         // Check for duplicate
         if self
             .transaction_manager
-            .get_by_index("find_node", &SocketAddr::V4(addr))
+            .get_by_index("find_node", &addr)
             .is_some()
         {
             return Ok(());
@@ -984,7 +972,7 @@ impl DhtActor {
         // Create and register transaction
         let tx = Transaction::new(
             tx_id.clone(),
-            SocketAddr::V4(addr),
+            addr,
             QueryType::FindNode { target },
         );
 
@@ -996,7 +984,7 @@ impl DhtActor {
         let msg = KrpcMessage::find_node_query(u16::from_be_bytes(tx_id.0), self.node_id, target);
         let bytes = msg.to_bytes();
 
-        match self.socket.try_send_to(&bytes, SocketAddr::V4(addr)) {
+        match self.socket.try_send_to(&bytes, addr) {
             Ok(_) => Ok(()),
             Err(e) => {
                 self.transaction_manager.finish_by_trans_id(&tx_id);
@@ -1006,13 +994,13 @@ impl DhtActor {
     }
 
     /// Send a get_peers query without awaiting response.
-    fn send_get_peers(&mut self, addr: SocketAddrV4, info_hash: InfoHash) -> Result<(), DhtError> {
+    fn send_get_peers(&mut self, addr: SocketAddr, info_hash: InfoHash) -> Result<(), DhtError> {
         let tx_id = self.transaction_manager.gen_id();
 
         // Check for duplicate
         if self
             .transaction_manager
-            .get_by_index("get_peers", &SocketAddr::V4(addr))
+            .get_by_index("get_peers", &addr)
             .is_some()
         {
             return Ok(());
@@ -1021,7 +1009,7 @@ impl DhtActor {
         // Create and register transaction
         let tx = Transaction::new(
             tx_id.clone(),
-            SocketAddr::V4(addr),
+            addr,
             QueryType::GetPeers { info_hash },
         );
 
@@ -1034,7 +1022,7 @@ impl DhtActor {
             KrpcMessage::get_peers_query(u16::from_be_bytes(tx_id.0), self.node_id, info_hash);
         let bytes = msg.to_bytes();
 
-        match self.socket.try_send_to(&bytes, SocketAddr::V4(addr)) {
+        match self.socket.try_send_to(&bytes, addr) {
             Ok(_) => Ok(()),
             Err(e) => {
                 self.transaction_manager.finish_by_trans_id(&tx_id);
@@ -1046,7 +1034,7 @@ impl DhtActor {
     /// Send an announce_peer query without awaiting response.
     fn send_announce_peer(
         &mut self,
-        addr: SocketAddrV4,
+        addr: SocketAddr,
         info_hash: InfoHash,
         port: u16,
         token: Vec<u8>,
@@ -1057,7 +1045,7 @@ impl DhtActor {
         // Create and register transaction (no duplicate check needed for announce)
         let tx = Transaction::new(
             tx_id.clone(),
-            SocketAddr::V4(addr),
+            addr,
             QueryType::AnnouncePeer {
                 info_hash,
                 port,
@@ -1080,7 +1068,7 @@ impl DhtActor {
         );
         let bytes = msg.to_bytes();
 
-        match self.socket.try_send_to(&bytes, SocketAddr::V4(addr)) {
+        match self.socket.try_send_to(&bytes, addr) {
             Ok(_) => Ok(()),
             Err(e) => {
                 self.transaction_manager.finish_by_trans_id(&tx_id);
@@ -1118,10 +1106,8 @@ impl DhtActor {
                             // Extract node ID from response
                             if let Some(node_id) = msg.get_node_id() {
                                 // Update routing table
-                                if let SocketAddr::V4(addr_v4) = from {
-                                    let node = Node::new_good(node_id, addr_v4);
-                                    self.routing_table.try_add_node(node);
-                                }
+                                let node = Node::new_good(node_id, from);
+                                self.routing_table.try_add_node(node);
                             }
                         }
                         QueryType::FindNode { target } => {
@@ -1135,7 +1121,7 @@ impl DhtActor {
                                     // Only if we haven't already queried this node
                                     if self
                                         .transaction_manager
-                                        .get_by_index("find_node", &SocketAddr::V4(node_info.addr))
+                                        .get_by_index("find_node", &node_info.addr)
                                         .is_none()
                                     {
                                         let _ = self.send_find_node(node_info.addr, *target);
@@ -1152,21 +1138,19 @@ impl DhtActor {
                             } = response
                             {
                                 // Get the sender's node info from the transaction
-                                let sender_node_info = if let SocketAddr::V4(from_v4) = from {
+                                let sender_node_info = {
                                     // Try to get node ID from response or transaction
                                     let node_id = msg.get_node_id().unwrap_or(self.node_id);
                                     Some(CompactNodeInfo {
                                         node_id,
-                                        addr: from_v4,
+                                        addr: from,
                                     })
-                                } else {
-                                    None
                                 };
 
                                 // Update pending lookup state and stream peers to caller
                                 if let Some(state) = self.pending_get_peers.get_mut(info_hash) {
                                     if let Some(peers) = values {
-                                        let peer_vec: Vec<SocketAddrV4> = peers
+                                        let peer_vec: Vec<SocketAddr> = peers
                                             .iter()
                                             .filter(|p| state.peers.insert(**p))
                                             .map(|p| *p)
@@ -1201,7 +1185,7 @@ impl DhtActor {
                                             .transaction_manager
                                             .get_by_index(
                                                 "get_peers",
-                                                &SocketAddr::V4(node_info.addr),
+                                                &node_info.addr,
                                             )
                                             .is_none()
                                         {
@@ -1211,11 +1195,9 @@ impl DhtActor {
                                 }
 
                                 // If we have an announce_port set, send announce_peer
-                                if let Some(port) = tx.announce_port
-                                    && let SocketAddr::V4(from_v4) = from
-                                {
+                                if let Some(port) = tx.announce_port {
                                     let _ = self.send_announce_peer(
-                                        from_v4,
+                                        from,
                                         *info_hash,
                                         port,
                                         token.clone(),
@@ -1356,8 +1338,11 @@ impl DhtActor {
         }
 
         // Determine peer address (implied_port uses UDP source port)
-        let peer_port = if implied_port { from_v4.port() } else { port };
-        let peer_addr = SocketAddrV4::new(*from_v4.ip(), peer_port);
+        let peer_addr = if implied_port {
+            from
+        } else {
+            SocketAddr::new(from.ip(), port)
+        };
 
         // Store the peer
         self.peer_store.add_peer(info_hash, peer_addr);
@@ -1470,16 +1455,9 @@ impl DhtActor {
     /// the node on the received port and IP address. If a response is received,
     /// the node should be inserted into the routing table according to the usual rules.
     async fn try_add_node(&mut self, addr: SocketAddr) -> Result<(), DhtError> {
-        let SocketAddr::V4(addr_v4) = addr else {
-            return Err(DhtError::Network(std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                "IPv6 not supported",
-            )));
-        };
-
         tracing::debug!("Attempting to add node {} to routing table", addr);
 
-        self.send_ping(addr_v4)
+        self.send_ping(addr)
     }
 
     // ========================================================================

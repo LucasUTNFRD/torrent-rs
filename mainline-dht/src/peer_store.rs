@@ -5,7 +5,7 @@
 
 use std::{
     collections::HashMap,
-    net::SocketAddrV4,
+    net::SocketAddr,
     num::NonZeroUsize,
     time::{Duration, Instant},
 };
@@ -39,7 +39,7 @@ pub struct PeerStore {
 /// Set of peers for a single torrent with their announce timestamps.
 struct PeerSet {
     /// Peers mapped to their last announce timestamp
-    peers: HashMap<SocketAddrV4, Instant>,
+    peers: HashMap<SocketAddr, Instant>,
 }
 
 impl PeerStore {
@@ -65,7 +65,7 @@ impl PeerStore {
     ///
     /// If the peer already exists, updates its timestamp.
     /// If the torrent's peer set is full, removes the oldest peer.
-    pub fn add_peer(&mut self, info_hash: InfoHash, peer: SocketAddrV4) {
+    pub fn add_peer(&mut self, info_hash: InfoHash, peer: SocketAddr) {
         let max_peers = self.max_peers;
         let peer_ttl = self.peer_ttl;
 
@@ -91,7 +91,7 @@ impl PeerStore {
     /// Get all non-expired peers for an infohash.
     ///
     /// Returns an empty vector if no peers are stored for this infohash.
-    pub fn get_peers(&mut self, info_hash: &InfoHash) -> Vec<SocketAddrV4> {
+    pub fn get_peers(&mut self, info_hash: &InfoHash) -> Vec<SocketAddr> {
         let peer_ttl = self.peer_ttl;
 
         let Some(peer_set) = self.store.get_mut(info_hash) else {
@@ -130,7 +130,7 @@ impl PeerSet {
     }
 
     /// Find the peer with the oldest timestamp.
-    fn oldest_peer(&self) -> Option<SocketAddrV4> {
+    fn oldest_peer(&self) -> Option<SocketAddr> {
         self.peers
             .iter()
             .min_by_key(|(_, ts)| *ts)
@@ -149,8 +149,8 @@ mod tests {
         InfoHash::new(bytes)
     }
 
-    fn test_peer(last_octet: u8, port: u16) -> SocketAddrV4 {
-        SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, last_octet), port)
+    fn test_peer(last_octet: u8, port: u16) -> SocketAddr {
+        SocketAddr::new(Ipv4Addr::new(192, 168, 1, last_octet).into(), port)
     }
 
     #[test]

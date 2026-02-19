@@ -305,8 +305,8 @@ impl Torrent {
         self.init_interal().await;
 
         // Star announcing to Trackers/DHT
-        let (announce_tx, mut announce_rx) = mpsc::channel(16);
-        self.announce(&announce_tx);
+        let (discovered_peers_tx, mut discovered_peers_rx) = mpsc::channel(16);
+        self.announce(&discovered_peers_tx);
 
         // Periodic choker tick (every 10 seconds)
         let mut choker_ticker = tokio::time::interval(Duration::from_secs(10));
@@ -324,8 +324,8 @@ impl Torrent {
                         None => break,
                     }
                 }
-                Some(announce_msg) = announce_rx.recv() => {
-                    for peer in &announce_msg.peers {
+                Some(discovered_peers) = discovered_peers_rx.recv() => {
+                    for peer in &discovered_peers {
                         self.add_peer(PeerSource::Outbound(*peer));
                     }
 
@@ -925,7 +925,7 @@ impl Torrent {
     // Announce torrent over Tracker and DHT
     // internally creates dedicated tasks in charge of periodic announces
     // it implements max peer control
-    fn announce(&self, announce_tx: &mpsc::Sender<Vec<SocketAddr>>) {
+    fn announce(&self, discovered_peers_tx: &mpsc::Sender<Vec<SocketAddr>>) {
         let client_state = self.metadata.info().map_or_else(
             || ClientState::new(0, 0, 0, Events::Started),
             |info| {
@@ -945,7 +945,7 @@ impl Torrent {
             let tracker_client = self.tracker_client.clone();
             let info_hash = self.info_hash;
             let announce = announce_url.to_string();
-            let announce_tx = announce_tx.clone();
+            let discovered_peers_tx = discovered_peers_tx.clone();
             tokio::spawn(async move {
                 loop {
                     let response = tracker_client
@@ -963,7 +963,7 @@ impl Torrent {
                     };
 
                     let sleep_duration = response.interval;
-                    let _ = announce_tx.send(response).await;
+                    let _ = discovered_peers_tx.send(response.peers).await;
 
                     sleep(Duration::from_secs(
                         u64::try_from(sleep_duration)
@@ -977,39 +977,26 @@ impl Torrent {
         // Spawn DHT discovery task (runs in parallel with tracker announces)
         if let Some(dht) = self.dht_client.clone() {
             let info_hash = self.info_hash;
-            let announce_tx = announce_tx.clone();
+            let discovered_peers_tx = discovered_peers_tx.clone();
             let port = 6881_u16; // TODO: Use actual listening port from session
 
             tokio::spawn(async move {
                 // DHT re-announce interval (15 minutes as per BEP 5 recommendation)
                 const DHT_ANNOUNCE_INTERVAL: Duration = Duration::from_secs(15 * 60);
 
-                loop {
-                    // Perform DHT announce (get_peers + announce_peer)
-                    match dht.announce(info_hash, port).await {
-                        Ok(response) => {
-                            let peer_count = response.peers.len();
-                            if peer_count > 0 {
-                                tracing::info!("DHT: found {} peers for {}", peer_count, info_hash);
+                const MAX_RESPONSES: usize = 50;
 
-                                // Convert DhtResponse to TrackerResponse for unified handling
-                                let tracker_response = TrackerResponse {
-                                    peers: response.peers,
-                                    interval: i32::try_from(DHT_ANNOUNCE_INTERVAL.as_secs())
-                                        .expect("DHT_ANNOUNCE_INTERVAL exceeds i32 range"),
-                                    leechers: 0,
-                                    seeders: 0,
-                                };
-                                let _ = announce_tx.send(tracker_response).await;
-                            } else {
-                                tracing::debug!(
-                                    "DHT: no peers found for {}, will retry",
-                                    info_hash
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!("DHT announce failed for {}: {}", info_hash, e);
+                let _ = dht.announce_peer(info_hash, port).await;
+
+                loop {
+                    let mut discovered_peers_stream = dht.get_peers(info_hash).await;
+                    let mut response_count = 0;
+
+                    while let Some(peers) = discovered_peers_stream.recv().await {
+                        let _ = discovered_peers_tx.send(peers).await;
+                        response_count += 1;
+                        if response_count >= MAX_RESPONSES {
+                            break;
                         }
                     }
 

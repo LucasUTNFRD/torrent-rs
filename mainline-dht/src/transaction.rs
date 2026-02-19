@@ -290,12 +290,12 @@ impl Default for TransactionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::{Ipv4Addr, SocketAddrV4};
+    use std::net::{Ipv4Addr, SocketAddr};
 
     #[test]
     fn test_insert_and_get() {
         let mut manager = TransactionManager::new();
-        let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 1), 6881));
+        let addr = SocketAddr::new(Ipv4Addr::new(192, 168, 1, 1).into(), 6881);
         let tx_id = manager.gen_id();
 
         let tx = Transaction::new(tx_id.clone(), addr, QueryType::Ping);
@@ -314,7 +314,7 @@ mod tests {
     #[test]
     fn test_prevent_duplicate() {
         let mut manager = TransactionManager::new();
-        let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 1), 6881));
+        let addr = SocketAddr::new(Ipv4Addr::new(192, 168, 1, 1).into(), 6881);
 
         let tx1 = Transaction::new(manager.gen_id(), addr, QueryType::Ping);
         assert!(manager.insert(tx1));
@@ -332,7 +332,7 @@ mod tests {
     #[test]
     fn test_finish_transaction() {
         let mut manager = TransactionManager::new();
-        let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 1), 6881));
+        let addr = SocketAddr::new(Ipv4Addr::new(192, 168, 1, 1).into(), 6881);
         let tx_id = manager.gen_id();
 
         let tx = Transaction::new(tx_id.clone(), addr, QueryType::Ping);
@@ -350,7 +350,7 @@ mod tests {
     #[test]
     fn test_scan_timeouts() {
         let mut manager = TransactionManager::new();
-        let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 1), 6881));
+        let addr = SocketAddr::new(Ipv4Addr::new(192, 168, 1, 1).into(), 6881);
 
         // Insert a transaction
         let tx_id = manager.gen_id();
@@ -378,7 +378,7 @@ mod tests {
 
     #[test]
     fn test_transaction_context() {
-        let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 1), 6881));
+        let addr = SocketAddr::new(Ipv4Addr::new(192, 168, 1, 1).into(), 6881);
         let info_hash = InfoHash::new([0xab; 20]);
 
         let tx = Transaction::new(
