@@ -1064,6 +1064,7 @@ impl Torrent {
         for announce_url in &self.trackers {
             let tracker_client = self.tracker_client.clone();
             let info_hash = self.info_hash;
+            let seed = self.state == TorrentState::Seeding;
             // TODO: Why use .to_string()?
             let announce = announce_url.to_string();
             let discovered_peers_tx = discovered_peers_tx.clone();
@@ -1084,7 +1085,9 @@ impl Torrent {
                     };
 
                     let sleep_duration = response.interval;
-                    let _ = discovered_peers_tx.send(response.peers).await;
+                    if !seed {
+                        let _ = discovered_peers_tx.send(response.peers).await;
+                    }
 
                     sleep(Duration::from_secs(
                         u64::try_from(sleep_duration)
