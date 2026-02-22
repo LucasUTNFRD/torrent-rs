@@ -213,7 +213,7 @@ pub struct Torrent {
 
     /// Directory for persisting .torrent files
     torrents_dir: PathBuf,
-    
+
     /// Custom content directory for seeding (None for leeching)
     content_dir: Option<PathBuf>,
 }
@@ -1032,21 +1032,23 @@ impl Torrent {
             .await;
     }
 
-    // Announce torrent over Tracker and DHT
-    // internally creates dedicated tasks in charge of periodic announces
-    // it implements max peer control
-    // TODO: Have a signal handler that on SIGHUP Forces announce
+    // If we are seeding a file we are not interest in receiving peers
     fn announce(&self, discovered_peers_tx: &mpsc::Sender<Vec<SocketAddr>>) {
         let client_state = self.metadata.info().map_or_else(
             || ClientState::new(0, 0, 0, Events::Started),
             |info| {
+                let event = match self.state {
+                    TorrentState::Seeding => Events::Completed,
+                    TorrentState::Leeching => Events::Started,
+                    _ => Events::None,
+                };
                 ClientState::new(
                     0,
                     info.piece_length
                         * i64::try_from(info.pieces.len())
                             .expect("incoming info length > i64::MAX"),
                     0,
-                    Events::Started,
+                    event,
                 )
             },
         );
@@ -1055,6 +1057,7 @@ impl Torrent {
         for announce_url in &self.trackers {
             let tracker_client = self.tracker_client.clone();
             let info_hash = self.info_hash;
+            // TODO: Why use .to_string()?
             let announce = announce_url.to_string();
             let discovered_peers_tx = discovered_peers_tx.clone();
             tokio::spawn(async move {
@@ -1086,7 +1089,11 @@ impl Torrent {
         }
 
         // Spawn DHT discovery task (runs in parallel with tracker announces)
-        if let Some(dht) = self.dht_client.clone() {
+        // TODO: Announce method has an skectchy impl that only tries to announce in order to
+        // get_peers i need to read in detail BEP-5 to announce we are actually seeding a file
+        if let Some(dht) = self.dht_client.clone()
+            && self.state != TorrentState::Seeding
+        {
             let info_hash = self.info_hash;
             let discovered_peers_tx = discovered_peers_tx.clone();
             let port = 6881_u16; // TODO: Use actual listening port from session
