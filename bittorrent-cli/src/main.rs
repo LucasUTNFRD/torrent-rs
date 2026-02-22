@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use bittorrent_common::metainfo::parse_torrent_from_file;
 use bittorrent_core::{Session, SessionConfig, TorrentSummary};
 use clap::Parser;
 use tokio::time::interval;
@@ -24,6 +25,11 @@ struct Args {
     /// Directory to save downloaded files
     #[arg(short = 'd', long)]
     save_dir: Option<PathBuf>,
+
+    /// Directory containing files to seed (seeding mode).
+    /// When provided, verifies and seeds existing content instead of downloading.
+    #[arg(short = 'w', long, value_name = "CONTENT_DIR")]
+    watch_dir: Option<PathBuf>,
 
     /// Set log level (error, warn, info, debug, trace)
     #[arg(long, value_enum, default_value_t = LogLevel::Info)]
@@ -156,6 +162,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
     let is_magnet = args.torrent.starts_with("magnet:");
+    let is_seeding = args.watch_dir.is_some();
+
+    if is_seeding && is_magnet {
+        eprintln!("Error: Seeding mode requires a .torrent file, not a magnet URI.");
+        std::process::exit(1);
+    }
 
     if !is_magnet {
         let torrent_path = PathBuf::from(&args.torrent);
@@ -176,13 +188,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Default to $HOME/Downloads/Torrents/
-    let save_dir = args.save_dir.unwrap_or_else(|| {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        PathBuf::from(home).join("Downloads").join("Torrents")
-    });
+    if let Some(ref watch_dir) = args.watch_dir {
+        if !watch_dir.exists() {
+            eprintln!(
+                "Error: Content directory does not exist: {}",
+                watch_dir.display()
+            );
+            std::process::exit(1);
+        }
+        if !watch_dir.is_dir() {
+            eprintln!(
+                "Error: Content path is not a directory: {}",
+                watch_dir.display()
+            );
+            std::process::exit(1);
+        }
+    }
 
-    if let Err(e) = std::fs::create_dir_all(&save_dir) {
+    // Default to $HOME/Downloads/Torrents/ (for download mode)
+    // For seeding mode, use watch_dir as the base
+    let save_dir = if let Some(ref watch_dir) = args.watch_dir {
+        watch_dir.clone()
+    } else {
+        args.save_dir.unwrap_or_else(|| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+            PathBuf::from(home).join("Downloads").join("Torrents")
+        })
+    };
+
+    if !is_seeding
+        && let Err(e) = std::fs::create_dir_all(&save_dir)
+    {
         eprintln!(
             "Error: Failed to create save directory {}: {}",
             save_dir.display(),
@@ -218,14 +254,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = SessionConfig {
         port: args.port,
-        save_path: save_dir,
+        save_path: save_dir.clone(),
         enable_dht: true,
         ..Default::default()
     };
 
     let session = Session::new(config);
 
-    let torrent_id = if is_magnet {
+    let torrent_id = if is_seeding {
+        let torrent_info = parse_torrent_from_file(&args.torrent)?;
+        let content_dir = args.watch_dir.unwrap();
+        println!(
+            "Verifying and seeding: {}",
+            torrent_info.info.mode.name()
+        );
+        println!("Content directory: {}", content_dir.display());
+        match session.seed_torrent(torrent_info, content_dir).await {
+            Ok(id) => id,
+            Err(e) => {
+                eprintln!("Error starting seed: {}", e);
+                std::process::exit(1);
+            }
+        }
+    } else if is_magnet {
         match session.add_magnet(&args.torrent).await {
             Ok(id) => id,
             Err(e) => {
@@ -258,15 +309,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Status line updater
     let status_state_for_updater = status_state.clone();
     let mut status_ticker = interval(Duration::from_millis(500));
-    let mut shutting_down = false;
 
     loop {
         tokio::select! {
             _ = status_ticker.tick() => {
-                if shutting_down {
-                    continue;
-                }
-
                 // Get torrent info and update status line
                 match session.get_torrent(torrent_id).await {
                     Ok(Some(summary)) => {
@@ -292,15 +338,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             _ = shutdown_rx.recv() => {
-                if !shutting_down {
-                    shutting_down = true;
-                    println!("\nStopping torrent...");
+                println!("\nStopping torrent...");
 
-                    if let Err(e) = session.shutdown().await {
-                        eprintln!("Error during shutdown: {}", e);
-                    }
-                    break;
+                if let Err(e) = session.shutdown().await {
+                    eprintln!("Error during shutdown: {}", e);
                 }
+                break;
             }
         }
     }
