@@ -5,7 +5,7 @@
 
 use std::{
     collections::HashMap,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, LazyLock, RwLock},
 };
 
@@ -33,6 +33,7 @@ use crate::{
     storage::Storage,
     torrent::{Torrent, TorrentError, TorrentMessage, TorrentStats},
     types::{SessionConfig, SessionStats, TorrentId, TorrentState, TorrentSummary},
+    verify_torrent_file::verify_content,
 };
 
 /// Global client peer ID, generated once per process.
@@ -72,6 +73,11 @@ pub enum SessionCommand {
     },
     GetStats {
         resp: oneshot::Sender<SessionStats>,
+    },
+    SeedFile {
+        info: TorrentInfo,
+        content_dir: PathBuf,
+        resp: oneshot::Sender<Result<TorrentId, SessionError>>,
     },
     Shutdown {
         resp: oneshot::Sender<Result<(), SessionError>>,
@@ -179,6 +185,23 @@ impl Session {
             .send(SessionCommand::GetStats { resp: tx })
             .map_err(|_| SessionError::SessionClosed)?;
         rx.await.map_err(|_| SessionError::SessionClosed)
+    }
+
+    pub async fn seed_torrent(
+        &self,
+        info: TorrentInfo,
+        content_dir: PathBuf,
+    ) -> Result<TorrentId, SessionError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(SessionCommand::SeedFile {
+                info,
+                content_dir,
+                resp: tx,
+            })
+            .map_err(|_| SessionError::SessionClosed)?;
+
+        rx.await.map_err(|_| SessionError::SessionClosed)?
     }
 
     /// Shutdown the session gracefully.
@@ -301,6 +324,31 @@ impl SessionManager {
                     );
                     let _ = resp.send(result);
                 }
+                SessionCommand::SeedFile {
+                    info,
+                    content_dir,
+                    resp,
+                } => {
+                    // 1. Validate metadate from .torrent with  content_dir
+                    let is_valid = verify_content(&content_dir, &info).unwrap();
+
+                    let result = if is_valid {
+                        self.handle_seed_torrent(
+                            info,
+                            content_dir,
+                            &tracker,
+                            dht.as_ref(),
+                            &storage,
+                            &shutdown_rx,
+                        )
+                        .await
+                    } else {
+                        // TODO: Given metadata did not match with contents
+                        todo!("Return a proper session error");
+                    };
+
+                    let _ = resp.send(result);
+                }
                 SessionCommand::RemoveTorrent { id, resp } => {
                     let result = self.handle_remove_torrent(id).await;
                     let _ = resp.send(result);
@@ -324,6 +372,57 @@ impl SessionManager {
                 }
             }
         }
+    }
+
+    async fn handle_seed_torrent(
+        &self,
+        metainfo: TorrentInfo,
+        content_dir: PathBuf,
+        tracker: &Arc<TrackerHandler>,
+        dht: Option<&Arc<DhtHandler>>,
+        storage: &Arc<Storage>,
+        shutdown_rx: &watch::Receiver<()>,
+    ) -> Result<TorrentId, SessionError> {
+        let info_hash = metainfo.info_hash;
+
+        // Check for duplicates
+        {
+            let sessions = self.sessions.read().unwrap();
+            if sessions.contains_key(&info_hash) {
+                return Err(SessionError::TorrentAlreadyExists(info_hash));
+            }
+        }
+
+        tracing::info!(%metainfo);
+
+        let name = metainfo.info.mode.name().to_string();
+        let size_bytes = u64::try_from(metainfo.info.total_size()).expect("size is non-negative");
+
+        let (torrent, tx) = Torrent::as_seed(
+            content_dir,
+            metainfo,
+            tracker.clone(),
+            dht.cloned(),
+            storage.clone(),
+            shutdown_rx.clone(),
+            self.config.torrents_dir.clone(),
+        );
+
+        let handle = tokio::spawn(async move { torrent.start_session().await });
+
+        let entry = TorrentEntry {
+            tx,
+            handle,
+            name,
+            size_bytes,
+        };
+
+        {
+            let mut sessions = self.sessions.write().unwrap();
+            sessions.insert(info_hash, entry);
+        }
+
+        Ok(info_hash)
     }
 
     fn handle_add_torrent(

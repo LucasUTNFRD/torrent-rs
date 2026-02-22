@@ -46,6 +46,7 @@ mod session;
 mod storage;
 mod torrent;
 mod types;
+mod verify_torrent_file;
 
 pub use session::{Session, SessionError};
 pub use storage::Storage;

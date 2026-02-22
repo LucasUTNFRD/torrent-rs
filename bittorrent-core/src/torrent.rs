@@ -81,6 +81,12 @@ pub enum TorrentError {
 
     #[error("Invalid Magnet URI: {0}")]
     InvalidMagnet(String),
+
+    #[error("Verification error: {0}")]
+    Verification(String),
+
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 pub enum TorrentMessage {
@@ -178,7 +184,6 @@ pub struct Metrics {
 // TORRENT Control Structure
 //
 
-/// Torrent Struct for individual torrent files
 pub struct Torrent {
     info_hash: InfoHash,
 
@@ -208,6 +213,9 @@ pub struct Torrent {
 
     /// Directory for persisting .torrent files
     torrents_dir: PathBuf,
+
+    /// Custom content directory for seeding (None for leeching)
+    content_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -256,8 +264,9 @@ impl Torrent {
                 rx,
                 bitfield,
                 piece_mananger: None,
-                choker: Choker::new(4), // Default 4 upload slots
+                choker: Choker::new(4),
                 torrents_dir,
+                content_dir: None,
             },
             tx,
         )
@@ -299,8 +308,57 @@ impl Torrent {
                 rx,
                 bitfield: Bitfield::new(),
                 piece_mananger: None,
-                choker: Choker::new(4), // Default 4 upload slots
+                choker: Choker::new(4),
                 torrents_dir,
+                content_dir: None,
+            },
+            tx,
+        )
+    }
+
+    const DEFAULT_UPLOAD_SLOTS: usize = 4;
+
+    pub fn as_seed(
+        content_dir: PathBuf,
+        torrent_info: TorrentInfo,
+        tracker_client: Arc<TrackerHandler>,
+        dht_client: Option<Arc<DhtHandler>>,
+        storage: Arc<Storage>,
+        shutdown_rx: watch::Receiver<()>,
+        torrents_dir: PathBuf,
+    ) -> (Self, mpsc::Sender<TorrentMessage>) {
+        let info_hash = torrent_info.info_hash;
+        let trackers = torrent_info
+            .all_trackers()
+            .into_iter()
+            .filter_map(|url| Url::parse(&url).ok())
+            .collect();
+
+        let bitfield = Bitfield::with_all_set(torrent_info.num_pieces());
+
+        let metadata = Metadata::TorrentFile(Arc::new(torrent_info));
+
+        let (tx, rx) = mpsc::channel(64);
+
+        (
+            Self {
+                info_hash,
+                metadata,
+                state: TorrentState::Seeding,
+                trackers,
+                tracker_client,
+                dht_client,
+                storage,
+                metrics: Arc::new(Metrics::default()),
+                peers: HashMap::default(),
+                shutdown_rx,
+                tx: tx.clone(),
+                rx,
+                bitfield,
+                piece_mananger: None,
+                choker: Choker::new(Self::DEFAULT_UPLOAD_SLOTS),
+                torrents_dir,
+                content_dir: Some(content_dir),
             },
             tx,
         )
@@ -310,8 +368,11 @@ impl Torrent {
     info_hash=%self.info_hash,
     ))]
     pub async fn start_session(mut self) -> Result<(), TorrentError> {
-        self.init_interal().await;
-
+        match self.state {
+            TorrentState::Leeching => self.init_interal().await,
+            TorrentState::Seeding => self.init_seed().await,
+            TorrentState::Paused => {}
+        }
         // Star announcing to Trackers/DHT
         let (discovered_peers_tx, mut discovered_peers_rx) = mpsc::channel(16);
         self.announce(&discovered_peers_tx);
@@ -385,9 +446,15 @@ impl Torrent {
                 self.piece_mananger = Some(PieceManager::new(info.clone()));
 
                 if let Some((_, torrent_bytes)) = self.metadata.to_torrent_file() {
-                    let torrent_path = self.torrents_dir.join(format!("{}.torrent", self.info_hash));
+                    let torrent_path = self
+                        .torrents_dir
+                        .join(format!("{}.torrent", self.info_hash));
                     if let Err(e) = std::fs::write(&torrent_path, &torrent_bytes) {
-                        tracing::warn!("Failed to persist .torrent file to {}: {}", torrent_path.display(), e);
+                        tracing::warn!(
+                            "Failed to persist .torrent file to {}: {}",
+                            torrent_path.display(),
+                            e
+                        );
                     } else {
                         tracing::info!("Persisted .torrent file to {}", torrent_path.display());
                     }
@@ -397,6 +464,32 @@ impl Torrent {
                 panic!("called this in wrong state")
             }
         }
+    }
+
+    async fn init_seed(&mut self) {
+        let Some(content_dir) = &self.content_dir else {
+            tracing::error!("Cannot seed without content_dir");
+            return;
+        };
+
+        let info = match &self.metadata {
+            Metadata::TorrentFile(torrent_info) => torrent_info.info.clone(),
+            Metadata::MagnetUri { .. } => {
+                tracing::error!("Cannot seed from magnet URI - need complete metadata");
+                return;
+            }
+        };
+
+        if let Err(e) = self
+            .storage
+            .add_seed(self.info_hash, info.clone(), content_dir.clone())
+            .await
+        {
+            tracing::error!("Failed to register seed with storage: {}", e);
+            return;
+        }
+
+        self.piece_mananger = Some(PieceManager::new_all_have(info));
     }
 
     // TODO: implement a retry mechanism for failed peer
@@ -455,6 +548,13 @@ impl Torrent {
         let _ = peer_tx.try_send(PeerMessage::Connected {
             metrics: metrics_clone,
         });
+
+        // Send our bitfield if we have any pieces
+        if self.bitfield.size() > 0 && self.bitfield.iter_set().next().is_some() {
+            let _ = peer_tx.try_send(PeerMessage::SendBitfield {
+                bitfield: self.bitfield.clone(),
+            });
+        }
 
         let peer = PeerState {
             addr: peer_addr,
@@ -939,21 +1039,23 @@ impl Torrent {
             .await;
     }
 
-    // Announce torrent over Tracker and DHT
-    // internally creates dedicated tasks in charge of periodic announces
-    // it implements max peer control
-    // TODO: Have a signal handler that on SIGHUP Forces announce
+    // If we are seeding a file we are not interest in receiving peers
     fn announce(&self, discovered_peers_tx: &mpsc::Sender<Vec<SocketAddr>>) {
         let client_state = self.metadata.info().map_or_else(
             || ClientState::new(0, 0, 0, Events::Started),
             |info| {
+                let event = match self.state {
+                    TorrentState::Seeding => Events::Completed,
+                    TorrentState::Leeching => Events::Started,
+                    _ => Events::None,
+                };
                 ClientState::new(
                     0,
                     info.piece_length
                         * i64::try_from(info.pieces.len())
                             .expect("incoming info length > i64::MAX"),
                     0,
-                    Events::Started,
+                    event,
                 )
             },
         );
@@ -962,6 +1064,7 @@ impl Torrent {
         for announce_url in &self.trackers {
             let tracker_client = self.tracker_client.clone();
             let info_hash = self.info_hash;
+            // TODO: Why use .to_string()?
             let announce = announce_url.to_string();
             let discovered_peers_tx = discovered_peers_tx.clone();
             tokio::spawn(async move {
@@ -993,7 +1096,11 @@ impl Torrent {
         }
 
         // Spawn DHT discovery task (runs in parallel with tracker announces)
-        if let Some(dht) = self.dht_client.clone() {
+        // TODO: Announce method has an skectchy impl that only tries to announce in order to
+        // get_peers i need to read in detail BEP-5 to announce we are actually seeding a file
+        if let Some(dht) = self.dht_client.clone()
+            && self.state != TorrentState::Seeding
+        {
             let info_hash = self.info_hash;
             let discovered_peers_tx = discovered_peers_tx.clone();
             let port = 6881_u16; // TODO: Use actual listening port from session

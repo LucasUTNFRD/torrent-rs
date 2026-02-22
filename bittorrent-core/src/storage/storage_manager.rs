@@ -32,7 +32,7 @@ pub struct TorrentCache {
     pub metainfo: Arc<Info>,
     pub name: String,
     pub files: Arc<[FileInfo]>,
-    // Because pread()/pwrite() (used by FileExt::read_exact_at / write_all_at) are atomic -- they don't modify the file descriptor's internal seek position. Multiple threads can safely do positional I/O on the same File concurrently. Arc<File> lets us hand out a clone of the file handle to a spawn_blocking closure without holding the Mutex during the actual I/O.
+    pub content_dir: PathBuf,
     pub file_handles: Mutex<HashMap<PathBuf, Arc<File>>>,
 }
 
@@ -166,28 +166,23 @@ impl StorageState {
     }
 
     fn get_or_open_file(&self, cache: &TorrentCache, file_path: &Path) -> io::Result<Arc<File>> {
-        // Lock the per-torrent file handle cache.  This is the only
-        // Mutex -- its critical section is tiny (HashMap lookup + possible insert).
-        // The actual I/O happens AFTER we release this lock, on the Arc<File>.
         let mut handles = cache.file_handles.lock().unwrap();
 
         if let Some(file) = handles.get(file_path) {
             return Ok(Arc::clone(file));
         }
 
-        let torrent_root = self.download_dir.join(&cache.name);
-
         // First file opened for this torrent: ensure parent dirs exist.
         if handles.is_empty() {
             for fi in cache.files.iter() {
-                let full_path = torrent_root.join(&fi.path);
+                let full_path = cache.content_dir.join(&fi.path);
                 if let Some(parent) = full_path.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
             }
         }
 
-        let full_path = torrent_root.join(file_path);
+        let full_path = cache.content_dir.join(file_path);
         let file = Arc::new(open_file(&full_path)?);
         handles.insert(file_path.to_path_buf(), Arc::clone(&file));
         Ok(file)
@@ -196,9 +191,10 @@ impl StorageState {
     pub fn add_torrent(&self, info_hash: InfoHash, meta: Arc<Info>) {
         let name = meta.mode.name().to_string();
         let files = meta.files();
+        let content_dir = self.download_dir.join(&name);
 
         for fi in &files {
-            let full_path = self.download_dir.join(&name).join(&fi.path);
+            let full_path = content_dir.join(&fi.path);
 
             if let Some(parent) = full_path.parent()
                 && let Err(e) = std::fs::create_dir_all(parent)
@@ -216,6 +212,23 @@ impl StorageState {
                 metainfo: meta,
                 name,
                 files: files.into_boxed_slice().into(),
+                content_dir,
+                file_handles: Mutex::new(HashMap::new()),
+            }),
+        );
+    }
+
+    pub fn add_seed(&self, info_hash: InfoHash, meta: Arc<Info>, content_dir: PathBuf) {
+        let name = meta.mode.name().to_string();
+        let files = meta.files();
+
+        self.torrents.write().unwrap().insert(
+            info_hash,
+            Arc::new(TorrentCache {
+                metainfo: meta,
+                name,
+                files: files.into_boxed_slice().into(),
+                content_dir,
                 file_handles: Mutex::new(HashMap::new()),
             }),
         );
@@ -239,6 +252,15 @@ impl StorageManager {
                     result_tx,
                 } => {
                     self.storage.add_torrent(info_hash, meta);
+                    let _ = result_tx.send(Ok(()));
+                }
+                StorageMessage::AddSeed {
+                    info_hash,
+                    meta,
+                    content_dir,
+                    result_tx,
+                } => {
+                    self.storage.add_seed(info_hash, meta, content_dir);
                     let _ = result_tx.send(Ok(()));
                 }
                 StorageMessage::RemoveTorrent { id, result_tx } => {
