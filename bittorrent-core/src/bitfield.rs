@@ -206,6 +206,10 @@ impl Bitfield {
         let bit_idx = index % 8;
         (self.inner[byte_idx] & (MSB_MASK >> bit_idx)) != 0
     }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.inner
+    }
 }
 
 #[cfg(test)]

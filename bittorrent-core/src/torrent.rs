@@ -549,6 +549,13 @@ impl Torrent {
             metrics: metrics_clone,
         });
 
+        // Send our bitfield if we have any pieces
+        if self.bitfield.size() > 0 && self.bitfield.iter_set().next().is_some() {
+            let _ = peer_tx.try_send(PeerMessage::SendBitfield {
+                bitfield: self.bitfield.clone(),
+            });
+        }
+
         let peer = PeerState {
             addr: peer_addr,
             tx: peer_tx,

@@ -5,12 +5,11 @@ use bittorrent_common::metainfo::Info;
 use peer_protocol::protocol::{BlockInfo, Message};
 use tokio::{net::TcpStream, sync::mpsc};
 
-use crate::peer::metrics::PeerMetrics;
+use crate::{bitfield::Bitfield, peer::metrics::PeerMetrics};
 
 pub mod peer_connection;
 
 pub mod metrics;
-// Peer related
 
 #[derive(Debug, Clone)]
 pub enum PeerMessage {
@@ -18,14 +17,13 @@ pub enum PeerMessage {
         piece_index: u32,
     },
     SendBitfield {
-        bitfield: Vec<u8>,
+        bitfield: Bitfield,
     },
     SendChoke,
     SendUnchoke,
     Disconnect,
     SendMessage(Message),
     HaveMetadata(Arc<Info>),
-    /// Sent to peer after connection to share metrics Arc
     Connected {
         metrics: Arc<PeerMetrics>,
     },
