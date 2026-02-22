@@ -13,20 +13,14 @@ pub mod metrics;
 
 #[derive(Debug, Clone)]
 pub enum PeerMessage {
-    SendHave {
-        piece_index: u32,
-    },
-    SendBitfield {
-        bitfield: Bitfield,
-    },
+    SendHave { piece_index: u32 },
+    SendBitfield { bitfield: Bitfield },
     SendChoke,
     SendUnchoke,
     Disconnect,
     SendMessage(Message),
     HaveMetadata(Arc<Info>),
-    Connected {
-        metrics: Arc<PeerMetrics>,
-    },
+    Connected { metrics: Arc<PeerMetrics> },
 }
 
 pub struct PeerState {

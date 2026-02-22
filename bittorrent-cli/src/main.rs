@@ -122,7 +122,6 @@ fn format_bytes_per_second(bytes_per_sec: u64) -> String {
     format!("{}/s", format_bytes(bytes_per_sec))
 }
 
-
 fn get_status_line(summary: &TorrentSummary) -> String {
     let progress = summary.progress * 100.0;
     let state_str = match summary.state {
@@ -216,9 +215,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
     };
 
-    if !is_seeding
-        && let Err(e) = std::fs::create_dir_all(&save_dir)
-    {
+    if !is_seeding && let Err(e) = std::fs::create_dir_all(&save_dir) {
         eprintln!(
             "Error: Failed to create save directory {}: {}",
             save_dir.display(),
@@ -264,10 +261,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let torrent_id = if is_seeding {
         let torrent_info = parse_torrent_from_file(&args.torrent)?;
         let content_dir = args.watch_dir.unwrap();
-        println!(
-            "Verifying and seeding: {}",
-            torrent_info.info.mode.name()
-        );
+        println!("Verifying and seeding: {}", torrent_info.info.mode.name());
         println!("Content directory: {}", content_dir.display());
         match session.seed_torrent(torrent_info, content_dir).await {
             Ok(id) => id,

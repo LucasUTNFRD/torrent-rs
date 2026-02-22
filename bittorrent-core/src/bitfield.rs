@@ -342,7 +342,7 @@ mod test {
         assert_eq!(bitfield.inner[0], 0b10000001); // bits 0 and 7
         assert_eq!(bitfield.inner[1], 0b10000000); // bit 8
         assert_eq!(bitfield.inner[2], 0b00010000); // bit 19
-                                                   //
+        //
 
         let mut iter = bitfield.iter_set();
 
