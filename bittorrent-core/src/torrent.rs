@@ -81,6 +81,12 @@ pub enum TorrentError {
 
     #[error("Invalid Magnet URI: {0}")]
     InvalidMagnet(String),
+
+    #[error("Verification error: {0}")]
+    Verification(String),
+
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 pub enum TorrentMessage {
