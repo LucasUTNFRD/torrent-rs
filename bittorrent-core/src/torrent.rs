@@ -184,7 +184,6 @@ pub struct Metrics {
 // TORRENT Control Structure
 //
 
-/// Torrent Struct for individual torrent files
 pub struct Torrent {
     info_hash: InfoHash,
 
@@ -214,6 +213,9 @@ pub struct Torrent {
 
     /// Directory for persisting .torrent files
     torrents_dir: PathBuf,
+    
+    /// Custom content directory for seeding (None for leeching)
+    content_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -262,8 +264,9 @@ impl Torrent {
                 rx,
                 bitfield,
                 piece_mananger: None,
-                choker: Choker::new(4), // Default 4 upload slots
+                choker: Choker::new(4),
                 torrents_dir,
+                content_dir: None,
             },
             tx,
         )
@@ -305,8 +308,57 @@ impl Torrent {
                 rx,
                 bitfield: Bitfield::new(),
                 piece_mananger: None,
-                choker: Choker::new(4), // Default 4 upload slots
+                choker: Choker::new(4),
                 torrents_dir,
+                content_dir: None,
+            },
+            tx,
+        )
+    }
+
+    const DEFAULT_UPLOAD_SLOTS: usize = 4;
+
+    pub fn as_seed(
+        content_dir: PathBuf,
+        torrent_info: TorrentInfo,
+        tracker_client: Arc<TrackerHandler>,
+        dht_client: Option<Arc<DhtHandler>>,
+        storage: Arc<Storage>,
+        shutdown_rx: watch::Receiver<()>,
+        torrents_dir: PathBuf,
+    ) -> (Self, mpsc::Sender<TorrentMessage>) {
+        let info_hash = torrent_info.info_hash;
+        let trackers = torrent_info
+            .all_trackers()
+            .into_iter()
+            .filter_map(|url| Url::parse(&url).ok())
+            .collect();
+
+        let bitfield = Bitfield::with_all_set(torrent_info.num_pieces());
+
+        let metadata = Metadata::TorrentFile(Arc::new(torrent_info));
+
+        let (tx, rx) = mpsc::channel(64);
+
+        (
+            Self {
+                info_hash,
+                metadata,
+                state: TorrentState::Seeding,
+                trackers,
+                tracker_client,
+                dht_client,
+                storage,
+                metrics: Arc::new(Metrics::default()),
+                peers: HashMap::default(),
+                shutdown_rx,
+                tx: tx.clone(),
+                rx,
+                bitfield,
+                piece_mananger: None,
+                choker: Choker::new(Self::DEFAULT_UPLOAD_SLOTS),
+                torrents_dir,
+                content_dir: Some(content_dir),
             },
             tx,
         )
@@ -316,8 +368,11 @@ impl Torrent {
     info_hash=%self.info_hash,
     ))]
     pub async fn start_session(mut self) -> Result<(), TorrentError> {
-        self.init_interal().await;
-
+        match self.state {
+            TorrentState::Leeching => self.init_interal().await,
+            TorrentState::Seeding => self.init_seed().await,
+            TorrentState::Paused => {}
+        }
         // Star announcing to Trackers/DHT
         let (discovered_peers_tx, mut discovered_peers_rx) = mpsc::channel(16);
         self.announce(&discovered_peers_tx);
@@ -391,9 +446,15 @@ impl Torrent {
                 self.piece_mananger = Some(PieceManager::new(info.clone()));
 
                 if let Some((_, torrent_bytes)) = self.metadata.to_torrent_file() {
-                    let torrent_path = self.torrents_dir.join(format!("{}.torrent", self.info_hash));
+                    let torrent_path = self
+                        .torrents_dir
+                        .join(format!("{}.torrent", self.info_hash));
                     if let Err(e) = std::fs::write(&torrent_path, &torrent_bytes) {
-                        tracing::warn!("Failed to persist .torrent file to {}: {}", torrent_path.display(), e);
+                        tracing::warn!(
+                            "Failed to persist .torrent file to {}: {}",
+                            torrent_path.display(),
+                            e
+                        );
                     } else {
                         tracing::info!("Persisted .torrent file to {}", torrent_path.display());
                     }
@@ -403,6 +464,32 @@ impl Torrent {
                 panic!("called this in wrong state")
             }
         }
+    }
+
+    async fn init_seed(&mut self) {
+        let Some(content_dir) = &self.content_dir else {
+            tracing::error!("Cannot seed without content_dir");
+            return;
+        };
+
+        let info = match &self.metadata {
+            Metadata::TorrentFile(torrent_info) => torrent_info.info.clone(),
+            Metadata::MagnetUri { .. } => {
+                tracing::error!("Cannot seed from magnet URI - need complete metadata");
+                return;
+            }
+        };
+
+        if let Err(e) = self
+            .storage
+            .add_seed(self.info_hash, info.clone(), content_dir.clone())
+            .await
+        {
+            tracing::error!("Failed to register seed with storage: {}", e);
+            return;
+        }
+
+        self.piece_mananger = Some(PieceManager::new_all_have(info));
     }
 
     // TODO: implement a retry mechanism for failed peer

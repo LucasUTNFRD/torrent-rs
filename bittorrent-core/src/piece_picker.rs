@@ -124,11 +124,33 @@ impl PieceManager {
         }
     }
 
+    pub fn new_all_have(torrent_info: Arc<Info>) -> Self {
+        let pieces: Vec<_> = (0..torrent_info.num_pieces())
+            .map(|i| {
+                let piece_len = torrent_info.get_piece_len(i);
+                let blocks = Self::create_blocks_for_piece_downloaded(i, piece_len);
+
+                PieceMetadata {
+                    index: i,
+                    num_peer: 0,
+                    state: PieceState::Have,
+                    blocks,
+                    buffer: None,
+                }
+            })
+            .collect();
+
+        Self {
+            pieces,
+            heat: HashMap::new(),
+            torrent_info,
+        }
+    }
+
     pub fn have_all_pieces(&self) -> bool {
         self.pieces.iter().all(|p| p.state == PieceState::Have)
     }
 
-    /// Create block metadata for a piece based on its length
     fn create_blocks_for_piece(piece_index: usize, piece_len: u32) -> Vec<BlockMetadata> {
         let mut blocks = Vec::new();
         let mut offset = 0;
@@ -139,6 +161,26 @@ impl PieceManager {
                 offset,
                 length,
                 state: BlockState::NotRequested,
+            });
+            offset += length;
+        }
+
+        blocks
+    }
+
+    fn create_blocks_for_piece_downloaded(
+        piece_index: usize,
+        piece_len: u32,
+    ) -> Vec<BlockMetadata> {
+        let mut blocks = Vec::new();
+        let mut offset = 0;
+
+        while offset < piece_len {
+            let length = BLOCK_SIZE.min(piece_len - offset);
+            blocks.push(BlockMetadata {
+                offset,
+                length,
+                state: BlockState::Downloaded,
             });
             offset += length;
         }
