@@ -53,6 +53,19 @@ impl Bitfield {
         }
     }
 
+    pub fn with_all_set(num_pieces: usize) -> Self {
+        let nbytes = num_pieces.div_ceil(8);
+        let mut inner = vec![0xFF; nbytes];
+
+        let remainder = num_pieces % 8;
+        if remainder != 0 && !inner.is_empty() {
+            let mask: u8 = 0xFF << (8 - remainder);
+            *inner.last_mut().unwrap() &= mask;
+        }
+
+        Self { inner, num_pieces }
+    }
+
     pub fn from_bytes_checked(payload: Bytes, num_pieces: usize) -> Result<Self, BitfieldError> {
         let expected_bytes = num_pieces.div_ceil(8);
 
@@ -192,6 +205,10 @@ impl Bitfield {
         let byte_idx = index / 8;
         let bit_idx = index % 8;
         (self.inner[byte_idx] & (MSB_MASK >> bit_idx)) != 0
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.inner
     }
 }
 
@@ -420,11 +437,9 @@ mod test {
 
     #[test]
     fn test_bitfield_from_all_pieces() {
-        // Simulate a seeder with all pieces
         let num_pieces = 23;
-        let mut payload = vec![0xFF, 0xFF, 0xFF]; // All bits set
+        let mut payload = vec![0xFF, 0xFF, 0xFF];
 
-        // Clear the spare bits in the last byte
         let spare_bits = 8 - (num_pieces % 8);
         if spare_bits < 8 {
             let last_idx = payload.len() - 1;
@@ -440,8 +455,34 @@ mod test {
         }
     }
 
+    #[test]
+    fn test_with_all_set() {
+        let num_pieces = 23;
+        let bitfield = Bitfield::with_all_set(num_pieces);
+
+        assert_eq!(bitfield.size(), 23);
+        for i in 0..num_pieces {
+            assert!(bitfield.has(i), "Piece {} should be set", i);
+        }
+
+        assert_eq!(bitfield.inner[0], 0xFF);
+        assert_eq!(bitfield.inner[1], 0xFF);
+        assert_eq!(bitfield.inner[2], 0b11111110);
+    }
+
+    #[test]
+    fn test_with_all_set_exact_multiple() {
+        let bitfield = Bitfield::with_all_set(16);
+
+        assert_eq!(bitfield.size(), 16);
+        for i in 0..16 {
+            assert!(bitfield.has(i));
+        }
+        assert_eq!(bitfield.inner[0], 0xFF);
+        assert_eq!(bitfield.inner[1], 0xFF);
+    }
+
     // implement a test on iter set
     // like simulating us comparing our bitfield to peer to check if we should be interested
     // and assure that there are not malfunctions neither panics.
-    //
 }

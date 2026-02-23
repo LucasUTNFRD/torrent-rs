@@ -181,6 +181,7 @@ pub struct Connected {
 
     metadata_size: usize,
 
+    // remote peer bitfield
     bitfield: BitfieldState,
 }
 
@@ -363,15 +364,15 @@ impl Peer<Connected> {
     fn metric_update(&mut self) {
         self.state.metrics.update_rates();
 
-        debug!(
-            "dr : {} | choked: {} | interested: {} | max_queue_size : {}, outgoing_requests: {} | slow_start : {}",
-            self.state.metrics.get_download_rate_human(),
-            self.state.choked,
-            self.state.interesting,
-            self.state.target_request_queue,
-            self.state.outgoing_request.len(),
-            self.state.slow_start
-        );
+        // debug!(
+        //     "dr : {} | choked: {} | interested: {} | max_queue_size : {}, outgoing_requests: {} | slow_start : {}",
+        //     self.state.metrics.get_download_rate_human(),
+        //     self.state.choked,
+        //     self.state.interesting,
+        //     self.state.target_request_queue,
+        //     self.state.outgoing_request.len(),
+        //     self.state.slow_start
+        // );
 
         let current_rate = self.state.metrics.get_download_rate();
         if self.state.slow_start {
@@ -453,7 +454,17 @@ impl Peer<Connected> {
                     self.state.sink.send(Message::Have { piece_index }).await?;
                 }
             }
-            PeerMessage::SendBitfield { bitfield } => todo!(),
+            PeerMessage::SendBitfield { bitfield } => {
+                if !bitfield.as_bytes().is_empty() {
+                    self.state
+                        .sink
+                        .send(Message::Bitfield(bytes::Bytes::copy_from_slice(
+                            bitfield.as_bytes(),
+                        )))
+                        .await?;
+                    debug!("Sent bitfield to peer");
+                }
+            }
             PeerMessage::SendChoke => {
                 self.state.metrics.reset_since_unchoked();
                 self.state.choked = true;

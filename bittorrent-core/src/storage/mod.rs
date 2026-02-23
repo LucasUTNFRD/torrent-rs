@@ -39,6 +39,12 @@ pub enum StorageMessage {
         meta: Arc<Info>,
         result_tx: oneshot::Sender<Result<(), StorageError>>,
     },
+    AddSeed {
+        info_hash: InfoHash,
+        meta: Arc<Info>,
+        content_dir: PathBuf,
+        result_tx: oneshot::Sender<Result<(), StorageError>>,
+    },
     RemoveTorrent {
         id: InfoHash,
         result_tx: oneshot::Sender<Result<(), StorageError>>,
@@ -115,6 +121,28 @@ impl Storage {
             .send(StorageMessage::AddTorrent {
                 info_hash,
                 meta: torrent,
+                result_tx,
+            })
+            .await?;
+        result_rx.await.map_err(|_| StorageError::ChannelClosed)?
+    }
+
+    /// Register a torrent for seeding with existing content.
+    ///
+    /// # Errors
+    /// Returns `StorageError::ChannelClosed` if the storage actor has shut down.
+    pub async fn add_seed(
+        &self,
+        info_hash: InfoHash,
+        torrent: Arc<Info>,
+        content_dir: PathBuf,
+    ) -> Result<(), StorageError> {
+        let (result_tx, result_rx) = oneshot::channel();
+        self.tx
+            .send(StorageMessage::AddSeed {
+                info_hash,
+                meta: torrent,
+                content_dir,
                 result_tx,
             })
             .await?;

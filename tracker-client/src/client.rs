@@ -118,7 +118,7 @@ impl TrackerManager {
             uploaded: client_state.uploaded,
             downloaded: client_state.downloaded,
             left: client_state.left,
-            event: Events::Started,
+            event: client_state.event,
         };
 
         let client = clients.select_client_for_scheme(url.scheme())?;
