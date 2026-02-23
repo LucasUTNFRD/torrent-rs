@@ -17,6 +17,21 @@ This project implements a functional BitTorrent client with support for download
 | BEP 15 | UDP Tracker | [bep_0015](https://www.bittorrent.org/beps/bep_0015.html) |
 | BEP 23 | Tracker Return Compact | [bep_0023](https://www.bittorrent.org/beps/bep_0023.html) |
 
+## Crates
+
+| Crate | Description |
+|-------|-------------|
+| `bittorrent-cli` | Command-line interface for downloading and seeding |
+| `bittorrent-daemon` | Headless daemon service (binary: `btd`) |
+| `bittorrent-remote` | Remote control client for the daemon |
+| `bittorrent-core` | Core session management and coordination |
+| `bittorrent-common` | Shared types, metainfo parsing, utilities |
+| `bencode` | Bencode encoding/decoding library |
+| `peer-protocol` | BitTorrent wire protocol implementation |
+| `tracker-client` | HTTP and UDP tracker client |
+| `mainline-dht` | DHT protocol implementation (BEP 5) |
+| `magnet-uri` | Magnet URI parsing |
+
 ## Build
 
 ```bash
@@ -61,3 +76,7 @@ cargo run -p bittorrent-cli -- path/to/file.torrent --watch-dir /path/to/content
 | `--save-dir, -d` | Directory to save downloaded files | `$HOME/Downloads/Torrents` |
 | `--watch-dir, -w` | Directory containing files to seed | - |
 | `--log-level` | Log level (error, warn, info, debug, trace) | info |
+
+## License
+
+MIT

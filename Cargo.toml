@@ -12,7 +12,12 @@ members = [
   "tracker-client",
 ]
 
-resolver = "2" # Recommended for new workspaces
+resolver = "2"
+
+[workspace.package]
+license = "MIT"
+edition = "2024"
+repository = "https://github.com/LucasUTNFRD/torrent-rs"
 
 [workspace.dependencies]
 sha1 = "0.10"
