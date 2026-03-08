@@ -20,6 +20,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
     sync::{
+        broadcast,
         mpsc::{self, UnboundedSender},
         oneshot, watch,
     },
@@ -32,7 +33,7 @@ use tracker_client::TrackerHandler;
 use crate::{
     storage::Storage,
     torrent::{Torrent, TorrentError, TorrentMessage, TorrentStats},
-    types::{SessionConfig, SessionStats, TorrentId, TorrentState, TorrentSummary},
+    types::{SessionConfig, SessionEvent, SessionStats, TorrentId, TorrentState, TorrentSummary},
     verify_torrent_file::verify_content,
 };
 
@@ -48,6 +49,8 @@ pub struct Session {
     pub handle: JoinHandle<()>,
     /// Channel for sending commands to the ``SessionManager``
     tx: UnboundedSender<SessionCommand>,
+    /// Sender side of the event broadcast channel, used to create new subscribers
+    event_tx: broadcast::Sender<SessionEvent>,
 }
 
 /// Commands sent from Session to ``SessionManager``.
@@ -116,10 +119,26 @@ impl Session {
     #[must_use]
     pub fn new(config: SessionConfig) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
+        let (event_tx, _) = broadcast::channel(64);
 
-        let manager = SessionManager::new(config, rx);
+        let manager = SessionManager::new(config, rx, event_tx.clone());
         let handle = tokio::task::spawn(async move { manager.start().await });
-        Self { handle, tx }
+        Self {
+            handle,
+            tx,
+            event_tx,
+        }
+    }
+
+    /// Subscribe to session events.
+    ///
+    /// Returns a broadcast receiver that will receive events such as
+    /// [`SessionEvent::TorrentCompleted`] when a torrent finishes downloading.
+    ///
+    /// Multiple subscribers can be active simultaneously. Each subscriber
+    /// receives all events independently.
+    pub fn subscribe(&self) -> broadcast::Receiver<SessionEvent> {
+        self.event_tx.subscribe()
     }
 
     /// Add a torrent from a .torrent file.
@@ -234,16 +253,23 @@ struct SessionManager {
     rx: mpsc::UnboundedReceiver<SessionCommand>,
     sessions: Arc<RwLock<HashMap<InfoHash, TorrentEntry>>>,
     dht_enabled: bool,
+    /// Broadcast sender cloned into each Torrent for emitting session events
+    event_tx: broadcast::Sender<SessionEvent>,
 }
 
 impl SessionManager {
-    pub fn new(config: SessionConfig, rx: mpsc::UnboundedReceiver<SessionCommand>) -> Self {
+    pub fn new(
+        config: SessionConfig,
+        rx: mpsc::UnboundedReceiver<SessionCommand>,
+        event_tx: broadcast::Sender<SessionEvent>,
+    ) -> Self {
         let dht_enabled = config.enable_dht;
         Self {
             config,
             rx,
             sessions: Arc::new(RwLock::new(HashMap::new())),
             dht_enabled,
+            event_tx,
         }
     }
 
@@ -406,6 +432,7 @@ impl SessionManager {
             storage.clone(),
             shutdown_rx.clone(),
             self.config.torrents_dir.clone(),
+            self.event_tx.clone(),
         );
 
         let handle = tokio::spawn(async move { torrent.start_session().await });
@@ -455,6 +482,7 @@ impl SessionManager {
             storage.clone(),
             shutdown_rx.clone(),
             self.config.torrents_dir.clone(),
+            self.event_tx.clone(),
         );
 
         let handle = tokio::spawn(async move { torrent.start_session().await });
@@ -515,6 +543,7 @@ impl SessionManager {
             storage.clone(),
             shutdown_rx.clone(),
             self.config.torrents_dir.clone(),
+            self.event_tx.clone(),
         );
 
         let handle = tokio::spawn(async move { torrent.start_session().await });
