@@ -14,6 +14,16 @@ use directories::ProjectDirs;
 /// making it a globally unique and stable identifier.
 pub type TorrentId = InfoHash;
 
+/// Events emitted by the session.
+///
+/// Subscribe to these via [`Session::subscribe()`] to react to
+/// torrent lifecycle changes.
+#[derive(Debug, Clone)]
+pub enum SessionEvent {
+    /// A torrent has finished downloading all pieces and transitioned to seeding.
+    TorrentCompleted(TorrentId),
+}
+
 /// Current state of a torrent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TorrentState {

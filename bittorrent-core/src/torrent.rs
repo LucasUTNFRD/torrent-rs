@@ -20,7 +20,7 @@ use peer_protocol::protocol::{Block, BlockInfo, Message};
 use thiserror::Error;
 use tokio::{
     net::TcpStream,
-    sync::{mpsc, oneshot, watch},
+    sync::{broadcast, mpsc, oneshot, watch},
     time::sleep,
 };
 use tracing::{debug, field::debug, info, instrument, warn};
@@ -38,6 +38,7 @@ use crate::{
         peer_connection::{ConnectionError, spawn_inbound_peer, spawn_outgoing_peer},
     },
     piece_picker::{AvailabilityUpdate, BlockRequest, PieceManager, PieceState},
+    types::SessionEvent,
 };
 
 // Peer related
@@ -203,6 +204,9 @@ pub struct Torrent {
     tx: mpsc::Sender<TorrentMessage>,
     rx: mpsc::Receiver<TorrentMessage>,
 
+    /// Channel for emitting session-level events (e.g. download completed)
+    event_tx: broadcast::Sender<SessionEvent>,
+
     // Download related
     piece_mananger: Option<PieceManager>,
     choker: Choker,
@@ -234,6 +238,7 @@ impl Torrent {
         storage: Arc<Storage>,
         shutdown_rx: watch::Receiver<()>,
         torrents_dir: PathBuf,
+        event_tx: broadcast::Sender<SessionEvent>,
     ) -> (Self, mpsc::Sender<TorrentMessage>) {
         let info_hash = torrent_info.info_hash;
         let trackers = torrent_info
@@ -262,6 +267,7 @@ impl Torrent {
                 shutdown_rx,
                 tx: tx.clone(),
                 rx,
+                event_tx,
                 bitfield,
                 piece_mananger: None,
                 choker: Choker::new(4),
@@ -280,6 +286,7 @@ impl Torrent {
         storage: Arc<Storage>,
         shutdown_rx: watch::Receiver<()>,
         torrents_dir: PathBuf,
+        event_tx: broadcast::Sender<SessionEvent>,
     ) -> (Self, mpsc::Sender<TorrentMessage>) {
         let info_hash = magnet.info_hash().expect("InfoHash is a mandatory field");
 
@@ -306,6 +313,7 @@ impl Torrent {
                 peers: HashMap::default(),
                 tx: tx.clone(),
                 rx,
+                event_tx,
                 bitfield: Bitfield::new(),
                 piece_mananger: None,
                 choker: Choker::new(4),
@@ -326,6 +334,7 @@ impl Torrent {
         storage: Arc<Storage>,
         shutdown_rx: watch::Receiver<()>,
         torrents_dir: PathBuf,
+        event_tx: broadcast::Sender<SessionEvent>,
     ) -> (Self, mpsc::Sender<TorrentMessage>) {
         let info_hash = torrent_info.info_hash;
         let trackers = torrent_info
@@ -354,6 +363,7 @@ impl Torrent {
                 shutdown_rx,
                 tx: tx.clone(),
                 rx,
+                event_tx,
                 bitfield,
                 piece_mananger: None,
                 choker: Choker::new(Self::DEFAULT_UPLOAD_SLOTS),
@@ -942,6 +952,11 @@ impl Torrent {
             } else {
                 info!("Torrent Download Completed");
             }
+
+            // Notify subscribers that this torrent has completed
+            let _ = self
+                .event_tx
+                .send(SessionEvent::TorrentCompleted(self.info_hash));
         }
     }
 
