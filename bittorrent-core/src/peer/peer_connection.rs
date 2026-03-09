@@ -6,7 +6,10 @@ use std::{
 };
 
 use bencode::Bencode;
-use bittorrent_common::{metainfo::Info, types::InfoHash};
+use bittorrent_common::{
+    metainfo::Info,
+    types::{InfoHash, PeerID},
+};
 use bytes::{Bytes, BytesMut};
 use futures::{
     SinkExt, StreamExt,
@@ -135,6 +138,14 @@ impl Peer<Handshaking> {
             debug!("Handshake failed: info hash mismatch");
             return Err(ConnectionError::InvalidHandshake);
         }
+
+        let _ = self
+            .torrent_tx
+            .send(TorrentMessage::PeerHandshake {
+                pid: self.pid,
+                peer_id: remote_handshake.peer_id,
+            })
+            .await;
 
         let supports_extended = remote_handshake.support_extended_message();
 
@@ -1152,10 +1163,15 @@ pub fn spawn_inbound_peer(
     stream: TcpStream,
     supports_extended: bool,
     info_hash: InfoHash,
+    peer_id: PeerID,
     torrent_tx: mpsc::Sender<TorrentMessage>,
     cmd_rx: mpsc::Receiver<PeerMessage>,
 ) {
     tokio::spawn(async move {
+        let _ = torrent_tx
+            .send(TorrentMessage::PeerHandshake { pid, peer_id })
+            .await;
+
         let peer: Peer<Connected> = Peer {
             state: Connected::new(stream, supports_extended),
             addr,

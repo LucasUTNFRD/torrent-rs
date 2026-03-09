@@ -45,7 +45,7 @@ mod piece_picker;
 mod session;
 mod storage;
 mod torrent;
-mod types;
+pub mod types;
 mod verify_torrent_file;
 
 pub use session::{Session, SessionError};

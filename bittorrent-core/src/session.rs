@@ -32,7 +32,7 @@ use tracker_client::TrackerHandler;
 use crate::{
     storage::Storage,
     torrent::{Torrent, TorrentError, TorrentMessage, TorrentStats},
-    types::{SessionConfig, SessionStats, TorrentId, TorrentState, TorrentSummary},
+    types::{SessionConfig, SessionStats, TorrentDetails, TorrentId, TorrentState, TorrentSummary},
     verify_torrent_file::verify_content,
 };
 
@@ -70,6 +70,10 @@ pub enum SessionCommand {
     GetTorrent {
         id: TorrentId,
         resp: oneshot::Sender<Option<TorrentSummary>>,
+    },
+    GetTorrentDetails {
+        id: TorrentId,
+        resp: oneshot::Sender<Option<TorrentDetails>>,
     },
     GetStats {
         resp: oneshot::Sender<SessionStats>,
@@ -174,6 +178,18 @@ impl Session {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(SessionCommand::GetTorrent { id, resp: tx })
+            .map_err(|_| SessionError::SessionClosed)?;
+        rx.await.map_err(|_| SessionError::SessionClosed)
+    }
+
+    /// Get detailed information about a specific torrent.
+    pub async fn get_torrent_details(
+        &self,
+        id: TorrentId,
+    ) -> Result<Option<TorrentDetails>, SessionError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(SessionCommand::GetTorrentDetails { id, resp: tx })
             .map_err(|_| SessionError::SessionClosed)?;
         rx.await.map_err(|_| SessionError::SessionClosed)
     }
@@ -359,6 +375,10 @@ impl SessionManager {
                 }
                 SessionCommand::GetTorrent { id, resp } => {
                     let info = self.handle_get_torrent(id).await;
+                    let _ = resp.send(info);
+                }
+                SessionCommand::GetTorrentDetails { id, resp } => {
+                    let info = self.handle_get_torrent_details(id).await;
                     let _ = resp.send(info);
                 }
                 SessionCommand::GetStats { resp } => {
@@ -602,6 +622,9 @@ impl SessionManager {
                     peers_discovered: 0,
                     downloaded_bytes: 0,
                     uploaded_bytes: 0,
+                    peers: Vec::new(),
+                    trackers: Vec::new(),
+                    files: Vec::new(),
                 }
             }
         };
@@ -627,6 +650,53 @@ impl SessionManager {
             peers_discovered: stats.peers_discovered,
             size_bytes,
             downloaded_bytes: stats.downloaded_bytes,
+        })
+    }
+
+    async fn handle_get_torrent_details(&self, id: TorrentId) -> Option<TorrentDetails> {
+        let (tx, name, size_bytes) = {
+            let sessions = self.sessions.read().unwrap();
+            let entry = sessions.get(&id)?;
+            (entry.tx.clone(), entry.name.clone(), entry.size_bytes)
+        };
+
+        // Query torrent for stats
+        let (stats_tx, stats_rx) = oneshot::channel();
+        let _ = tx.send(TorrentMessage::GetStats { resp: stats_tx }).await;
+
+        let stats = match stats_rx.await {
+            Ok(stats) => stats,
+            Err(_) => return None,
+        };
+
+        let summary = TorrentSummary {
+            id,
+            name,
+            state: match stats.state {
+                crate::torrent::TorrentState::Seeding => TorrentState::Seeding,
+                crate::torrent::TorrentState::Leeching => {
+                    if stats.progress == 0.0 && size_bytes > 0 {
+                        TorrentState::Checking
+                    } else {
+                        TorrentState::Downloading
+                    }
+                }
+                crate::torrent::TorrentState::Paused => TorrentState::Paused,
+            },
+            progress: stats.progress,
+            download_rate: stats.download_rate,
+            upload_rate: stats.upload_rate,
+            peers_connected: stats.peers_connected,
+            peers_discovered: stats.peers_discovered,
+            size_bytes,
+            downloaded_bytes: stats.downloaded_bytes,
+        };
+
+        Some(TorrentDetails {
+            summary,
+            peers: stats.peers,
+            trackers: stats.trackers,
+            files: stats.files,
         })
     }
 
@@ -759,6 +829,7 @@ impl SessionManager {
                                 stream,
                                 remote_addr,
                                 supports_ext,
+                                peer_id: remote_handshake.peer_id,
                             })
                             .await;
                     }
