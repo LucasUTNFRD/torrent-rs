@@ -11,7 +11,7 @@ use std::{
 
 use bittorrent_common::{
     metainfo::{Info, TorrentInfo},
-    types::InfoHash,
+    types::{InfoHash, PeerID},
 };
 use bytes::Bytes;
 use magnet_uri::Magnet;
@@ -38,6 +38,7 @@ use crate::{
         peer_connection::{ConnectionError, spawn_inbound_peer, spawn_outgoing_peer},
     },
     piece_picker::{AvailabilityUpdate, BlockRequest, PieceManager, PieceState},
+    types::{PeerInfo, TrackerInfo, FileInfo, TorrentState as PublicTorrentState},
 };
 
 // Peer related
@@ -56,6 +57,7 @@ pub enum PeerSource {
         stream: TcpStream,
         remote_addr: SocketAddr,
         supports_ext: bool,
+        peer_id: PeerID,
     },
     Outbound(SocketAddr), // Socket to connect + Our peer id
 }
@@ -67,6 +69,7 @@ impl PeerSource {
                 stream: _,
                 remote_addr,
                 supports_ext: _,
+                peer_id: _,
             }
             | Self::Outbound(remote_addr) => remote_addr,
         }
@@ -92,6 +95,10 @@ pub enum TorrentError {
 pub enum TorrentMessage {
     PeerDisconnected(Pid, Option<Bitfield>),
     PeerError(Pid, ConnectionError, Option<Bitfield>),
+    PeerHandshake {
+        pid: Pid,
+        peer_id: PeerID,
+    },
     ValidMetadata {
         resp: oneshot::Sender<Option<Arc<Info>>>,
     },
@@ -148,6 +155,7 @@ pub enum TorrentMessage {
         stream: TcpStream,
         remote_addr: SocketAddr,
         supports_ext: bool,
+        peer_id: PeerID,
     },
     /// Get torrent statistics
     GetStats {
@@ -166,6 +174,9 @@ pub struct TorrentStats {
     pub peers_discovered: usize,
     pub downloaded_bytes: u64,
     pub uploaded_bytes: u64,
+    pub peers: Vec<PeerInfo>,
+    pub trackers: Vec<TrackerInfo>,
+    pub files: Vec<FileInfo>,
 }
 
 //
@@ -180,6 +191,13 @@ pub struct Metrics {
     pub peers_discovered: AtomicUsize,
 }
 
+#[derive(Debug, Clone)]
+struct TrackerState {
+    url: Url,
+    error: Option<String>,
+    last_report: Option<chrono::DateTime<chrono::Utc>>,
+}
+
 //
 // TORRENT Control Structure
 //
@@ -190,14 +208,14 @@ pub struct Torrent {
     /// metadata and metadata state of the torrent
     metadata: Metadata,
     state: TorrentState,
-    trackers: Vec<Url>,
+    trackers: HashMap<Url, TrackerState>,
 
     tracker_client: Arc<TrackerHandler>,
     dht_client: Option<Arc<DhtHandler>>,
     storage: Arc<Storage>,
 
     metrics: Arc<Metrics>,
-    peers: HashMap<Pid, PeerState>,
+    peers: HashMap<Pid, InternalPeerState>,
 
     // channels
     tx: mpsc::Sender<TorrentMessage>,
@@ -225,6 +243,14 @@ pub enum TorrentState {
     Leeching,
 }
 
+struct InternalPeerState {
+    addr: SocketAddr,
+    peer_id: Option<PeerID>,
+    tx: mpsc::Sender<PeerMessage>,
+    metrics: Arc<PeerMetrics>,
+    pending_requests: Vec<BlockInfo>,
+}
+
 impl Torrent {
     /// Create a new Torrent from a .torrent file (with complete metadata)
     pub fn from_torrent_info(
@@ -239,7 +265,18 @@ impl Torrent {
         let trackers = torrent_info
             .all_trackers()
             .into_iter()
-            .filter_map(|url| Url::parse(&url).ok())
+            .filter_map(|url| {
+                Url::parse(&url).ok().map(|u| {
+                    (
+                        u.clone(),
+                        TrackerState {
+                            url: u,
+                            error: None,
+                            last_report: None,
+                        },
+                    )
+                })
+            })
             .collect();
 
         let bitfield = Bitfield::with_size(torrent_info.num_pieces());
@@ -283,7 +320,21 @@ impl Torrent {
     ) -> (Self, mpsc::Sender<TorrentMessage>) {
         let info_hash = magnet.info_hash().expect("InfoHash is a mandatory field");
 
-        let trackers = magnet.trackers.clone();
+        let trackers = magnet
+            .trackers
+            .clone()
+            .into_iter()
+            .map(|u| {
+                (
+                    u.clone(),
+                    TrackerState {
+                        url: u,
+                        error: None,
+                        last_report: None,
+                    },
+                )
+            })
+            .collect();
 
         let metadata = Metadata::MagnetUri {
             magnet,
@@ -331,7 +382,18 @@ impl Torrent {
         let trackers = torrent_info
             .all_trackers()
             .into_iter()
-            .filter_map(|url| Url::parse(&url).ok())
+            .filter_map(|url| {
+                Url::parse(&url).ok().map(|u| {
+                    (
+                        u.clone(),
+                        TrackerState {
+                            url: u,
+                            error: None,
+                            last_report: None,
+                        },
+                    )
+                })
+            })
             .collect();
 
         let bitfield = Bitfield::with_all_set(torrent_info.num_pieces());
@@ -506,8 +568,8 @@ impl Torrent {
         }
 
         // Create peer info
-        let peer_id = PEER_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let peer_id = Pid(peer_id);
+        let peer_id_counter = PEER_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let pid = Pid(peer_id_counter);
 
         let (peer_tx, peer_rx) = mpsc::channel(64);
 
@@ -526,17 +588,19 @@ impl Torrent {
                 stream,
                 remote_addr,
                 supports_ext,
-            } => spawn_inbound_peer(
                 peer_id,
+            } => spawn_inbound_peer(
+                pid,
                 remote_addr,
                 stream,
                 supports_ext,
                 self.info_hash,
+                peer_id,
                 self.tx.clone(),
                 peer_rx,
             ),
             PeerSource::Outbound(remote_addr) => spawn_outgoing_peer(
-                peer_id,
+                pid,
                 remote_addr,
                 self.info_hash,
                 self.tx.clone(),
@@ -556,14 +620,15 @@ impl Torrent {
             });
         }
 
-        let peer = PeerState {
+        let peer = InternalPeerState {
             addr: peer_addr,
+            peer_id: None,
             tx: peer_tx,
             metrics: shared_metrics,
             pending_requests: Vec::new(),
         };
 
-        self.peers.insert(peer_id, peer);
+        self.peers.insert(pid, peer);
     }
 
     async fn handle_message(&mut self, msg: TorrentMessage) -> Result<(), TorrentError> {
@@ -601,6 +666,11 @@ impl Torrent {
             }
             TorrentMessage::PeerError(pid, err, bitfield) => {
                 self.clean_up_peer(pid, bitfield).await;
+            }
+            TorrentMessage::PeerHandshake { pid, peer_id } => {
+                if let Some(peer) = self.peers.get_mut(&pid) {
+                    peer.peer_id = Some(peer_id);
+                }
             }
             TorrentMessage::Have { pid, piece_idx } => {
                 let p = self.piece_mananger.as_mut().expect("init");
@@ -752,12 +822,14 @@ impl Torrent {
                 stream,
                 remote_addr,
                 supports_ext,
+                peer_id,
             } => {
                 info!("Received inbound peer connection from {}", remote_addr);
                 self.add_peer(PeerSource::Inbound {
                     stream,
                     remote_addr,
                     supports_ext,
+                    peer_id,
                 });
             }
             TorrentMessage::GetStats { resp } => {
@@ -776,11 +848,23 @@ impl Torrent {
         let mut downloaded_bytes = 0u64;
         let mut uploaded_bytes = 0u64;
 
+        let mut peer_infos = Vec::new();
+
         for peer in self.peers.values() {
-            total_download_rate += peer.metrics.get_download_rate();
-            total_upload_rate += peer.metrics.get_upload_rate();
+            let dr = peer.metrics.get_download_rate();
+            let ur = peer.metrics.get_upload_rate();
+            total_download_rate += dr;
+            total_upload_rate += ur;
             downloaded_bytes += peer.metrics.get_bytes_downloaded();
             uploaded_bytes += peer.metrics.get_bytes_uploaded();
+
+            peer_infos.push(PeerInfo {
+                id: peer.peer_id.map(|id| id.to_string()).unwrap_or_default(),
+                client_id: "".to_string(), // TODO: Extract from peer ID or extensions
+                ip: peer.addr.ip().to_string(),
+                rate_up: ur * 8,   // bits/sec
+                rate_down: dr * 8, // bits/sec
+            });
         }
 
         let progress = self
@@ -800,6 +884,34 @@ impl Torrent {
             TorrentState::Leeching
         };
 
+        let tracker_infos = self
+            .trackers
+            .values()
+            .map(|t| TrackerInfo {
+                url: t.url.to_string(),
+                error: t.error.clone(),
+                last_report: t.last_report,
+            })
+            .collect();
+
+        let file_infos = if let Some(info) = self.metadata.info() {
+            info.files()
+                .into_iter()
+                .map(|f| {
+                    let path = f.path.to_string_lossy().to_string();
+                    let size = f.length as u64;
+                    // TODO: Calculate per-file progress
+                    FileInfo {
+                        path,
+                        size,
+                        progress: if progress >= 1.0 { 1.0 } else { 0.0 },
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         TorrentStats {
             state,
             progress,
@@ -809,6 +921,9 @@ impl Torrent {
             peers_discovered: self.metrics.peers_discovered.load(Ordering::Relaxed),
             downloaded_bytes,
             uploaded_bytes,
+            peers: peer_infos,
+            trackers: tracker_infos,
+            files: file_infos,
         }
     }
 
@@ -983,18 +1098,19 @@ impl Torrent {
 
         let p = self.peers.remove(&pid);
 
-        let requests: Vec<_> = p
-            .unwrap()
-            .pending_requests
-            .iter()
-            .map(|x| BlockRequest::from(*x))
-            .collect();
+        if let Some(peer_state) = p {
+            let requests: Vec<_> = peer_state
+                .pending_requests
+                .iter()
+                .map(|x| BlockRequest::from(*x))
+                .collect();
 
-        if let Some(bitfield) = bitfield
-            && let Some(mananger) = self.piece_mananger.as_mut()
-        {
-            mananger.decrement_availability(&AvailabilityUpdate::Bitfield(&bitfield));
-            mananger.cancel_peer_requests(&requests);
+            if let Some(bitfield) = bitfield
+                && let Some(mananger) = self.piece_mananger.as_mut()
+            {
+                mananger.decrement_availability(&AvailabilityUpdate::Bitfield(&bitfield));
+                mananger.cancel_peer_requests(&requests);
+            }
         }
 
         // Note: We do NOT decrement peers_discovered here because it tracks
@@ -1061,13 +1177,14 @@ impl Torrent {
         );
 
         // Spawn tracker announce tasks
-        for announce_url in &self.trackers {
+        for announce_url in self.trackers.keys() {
             let tracker_client = self.tracker_client.clone();
             let info_hash = self.info_hash;
             let seed = self.state == TorrentState::Seeding;
             // TODO: Why use .to_string()?
             let announce = announce_url.to_string();
             let discovered_peers_tx = discovered_peers_tx.clone();
+            let torrent_tx = self.tx.clone();
             tokio::spawn(async move {
                 loop {
                     let response = tracker_client
@@ -1076,6 +1193,7 @@ impl Torrent {
 
                     if let Err(e) = response {
                         tracing::warn!("Failed to announce to tracker {}: {}", announce, e);
+                        // TODO: Report error to torrent
                         return;
                     }
 

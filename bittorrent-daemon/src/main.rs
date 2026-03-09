@@ -1,17 +1,24 @@
 //! BitTorrent Daemon
 //!
 //! A headless BitTorrent client that runs as a foreground service.
-//! Designed for server/CLI usage with future IPC support.
+//! Designed for server/CLI usage with HTTP API support.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use axum::{
+    Json, Router,
+    extract::{Path, State},
+    http::StatusCode,
+    response::IntoResponse,
+    routing::get,
+};
+use bittorrent_common::types::InfoHash;
 use bittorrent_core::{Session, SessionConfig};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
-use tracing::{error, info, warn};
+use tower_http::cors::CorsLayer;
+use tracing::{info, warn};
 use tracing_subscriber::Layer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -25,9 +32,9 @@ struct Args {
     #[arg(short, long, default_value_t = 6881)]
     port: u16,
 
-    /// Port for the IPC server
+    /// Port for the HTTP API server
     #[arg(long, default_value_t = 6969)]
-    ipc_port: u16,
+    api_port: u16,
 
     /// Directory to save downloaded files
     #[arg(short = 'd', long)]
@@ -47,92 +54,141 @@ struct Args {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-#[serde(tag = "type")]
-enum IpcCommand {
-    AddTorrent { path: String },
-    AddMagnet { uri: String },
-    ListTorrents,
+struct AddTorrentRequest {
+    path: Option<String>,
+    uri: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-#[serde(tag = "type")]
-enum IpcResponse {
-    Success { message: String },
-    Error { message: String },
-    TorrentList { torrents: Vec<String> },
+#[derive(Serialize)]
+struct ApiError {
+    error: String,
 }
 
-async fn run_ipc_server(session: Arc<Session>, port: u16) {
-    let addr = format!("127.0.0.1:{}", port);
-    let listener = match TcpListener::bind(&addr).await {
-        Ok(l) => l,
-        Err(e) => {
-            error!("Failed to bind IPC server to {}: {}", addr, e);
-            return;
+async fn list_torrents(State(session): State<Arc<Session>>) -> impl IntoResponse {
+    match session.list_torrents().await {
+        Ok(torrents) => (StatusCode::OK, Json(torrents)).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiError {
+                error: e.to_string(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+async fn add_torrent(
+    State(session): State<Arc<Session>>,
+    Json(payload): Json<AddTorrentRequest>,
+) -> impl IntoResponse {
+    if let Some(uri) = payload.uri {
+        match session.add_magnet(&uri).await {
+            Ok(id) => (StatusCode::CREATED, Json(id)).into_response(),
+            Err(e) => (
+                StatusCode::BAD_REQUEST,
+                Json(ApiError {
+                    error: e.to_string(),
+                }),
+            )
+                .into_response(),
+        }
+    } else if let Some(path) = payload.path {
+        match session.add_torrent(&path).await {
+            Ok(id) => (StatusCode::CREATED, Json(id)).into_response(),
+            Err(e) => (
+                StatusCode::BAD_REQUEST,
+                Json(ApiError {
+                    error: e.to_string(),
+                }),
+            )
+                .into_response(),
+        }
+    } else {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ApiError {
+                error: "Missing 'path' or 'uri'".to_string(),
+            }),
+        )
+            .into_response()
+    }
+}
+
+async fn get_torrent(
+    State(session): State<Arc<Session>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let info_hash = match InfoHash::from_hex(&id) {
+        Ok(h) => h,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiError {
+                    error: "Invalid InfoHash format".to_string(),
+                }),
+            )
+                .into_response();
         }
     };
 
-    info!("IPC server listening on {}", addr);
+    match session.get_torrent_details(info_hash).await {
+        Ok(Some(details)) => (StatusCode::OK, Json(details)).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(ApiError {
+                error: "Torrent not found".to_string(),
+            }),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiError {
+                error: e.to_string(),
+            }),
+        )
+            .into_response(),
+    }
+}
 
-    loop {
-        let (mut socket, _) = match listener.accept().await {
-            Ok(s) => s,
-            Err(e) => {
-                warn!("IPC accept error: {}", e);
-                continue;
-            }
-        };
+async fn remove_torrent(
+    State(session): State<Arc<Session>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let info_hash = match InfoHash::from_hex(&id) {
+        Ok(h) => h,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiError {
+                    error: "Invalid InfoHash format".to_string(),
+                }),
+            )
+                .into_response();
+        }
+    };
 
-        let session = session.clone();
-        tokio::spawn(async move {
-            let mut buf = Vec::new();
-            if let Err(e) = socket.read_to_end(&mut buf).await {
-                warn!("IPC read error: {}", e);
-                return;
-            }
+    match session.remove_torrent(info_hash).await {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiError {
+                error: e.to_string(),
+            }),
+        )
+            .into_response(),
+    }
+}
 
-            let cmd: IpcCommand = match serde_json::from_slice(&buf) {
-                Ok(c) => c,
-                Err(e) => {
-                    let resp = IpcResponse::Error {
-                        message: format!("Invalid command: {}", e),
-                    };
-                    let _ = socket.write_all(&serde_json::to_vec(&resp).unwrap()).await;
-                    return;
-                }
-            };
-
-            let response = match cmd {
-                IpcCommand::AddTorrent { path } => match session.add_torrent(&path).await {
-                    Ok(id) => IpcResponse::Success {
-                        message: format!("Added torrent: {:?}", id),
-                    },
-                    Err(e) => IpcResponse::Error {
-                        message: format!("Failed to add torrent: {}", e),
-                    },
-                },
-                IpcCommand::AddMagnet { uri } => match session.add_magnet(&uri).await {
-                    Ok(id) => IpcResponse::Success {
-                        message: format!("Added magnet: {:?}", id),
-                    },
-                    Err(e) => IpcResponse::Error {
-                        message: format!("Failed to add magnet: {}", e),
-                    },
-                },
-                IpcCommand::ListTorrents => match session.list_torrents().await {
-                    Ok(list) => IpcResponse::TorrentList {
-                        torrents: list.into_iter().map(|t| t.name).collect(),
-                    },
-                    Err(e) => IpcResponse::Error {
-                        message: format!("Failed to list torrents: {}", e),
-                    },
-                },
-            };
-
-            let _ = socket
-                .write_all(&serde_json::to_vec(&response).unwrap())
-                .await;
-        });
+async fn get_stats(State(session): State<Arc<Session>>) -> impl IntoResponse {
+    match session.get_stats().await {
+        Ok(stats) => (StatusCode::OK, Json(stats)).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiError {
+                error: e.to_string(),
+            }),
+        )
+            .into_response(),
     }
 }
 
@@ -192,6 +248,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("BitTorrent daemon starting");
     info!("  Peer port: {}", args.port);
+    info!("  API port: {}", args.api_port);
     info!("  Save directory: {}", save_dir.display());
     info!(
         "  DHT: {}",
@@ -209,11 +266,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create and start session
     let session = Arc::new(Session::new(config));
 
-    // Start IPC server
-    let ipc_session = session.clone();
-    let ipc_port = args.ipc_port;
+    // Build Axum router
+    let app = Router::new()
+        .route("/torrents", get(list_torrents).post(add_torrent))
+        .route("/torrents/:id", get(get_torrent).delete(remove_torrent))
+        .route("/stats", get(get_stats))
+        .layer(CorsLayer::permissive())
+        .with_state(session.clone());
+
+    // Start API server
+    let api_port = args.api_port;
     tokio::spawn(async move {
-        run_ipc_server(ipc_session, ipc_port).await;
+        let addr = std::net::SocketAddr::from(([0, 0, 0, 0], api_port));
+        info!("API server listening on {}", addr);
+        let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+        axum::serve(listener, app).await.unwrap();
     });
 
     // Add any torrents specified on command line

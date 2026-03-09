@@ -4,7 +4,7 @@
 //! and provide a stable interface between the daemon and clients.
 
 use std::path::PathBuf;
-
+use serde::{Deserialize, Serialize};
 use bittorrent_common::types::InfoHash;
 use directories::ProjectDirs;
 
@@ -15,7 +15,7 @@ use directories::ProjectDirs;
 pub type TorrentId = InfoHash;
 
 /// Current state of a torrent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TorrentState {
     /// Magnet link - fetching metadata from peers
     FetchingMetadata,
@@ -47,7 +47,7 @@ impl std::fmt::Display for TorrentState {
 /// Summary information about a torrent.
 ///
 /// This provides a snapshot of a torrent's current state and progress.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TorrentSummary {
     /// Unique identifier ``InfoHash``
     pub id: TorrentId,
@@ -71,8 +71,44 @@ pub struct TorrentSummary {
     pub downloaded_bytes: u64,
 }
 
+/// Detailed information about a peer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeerInfo {
+    pub id: String, // Hex string of PeerID
+    pub client_id: String, // Client name/version if known
+    pub ip: String,
+    pub rate_up: u64,   // bits/sec
+    pub rate_down: u64, // bits/sec
+}
+
+/// Information about a tracker.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrackerInfo {
+    pub url: String,
+    pub error: Option<String>,
+    pub last_report: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Information about a file within a torrent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileInfo {
+    pub path: String,
+    pub size: u64,
+    pub progress: f64,
+}
+
+/// Detailed information about a torrent, including peers, trackers, and files.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TorrentDetails {
+    #[serde(flatten)]
+    pub summary: TorrentSummary,
+    pub peers: Vec<PeerInfo>,
+    pub trackers: Vec<TrackerInfo>,
+    pub files: Vec<FileInfo>,
+}
+
 /// Aggregate statistics for the entire session.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SessionStats {
     /// Number of torrents currently downloading
     pub torrents_downloading: usize,
