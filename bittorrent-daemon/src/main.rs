@@ -325,16 +325,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Wait for SIGTERM signal (Unix only)
-#[cfg(unix)]
 async fn sigterm() {
     use tokio::signal::unix::{SignalKind, signal};
     let mut sigterm = signal(SignalKind::terminate()).expect("Failed to register SIGTERM handler");
     sigterm.recv().await;
-}
-
-/// No SIGTERM on non-Unix platforms, just wait forever
-#[cfg(not(unix))]
-async fn sigterm() {
-    std::future::pending::<()>().await
 }
