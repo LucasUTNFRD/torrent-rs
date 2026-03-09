@@ -27,33 +27,25 @@ clean:
 cli *args:
     cargo run -p bittorrent-cli -- {{args}}
 
-# Download a torrent file
-download torrent:
-    cargo run -p bittorrent-cli -- "{{torrent}}"
+# Add a torrent via CLI
+add torrent:
+    cargo run -p bittorrent-cli -- add "{{torrent}}"
 
-# Download a torrent to a specific directory
-download-to torrent save_dir:
-    cargo run -p bittorrent-cli -- "{{torrent}}" --save-dir "{{save_dir}}"
+# Add and follow a torrent via CLI
+add-follow torrent:
+    cargo run -p bittorrent-cli -- add "{{torrent}}" --follow
 
-# Download a torrent with a custom port
-download-port torrent port:
-    cargo run -p bittorrent-cli -- "{{torrent}}" --port {{port}}
+# List torrents via CLI
+list:
+    cargo run -p bittorrent-cli -- list
 
-# Download with debug logging
-download-debug torrent:
-    cargo run -p bittorrent-cli -- "{{torrent}}" --log-level debug
+# Show session stats via CLI
+stats:
+    cargo run -p bittorrent-cli -- stats
 
-# Seed existing content from a directory
-seed torrent content_dir:
-    cargo run -p bittorrent-cli -- "{{torrent}}" --watch-dir "{{content_dir}}"
-
-# Download a magnet link
-magnet uri:
-    cargo run -p bittorrent-cli -- "{{uri}}"
-
-# Download a magnet link with debug logging
-magnet-debug uri:
-    cargo run -p bittorrent-cli -- "{{uri}}" --log-level debug
+# Run the BitTorrent TUI
+tui *args:
+    cargo run -p bittorrent-tui -- {{args}}
 
 # Run the BitTorrent Daemon
 daemon *args:
