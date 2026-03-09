@@ -24,7 +24,7 @@ use tokio::{
     time::sleep,
 };
 use tracing::{debug, field::debug, info, instrument, warn};
-use tracker_client::{ClientState, Events, TrackerError, TrackerHandler, TrackerResponse};
+use tracker_client::{ClientState, Events, TrackerError, TrackerHandler};
 use url::Url;
 
 use crate::{
@@ -33,12 +33,12 @@ use crate::{
     choker::Choker,
     metadata::{Metadata, MetadataState},
     peer::{
-        PeerMessage, PeerState,
+        PeerMessage,
         metrics::PeerMetrics,
         peer_connection::{ConnectionError, spawn_inbound_peer, spawn_outgoing_peer},
     },
     piece_picker::{AvailabilityUpdate, BlockRequest, PieceManager, PieceState},
-    types::{PeerInfo, TrackerInfo, FileInfo, TorrentState as PublicTorrentState},
+    types::{FileInfo, PeerInfo, TrackerInfo},
 };
 
 // Peer related
@@ -136,6 +136,10 @@ pub enum TorrentMessage {
     PeerWithMetadata {
         pid: Pid,
         metadata_size: usize,
+    },
+    PeerExtendedHandshake {
+        pid: Pid,
+        client_version: String,
     },
     FillMetadataRequest {
         pid: Pid,
@@ -238,6 +242,7 @@ pub struct Torrent {
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum TorrentState {
+    FetchingMetadata,
     Seeding,
     Paused,
     Leeching,
@@ -246,6 +251,7 @@ pub enum TorrentState {
 struct InternalPeerState {
     addr: SocketAddr,
     peer_id: Option<PeerID>,
+    client_name: Option<String>,
     tx: mpsc::Sender<PeerMessage>,
     metrics: Arc<PeerMetrics>,
     pending_requests: Vec<BlockInfo>,
@@ -431,7 +437,7 @@ impl Torrent {
     ))]
     pub async fn start_session(mut self) -> Result<(), TorrentError> {
         match self.state {
-            TorrentState::Leeching => self.init_interal().await,
+            TorrentState::Leeching | TorrentState::FetchingMetadata => self.init_interal().await,
             TorrentState::Seeding => self.init_seed().await,
             TorrentState::Paused => {}
         }
@@ -599,13 +605,9 @@ impl Torrent {
                 self.tx.clone(),
                 peer_rx,
             ),
-            PeerSource::Outbound(remote_addr) => spawn_outgoing_peer(
-                pid,
-                remote_addr,
-                self.info_hash,
-                self.tx.clone(),
-                peer_rx,
-            ),
+            PeerSource::Outbound(remote_addr) => {
+                spawn_outgoing_peer(pid, remote_addr, self.info_hash, self.tx.clone(), peer_rx)
+            }
         }
 
         // Send the shared metrics to the peer connection
@@ -623,6 +625,7 @@ impl Torrent {
         let peer = InternalPeerState {
             addr: peer_addr,
             peer_id: None,
+            client_name: None,
             tx: peer_tx,
             metrics: shared_metrics,
             pending_requests: Vec::new(),
@@ -664,15 +667,19 @@ impl Torrent {
             TorrentMessage::PeerDisconnected(pid, bitfield) => {
                 self.clean_up_peer(pid, bitfield).await
             }
-            TorrentMessage::PeerError(pid, err, bitfield) => {
+            TorrentMessage::PeerError(pid, _err, bitfield) => {
                 self.clean_up_peer(pid, bitfield).await;
             }
             TorrentMessage::PeerHandshake { pid, peer_id } => {
                 if let Some(peer) = self.peers.get_mut(&pid) {
                     peer.peer_id = Some(peer_id);
+                    // Identify client from PeerID
+                    if let Some(name) = peer_id.identify_client() {
+                        peer.client_name = Some(name.to_string());
+                    }
                 }
             }
-            TorrentMessage::Have { pid, piece_idx } => {
+            TorrentMessage::Have { pid: _, piece_idx } => {
                 let p = self.piece_mananger.as_mut().expect("init");
                 p.increment_availability(&AvailabilityUpdate::Have(piece_idx));
             }
@@ -751,6 +758,14 @@ impl Torrent {
                 // Use the new set_metadata_size method to properly initialize fetching state
                 if let Err(e) = self.metadata.set_metadata_size(metadata_size) {
                     tracing::debug!("Failed to set metadata size: {}", e);
+                }
+            }
+            TorrentMessage::PeerExtendedHandshake {
+                pid,
+                client_version,
+            } => {
+                if let Some(peer) = self.peers.get_mut(&pid) {
+                    peer.client_name = Some(client_version);
                 }
             }
             TorrentMessage::FillMetadataRequest {
@@ -860,7 +875,7 @@ impl Torrent {
 
             peer_infos.push(PeerInfo {
                 id: peer.peer_id.map(|id| id.to_string()).unwrap_or_default(),
-                client_id: "".to_string(), // TODO: Extract from peer ID or extensions
+                client_id: peer.client_name.clone().unwrap_or_default(),
                 ip: peer.addr.ip().to_string(),
                 rate_up: ur * 8,   // bits/sec
                 rate_down: dr * 8, // bits/sec
@@ -872,16 +887,13 @@ impl Torrent {
             .as_ref()
             .map_or(0.0, PieceManager::get_progress);
 
-        // Determine state based on progress and piece manager state
-        let state = if self.metadata.has_metadata() {
-            if progress >= 1.0 {
-                TorrentState::Seeding
-            } else {
-                TorrentState::Leeching
-            }
+        // Determine state based on progress and metadata availability
+        let state = if !self.metadata.has_metadata() {
+            TorrentState::FetchingMetadata
+        } else if progress >= 1.0 {
+            TorrentState::Seeding
         } else {
-            // No metadata yet, still fetching
-            TorrentState::Leeching
+            self.state
         };
 
         let tracker_infos = self
@@ -894,17 +906,23 @@ impl Torrent {
             })
             .collect();
 
+        let file_progress = self
+            .piece_mananger
+            .as_ref()
+            .map(|pm| pm.get_file_progress())
+            .unwrap_or_default();
+
         let file_infos = if let Some(info) = self.metadata.info() {
             info.files()
                 .into_iter()
-                .map(|f| {
+                .enumerate()
+                .map(|(i, f)| {
                     let path = f.path.to_string_lossy().to_string();
                     let size = f.length as u64;
-                    // TODO: Calculate per-file progress
                     FileInfo {
                         path,
                         size,
-                        progress: if progress >= 1.0 { 1.0 } else { 0.0 },
+                        progress: file_progress.get(i).copied().unwrap_or(0.0),
                     }
                 })
                 .collect()

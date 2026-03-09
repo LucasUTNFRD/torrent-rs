@@ -319,6 +319,53 @@ impl PieceManager {
         have as f64 / self.pieces.len() as f64
     }
 
+    /// Calculate progress for each file in the torrent
+    pub fn get_file_progress(&self) -> Vec<f64> {
+        let files = self.torrent_info.files();
+        let mut file_progress = Vec::with_capacity(files.len());
+        let piece_length = self.torrent_info.piece_length as u64;
+
+        let mut current_offset = 0u64;
+        for file in files {
+            let file_length = file.length as u64;
+            if file_length == 0 {
+                file_progress.push(1.0);
+                continue;
+            }
+
+            let file_end = current_offset + file_length;
+            let mut completed_bytes = 0u64;
+
+            // Find pieces that overlap with this file
+            let start_piece = (current_offset / piece_length) as usize;
+            let end_piece = ((file_end + piece_length - 1) / piece_length) as usize;
+
+            for i in start_piece..end_piece {
+                if i >= self.pieces.len() {
+                    break;
+                }
+
+                if self.pieces[i].state == PieceState::Have {
+                    let piece_start = i as u64 * piece_length;
+                    let piece_end = piece_start + self.torrent_info.get_piece_len(i) as u64;
+
+                    // Intersection of [current_offset, file_end] and [piece_start, piece_end]
+                    let overlap_start = current_offset.max(piece_start);
+                    let overlap_end = file_end.min(piece_end);
+
+                    if overlap_end > overlap_start {
+                        completed_bytes += overlap_end - overlap_start;
+                    }
+                }
+            }
+
+            file_progress.push(completed_bytes as f64 / file_length as f64);
+            current_offset += file_length;
+        }
+
+        file_progress
+    }
+
     /// Remove a block request and decrement its heat
     pub fn delete_request(&mut self, request: BlockRequest) {
         if let Some(heat) = self.heat.get_mut(&request) {
