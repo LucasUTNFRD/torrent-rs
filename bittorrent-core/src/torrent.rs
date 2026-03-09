@@ -896,16 +896,6 @@ impl Torrent {
             self.state
         };
 
-        let tracker_infos = self
-            .trackers
-            .values()
-            .map(|t| TrackerInfo {
-                url: t.url.to_string(),
-                error: t.error.clone(),
-                last_report: t.last_report,
-            })
-            .collect();
-
         let file_progress = self
             .piece_mananger
             .as_ref()
