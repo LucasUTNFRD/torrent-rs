@@ -997,6 +997,16 @@ impl Peer<Connected> {
             self.state.max_outgoing_request = self.state.max_outgoing_request.max(reqq as usize);
         }
 
+        if let Some(v) = handshake.v {
+            let _ = self
+                .torrent_tx
+                .send(TorrentMessage::PeerExtendedHandshake {
+                    pid: self.pid,
+                    client_version: v,
+                })
+                .await;
+        }
+
         Ok(())
     }
 

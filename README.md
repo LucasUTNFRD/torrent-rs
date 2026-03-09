@@ -17,13 +17,22 @@ This project implements a functional BitTorrent client with support for download
 | BEP 15 | UDP Tracker | [bep_0015](https://www.bittorrent.org/beps/bep_0015.html) |
 | BEP 23 | Tracker Return Compact | [bep_0023](https://www.bittorrent.org/beps/bep_0023.html) |
 
+## Architecture
+
+The project is split into a headless engine (**daemon**) and multiple controllers (**CLI**, **TUI**).
+
+1. **`bittorrent-daemon` (btd)**: The main engine that manages torrent sessions, downloads, and seeding. It exposes a RESTful HTTP API.
+2. **`bittorrent-tui`**: A terminal user interface to monitor and manage torrents in real-time.
+3. **`bittorrent-cli`**: A command-line controller to add, list, or remove torrents via the daemon.
+
 ## Crates
 
 | Crate | Description |
 |-------|-------------|
-| `bittorrent-cli` | Command-line interface for downloading and seeding |
-| `bittorrent-daemon` | Headless daemon service (binary: `btd`) |
-| `bittorrent-remote` | Remote control client for the daemon |
+| `bittorrent-daemon` | Headless engine (binary: `btd`) |
+| `bittorrent-tui` | Terminal user interface |
+| `bittorrent-cli` | Command-line controller |
+| `bittorrent-remote` | Simple IPC-based remote client |
 | `bittorrent-core` | Core session management and coordination |
 | `bittorrent-common` | Shared types, metainfo parsing, utilities |
 | `bencode` | Bencode encoding/decoding library |
@@ -45,42 +54,56 @@ cargo build --release
 
 ## Usage
 
-### Download
+### 1. Start the Daemon
 
-Download a torrent file:
-
-```bash
-cargo run -p bittorrent-cli -- path/to/file.torrent
-```
-
-Download to a specific directory:
+The daemon must be running to manage torrents. It listens for peer connections on port 6881 and provides an API on port 6969 by default.
 
 ```bash
-cargo run -p bittorrent-cli -- path/to/file.torrent --save-dir /path/to/save
+cargo run -p bittorrent-daemon -- [OPTIONS] [TORRENTS...]
 ```
 
-Download a magnet link:
+**Options:**
+- `-d, --save-dir <PATH>`: Directory to save downloaded files (default: `~/Downloads/Torrents`).
+- `--api-port <PORT>`: Port for the HTTP API (default: `6969`).
+- `--port <PORT>`: Port for peer connections (default: `6881`).
+- `--no-dht`: Disable DHT support.
+
+### 2. Monitor with TUI
+
+Start the TUI to see live progress of all active torrents.
 
 ```bash
-cargo run -p bittorrent-cli -- "magnet:?xt=urn:btih:..."
+cargo run -p bittorrent-tui
 ```
 
-### Seed
+### 3. Control with CLI
 
-Seed existing content:
+Use the CLI to add, list, or manage torrents.
 
+#### Add a torrent
 ```bash
-cargo run -p bittorrent-cli -- path/to/file.torrent --watch-dir /path/to/content
+cargo run -p bittorrent-cli -- add <FILE_OR_MAGNET> [--follow]
 ```
 
-### Options
+#### List active torrents
+```bash
+cargo run -p bittorrent-cli -- list
+```
 
-| Option | Description | Default |
-|--------|-------------|---------|
-| `--port, -p` | Listening port for incoming connections | 6881 |
-| `--save-dir, -d` | Directory to save downloaded files | `$HOME/Downloads/Torrents` |
-| `--watch-dir, -w` | Directory containing files to seed | - |
-| `--log-level` | Log level (error, warn, info, debug, trace) | info |
+#### Show detailed info
+```bash
+cargo run -p bittorrent-cli -- show <INFO_HASH> [--follow]
+```
+
+#### Remove a torrent
+```bash
+cargo run -p bittorrent-cli -- remove <INFO_HASH>
+```
+
+#### Global Stats
+```bash
+cargo run -p bittorrent-cli -- stats
+```
 
 ## License
 

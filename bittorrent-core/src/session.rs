@@ -370,9 +370,10 @@ impl SessionManager {
                     let _ = resp.send(result);
                 }
                 SessionCommand::ListTorrents { resp } => {
-                    let list = self.handle_list_torrents();
-                    let _ = resp.send(list);
+                    let info = self.handle_list_torrents().await;
+                    let _ = resp.send(info);
                 }
+
                 SessionCommand::GetTorrent { id, resp } => {
                     let info = self.handle_get_torrent(id).await;
                     let _ = resp.send(info);
@@ -576,26 +577,19 @@ impl SessionManager {
         }
     }
 
-    fn handle_list_torrents(&self) -> Vec<TorrentSummary> {
-        let sessions = self.sessions.read().unwrap();
-        sessions
-            .iter()
-            .map(|(id, entry)| {
-                // TODO: Query actual stats from torrent when Phase 3 is implemented
-                TorrentSummary {
-                    id: *id,
-                    name: entry.name.clone(),
-                    state: TorrentState::Downloading, // Placeholder
-                    progress: 0.0,                    // Placeholder
-                    download_rate: 0,                 // Placeholder
-                    upload_rate: 0,                   // Placeholder
-                    peers_connected: 0,               // Placeholder
-                    peers_discovered: 0,              // Placeholder
-                    size_bytes: entry.size_bytes,
-                    downloaded_bytes: 0, // Placeholder
-                }
-            })
-            .collect()
+    async fn handle_list_torrents(&self) -> Vec<TorrentSummary> {
+        let ids: Vec<TorrentId> = {
+            let sessions = self.sessions.read().unwrap();
+            sessions.keys().cloned().collect()
+        };
+
+        let mut summaries = Vec::new();
+        for id in ids {
+            if let Some(summary) = self.handle_get_torrent(id).await {
+                summaries.push(summary);
+            }
+        }
+        summaries
     }
 
     async fn handle_get_torrent(&self, id: TorrentId) -> Option<TorrentSummary> {
@@ -633,6 +627,7 @@ impl SessionManager {
             id,
             name,
             state: match stats.state {
+                crate::torrent::TorrentState::FetchingMetadata => TorrentState::FetchingMetadata,
                 crate::torrent::TorrentState::Seeding => TorrentState::Seeding,
                 crate::torrent::TorrentState::Leeching => {
                     if stats.progress == 0.0 && size_bytes > 0 {
@@ -673,6 +668,7 @@ impl SessionManager {
             id,
             name,
             state: match stats.state {
+                crate::torrent::TorrentState::FetchingMetadata => TorrentState::FetchingMetadata,
                 crate::torrent::TorrentState::Seeding => TorrentState::Seeding,
                 crate::torrent::TorrentState::Leeching => {
                     if stats.progress == 0.0 && size_bytes > 0 {
