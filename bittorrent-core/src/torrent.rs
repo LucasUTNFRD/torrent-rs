@@ -38,7 +38,7 @@ use crate::{
         peer_connection::{ConnectionError, spawn_inbound_peer, spawn_outgoing_peer},
     },
     piece_picker::{AvailabilityUpdate, BlockRequest, PieceManager, PieceState},
-    types::{PeerInfo, TrackerInfo, FileInfo, TorrentState as PublicTorrentState},
+    types::{FileInfo, PeerInfo, TorrentState as PublicTorrentState, TrackerInfo},
 };
 
 // Peer related
@@ -599,13 +599,9 @@ impl Torrent {
                 self.tx.clone(),
                 peer_rx,
             ),
-            PeerSource::Outbound(remote_addr) => spawn_outgoing_peer(
-                pid,
-                remote_addr,
-                self.info_hash,
-                self.tx.clone(),
-                peer_rx,
-            ),
+            PeerSource::Outbound(remote_addr) => {
+                spawn_outgoing_peer(pid, remote_addr, self.info_hash, self.tx.clone(), peer_rx)
+            }
         }
 
         // Send the shared metrics to the peer connection

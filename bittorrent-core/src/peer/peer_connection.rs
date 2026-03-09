@@ -6,7 +6,10 @@ use std::{
 };
 
 use bencode::Bencode;
-use bittorrent_common::{metainfo::Info, types::{InfoHash, PeerID}};
+use bittorrent_common::{
+    metainfo::Info,
+    types::{InfoHash, PeerID},
+};
 use bytes::{Bytes, BytesMut};
 use futures::{
     SinkExt, StreamExt,
@@ -136,10 +139,13 @@ impl Peer<Handshaking> {
             return Err(ConnectionError::InvalidHandshake);
         }
 
-        let _ = self.torrent_tx.send(TorrentMessage::PeerHandshake {
-            pid: self.pid,
-            peer_id: remote_handshake.peer_id,
-        }).await;
+        let _ = self
+            .torrent_tx
+            .send(TorrentMessage::PeerHandshake {
+                pid: self.pid,
+                peer_id: remote_handshake.peer_id,
+            })
+            .await;
 
         let supports_extended = remote_handshake.support_extended_message();
 

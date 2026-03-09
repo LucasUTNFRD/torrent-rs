@@ -3,10 +3,10 @@
 //! These types are designed to be serializable for future RPC support
 //! and provide a stable interface between the daemon and clients.
 
-use std::path::PathBuf;
-use serde::{Deserialize, Serialize};
 use bittorrent_common::types::InfoHash;
 use directories::ProjectDirs;
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 /// Torrent identifier - uses ``InfoHash`` for stability across restarts.
 ///
@@ -74,7 +74,7 @@ pub struct TorrentSummary {
 /// Detailed information about a peer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerInfo {
-    pub id: String, // Hex string of PeerID
+    pub id: String,        // Hex string of PeerID
     pub client_id: String, // Client name/version if known
     pub ip: String,
     pub rate_up: u64,   // bits/sec

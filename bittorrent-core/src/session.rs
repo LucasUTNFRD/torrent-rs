@@ -32,7 +32,7 @@ use tracker_client::TrackerHandler;
 use crate::{
     storage::Storage,
     torrent::{Torrent, TorrentError, TorrentMessage, TorrentStats},
-    types::{SessionConfig, SessionStats, TorrentId, TorrentState, TorrentSummary, TorrentDetails},
+    types::{SessionConfig, SessionStats, TorrentDetails, TorrentId, TorrentState, TorrentSummary},
     verify_torrent_file::verify_content,
 };
 
@@ -183,7 +183,10 @@ impl Session {
     }
 
     /// Get detailed information about a specific torrent.
-    pub async fn get_torrent_details(&self, id: TorrentId) -> Result<Option<TorrentDetails>, SessionError> {
+    pub async fn get_torrent_details(
+        &self,
+        id: TorrentId,
+    ) -> Result<Option<TorrentDetails>, SessionError> {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(SessionCommand::GetTorrentDetails { id, resp: tx })
