@@ -32,6 +32,11 @@ This project implements a functional BitTorrent client with support for download
 | `mainline-dht` | DHT protocol implementation (BEP 5) |
 | `magnet-uri` | Magnet URI parsing |
 
+## Prerequisites
+
+- [Rust and Cargo](https://rustup.rs/)
+- [just](https://github.com/casey/just) (optional, for using the justfile)
+
 ## Build
 
 ```bash

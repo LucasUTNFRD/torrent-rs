@@ -930,6 +930,34 @@ impl Torrent {
             Vec::new()
         };
 
+        let tracker_infos = self
+            .trackers
+            .values()
+            .map(|t| TrackerInfo {
+                url: t.url.to_string(),
+                error: t.error.clone(),
+                last_report: t.last_report,
+            })
+            .collect();
+
+        let file_infos = if let Some(info) = self.metadata.info() {
+            info.files()
+                .into_iter()
+                .map(|f| {
+                    let path = f.path.to_string_lossy().to_string();
+                    let size = f.length as u64;
+                    // TODO: Calculate per-file progress
+                    FileInfo {
+                        path,
+                        size,
+                        progress: if progress >= 1.0 { 1.0 } else { 0.0 },
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         TorrentStats {
             state,
             progress,

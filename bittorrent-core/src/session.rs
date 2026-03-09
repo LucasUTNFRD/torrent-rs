@@ -696,6 +696,53 @@ impl SessionManager {
         })
     }
 
+    async fn handle_get_torrent_details(&self, id: TorrentId) -> Option<TorrentDetails> {
+        let (tx, name, size_bytes) = {
+            let sessions = self.sessions.read().unwrap();
+            let entry = sessions.get(&id)?;
+            (entry.tx.clone(), entry.name.clone(), entry.size_bytes)
+        };
+
+        // Query torrent for stats
+        let (stats_tx, stats_rx) = oneshot::channel();
+        let _ = tx.send(TorrentMessage::GetStats { resp: stats_tx }).await;
+
+        let stats = match stats_rx.await {
+            Ok(stats) => stats,
+            Err(_) => return None,
+        };
+
+        let summary = TorrentSummary {
+            id,
+            name,
+            state: match stats.state {
+                crate::torrent::TorrentState::Seeding => TorrentState::Seeding,
+                crate::torrent::TorrentState::Leeching => {
+                    if stats.progress == 0.0 && size_bytes > 0 {
+                        TorrentState::Checking
+                    } else {
+                        TorrentState::Downloading
+                    }
+                }
+                crate::torrent::TorrentState::Paused => TorrentState::Paused,
+            },
+            progress: stats.progress,
+            download_rate: stats.download_rate,
+            upload_rate: stats.upload_rate,
+            peers_connected: stats.peers_connected,
+            peers_discovered: stats.peers_discovered,
+            size_bytes,
+            downloaded_bytes: stats.downloaded_bytes,
+        };
+
+        Some(TorrentDetails {
+            summary,
+            peers: stats.peers,
+            trackers: stats.trackers,
+            files: stats.files,
+        })
+    }
+
     fn handle_get_stats(&self, dht: Option<&Arc<DhtHandler>>) -> SessionStats {
         let torrent_count = self.sessions.read().unwrap().len();
 
