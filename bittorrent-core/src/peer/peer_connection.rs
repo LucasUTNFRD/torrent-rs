@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     net::SocketAddr,
     sync::Arc,
     time::{Duration, Instant},
@@ -166,7 +166,7 @@ pub struct Connected {
     stream: SplitStream<Framed<TcpStream, MessageCodec>>,
     last_recv_msg: Instant,
 
-    request_queue: Vec<BlockInfo>,
+    request_queue: VecDeque<BlockInfo>,
     outgoing_request: HashSet<BlockInfo>,
     last_block_request: Instant,
 
@@ -282,7 +282,7 @@ impl Connected {
             max_outgoing_request: 250,
             bitfield: BitfieldState::new(),
             metadata: None,
-            request_queue: Vec::new(),
+            request_queue: VecDeque::new(),
             metrics,
             last_block_request: Instant::now(),
             target_request_queue: 2,
@@ -374,45 +374,61 @@ impl Peer<Connected> {
 
     fn metric_update(&mut self) {
         self.state.metrics.update_rates();
+        self.update_target_queue_size();
+    }
 
-        // debug!(
-        //     "dr : {} | choked: {} | interested: {} | max_queue_size : {}, outgoing_requests: {} | slow_start : {}",
-        //     self.state.metrics.get_download_rate_human(),
-        //     self.state.choked,
-        //     self.state.interesting,
-        //     self.state.target_request_queue,
-        //     self.state.outgoing_request.len(),
-        //     self.state.slow_start
-        // );
-
+    fn update_target_queue_size(&mut self) {
         let current_rate = self.state.metrics.get_download_rate();
+
         if self.state.slow_start {
             let rate_increase = current_rate.saturating_sub(self.state.prev_download_rate);
 
-            // 2025 Logic: Require at least 5% growth to stay in slow start.
-            // On high speed networks, 10kB/s is just noise.
-            // We use a minimum threshold of 10kB/s to avoid division issues at very low speeds.
+            // 1. Minimum growth check: Require at least 5% growth or 10KB/s to stay in slow start.
             let threshold = std::cmp::max(current_rate / 20, 10_240);
 
             if current_rate > 0 && rate_increase < threshold {
                 debug!(
-                    "Leaving slow start. Rate: {} B/s, Increase: {}",
+                    "Leaving slow start (insufficient growth). Rate: {} B/s, Increase: {}",
                     current_rate, rate_increase
                 );
                 self.state.slow_start = false;
             }
-        } else {
-            const BLOCK_SIZE: f64 = 16384.0;
-            const ASSUMED_LATENCY: f64 = 0.5;
 
-            // BDP
-            let target = (current_rate as f64 * ASSUMED_LATENCY / BLOCK_SIZE) as usize;
+            // 2. Bufferbloat protection: Only judge if we have a representative sample rate (> 64KB/s)
+            if current_rate > 65536 {
+                let pending_bytes = self.state.outgoing_request.len() as u64 * 16384;
+                let queue_duration_secs = pending_bytes / current_rate;
 
-            // Ensure we request at least 2 items (pipelining), but do not exceed the peer's explicit limit
-            self.state.target_request_queue = target.max(2).min(self.state.max_outgoing_request);
+                if queue_duration_secs >= 5 {
+                    debug!(
+                        "Bufferbloat detected ({}s queue). Exiting slow start.",
+                        queue_duration_secs
+                    );
+                    self.state.slow_start = false;
+                }
+            }
+
+            if self.state.slow_start {
+                // Exponential growth: increment target for every block (handled in on_incoming_piece)
+                // but ensure we don't exceed max.
+                self.state.target_request_queue = self
+                    .state
+                    .target_request_queue
+                    .min(self.state.max_outgoing_request);
+                self.state.prev_download_rate = current_rate;
+                return;
+            }
         }
 
-        // Update previous rate for the next tick comparison
+        // BDP Calculation (used when NOT in slow start)
+        const BLOCK_SIZE: f64 = 16384.0;
+        const ASSUMED_LATENCY: f64 = 0.5;
+
+        // Target = (Rate * Latency) / BlockSize
+        let target = (current_rate as f64 * ASSUMED_LATENCY / BLOCK_SIZE) as usize;
+
+        // Ensure we request at least 2 items, but do not exceed the peer's explicit limit
+        self.state.target_request_queue = target.max(2).min(self.state.max_outgoing_request);
         self.state.prev_download_rate = current_rate;
     }
 
@@ -571,11 +587,15 @@ impl Peer<Connected> {
     async fn on_unchoke(&mut self) -> Result<(), ConnectionError> {
         debug!("UNCHOKE Received");
         self.state.peer_choked = false;
+
+        // Reset slow start to re-probe capacity after being choked
+        self.state.slow_start = true;
+        self.state.target_request_queue = 2;
+        self.state.prev_download_rate = 0;
+
         if self.state.interesting {
             self.request_block().await?;
             self.send_block_request().await?;
-            // request block for this torrent
-            // send blocks
         } else {
             self.update_interest_status().await?;
         }
@@ -643,7 +663,7 @@ impl Peer<Connected> {
 
     async fn send_block_request(&mut self) -> Result<(), ConnectionError> {
         debug!("SENDING BLOCK REQUEST");
-        while let Some(block) = self.state.request_queue.pop() {
+        while let Some(block) = self.state.request_queue.pop_front() {
             if self.state.outgoing_request.len() > self.state.max_outgoing_request {
                 debug!("pipeline is empty, should request more pieces");
                 break;
@@ -651,9 +671,10 @@ impl Peer<Connected> {
 
             self.state.outgoing_request.insert(block);
             self.state.last_block_request = Instant::now();
-            self.state.sink.send(Message::Request(block)).await?;
-            debug!("SENT");
+            self.state.sink.feed(Message::Request(block)).await?;
         }
+
+        self.state.sink.flush().await?;
 
         Ok(())
     }
@@ -841,57 +862,10 @@ impl Peer<Connected> {
                 .await;
 
             if self.state.slow_start {
-                // BUFFERBLOAT PROTECTION
-                // Calculate how many seconds of data are currently queued
-                let pending_bytes = self.state.outgoing_request.len() as u64 * 16384;
-                let current_rate = self.state.metrics.get_download_rate().max(1); // avoid div/0
-
-                let queue_duration_secs = pending_bytes / current_rate;
-
-                // If we have more than 5 seconds of data queued, STOP increasing.
-                // We are requesting faster than the peer can send.
-                if queue_duration_secs < 5 {
-                    self.state.target_request_queue += 1;
-
-                    // Cap it at max_outgoing_request
-                    if self.state.target_request_queue > self.state.max_outgoing_request {
-                        self.state.target_request_queue = self.state.max_outgoing_request;
-                    }
-                } else {
-                    debug!(
-                        "Bufferbloat detected ({}s queue). Exiting slow start.",
-                        queue_duration_secs
-                    );
-                    self.state.slow_start = false;
-                    // Note: We don't reset target_request_queue here immediately;
-                    // the metric_update tick (every 1s) will snap it back to BDP.
-                    // But request_block() will stop sending because in_flight (huge) > target (will be BDP).
-                }
-            }
-            // Calculate how many seconds of data are currently queued
-            let pending_bytes = self.state.outgoing_request.len() as u64 * 16384;
-            let current_rate = self.state.metrics.get_download_rate().max(1);
-
-            let queue_duration_secs = pending_bytes / current_rate;
-
-            // If we have more than 5 seconds of data queued, STOP increasing.
-            // We are requesting faster than the peer can send.
-            if queue_duration_secs < 5 {
+                // Exponential growth: increment target for every block received
                 self.state.target_request_queue += 1;
-
-                // Cap it at max_outgoing_request
-                if self.state.target_request_queue > self.state.max_outgoing_request {
-                    self.state.target_request_queue = self.state.max_outgoing_request;
-                }
-            } else {
-                debug!(
-                    "Bufferbloat detected ({}s queue). Exiting slow start.",
-                    queue_duration_secs
-                );
-                self.state.slow_start = false;
-                // Note: We don't reset target_request_queue here immediately;
-                // the metric_update tick (every 1s) will snap it back to BDP.
-                // But request_block() will stop sending because in_flight (huge) > target (will be BDP).
+                // Re-evaluate if we should still be in slow start (e.g. check bufferbloat)
+                self.update_target_queue_size();
             }
 
             self.request_block().await?;
