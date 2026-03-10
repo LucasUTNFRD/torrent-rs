@@ -30,9 +30,10 @@ use mainline_dht::{DhtConfig, DhtHandler};
 use tracker_client::TrackerHandler;
 
 use crate::{
+    SessionConfig,
     storage::Storage,
     torrent::{Torrent, TorrentError, TorrentMessage, TorrentStats},
-    types::{SessionConfig, SessionStats, TorrentDetails, TorrentId, TorrentState, TorrentSummary},
+    types::{SessionStats, TorrentDetails, TorrentId, TorrentState, TorrentSummary},
     verify_torrent_file::verify_content,
 };
 
@@ -249,17 +250,14 @@ struct SessionManager {
     config: SessionConfig,
     rx: mpsc::UnboundedReceiver<SessionCommand>,
     sessions: Arc<RwLock<HashMap<InfoHash, TorrentEntry>>>,
-    dht_enabled: bool,
 }
 
 impl SessionManager {
     pub fn new(config: SessionConfig, rx: mpsc::UnboundedReceiver<SessionCommand>) -> Self {
-        let dht_enabled = config.enable_dht;
         Self {
             config,
             rx,
             sessions: Arc::new(RwLock::new(HashMap::new())),
-            dht_enabled,
         }
     }
 
@@ -268,14 +266,15 @@ impl SessionManager {
         let tracker = Arc::new(TrackerHandler::new(*CLIENT_ID));
         let storage = Arc::new(Storage::new());
 
-        // TODO: Boostrap this in a tokio task to avoid blocking
-        // Initialize and bootstrap DHT if enabled
-        let dht: Option<Arc<DhtHandler>> = if self.dht_enabled {
+        // TODO: FOr now im ignoring the config builder of the DHT
+        // but some ke feature we will need is to give a list of nodes as boostrap source
+        // also move dht to core
+        let dht: Option<Arc<DhtHandler>> = if self.config.enable_dht {
             let config_dir = &self.config.config_dir;
             let dht_config = DhtConfig {
                 id_file_path: Some(config_dir.join("node.id")),
                 state_file_path: Some(config_dir.join("dht_state.dat")),
-                port: self.config.port,
+                port: self.config.listen_addr.port(),
             };
 
             match DhtHandler::with_config(dht_config).await {
@@ -747,11 +746,11 @@ impl SessionManager {
     }
 
     fn spawn_tcp_listener(&self) {
-        let port = self.config.port;
         let sessions = self.sessions.clone();
+        let listen_addr = self.config.listen_addr;
 
         tokio::spawn(async move {
-            let listener = TcpListener::bind(format!("0.0.0.0:{port}"))
+            let listener = TcpListener::bind(listen_addr)
                 .await
                 .expect("failed to bind tcp listener");
             tracing::info!("Listening on {:?}", listener.local_addr());

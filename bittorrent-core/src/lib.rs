@@ -43,12 +43,14 @@ mod metadata;
 mod peer;
 mod piece_picker;
 mod session;
+pub mod session_config;
 mod storage;
 mod torrent;
 pub mod types;
 mod verify_torrent_file;
 
 pub use session::{Session, SessionError};
+pub use session_config::SessionConfig;
 pub use storage::Storage;
 pub use torrent::{TorrentState as InternalTorrentState, TorrentStats};
-pub use types::{SessionConfig, SessionStats, TorrentId, TorrentState, TorrentSummary};
+pub use types::{SessionStats, TorrentId, TorrentState, TorrentSummary};

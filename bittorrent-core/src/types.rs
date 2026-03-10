@@ -121,36 +121,3 @@ pub struct SessionStats {
     /// Number of nodes in the DHT routing table (None if DHT disabled)
     pub dht_nodes: Option<usize>,
 }
-
-/// Configuration for creating a new Session.
-#[derive(Debug, Clone)]
-pub struct SessionConfig {
-    /// Port to listen on for incoming peer connections
-    pub port: u16,
-    /// Directory where downloaded files are saved
-    pub save_path: PathBuf,
-    /// Whether to enable DHT for peer discovery
-    pub enable_dht: bool,
-    /// Base config directory (e.g., ~/.config/torrent-rs/)
-    pub config_dir: PathBuf,
-    /// Directory for storing .torrent files (config_dir/torrents/)
-    pub torrents_dir: PathBuf,
-}
-
-impl Default for SessionConfig {
-    fn default() -> Self {
-        let config_dir = ProjectDirs::from("com", "torrent-rs", "torrent-rs")
-            .map(|dirs| dirs.config_dir().to_path_buf())
-            .unwrap_or_else(|| PathBuf::from(".config/torrent-rs"));
-
-        let torrents_dir = config_dir.join("torrents");
-
-        Self {
-            port: 6881,
-            save_path: PathBuf::from("."),
-            enable_dht: true,
-            config_dir,
-            torrents_dir,
-        }
-    }
-}
