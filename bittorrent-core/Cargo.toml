@@ -31,7 +31,7 @@ mainline-dht = { path = "../mainline-dht/" }
 directories.workspace = true
 chrono = { version = "0.4", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
-turmoil = { version = "0.7.1 ", optional = true }
+turmoil = { version = "0.7.1", optional = true }
 
 [[bench]]
 name = "storage_contention"
