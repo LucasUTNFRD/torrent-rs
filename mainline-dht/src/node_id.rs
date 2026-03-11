@@ -270,7 +270,7 @@ impl NodeId {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(path, &self.0)?;
+        fs::write(path, self.0)?;
         Ok(())
     }
 }

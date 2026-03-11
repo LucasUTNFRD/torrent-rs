@@ -82,7 +82,7 @@ impl Bucket {
 impl RoutingTable {
     /// Create a new routing table for the given local node ID.
     pub fn new(local_node_id: NodeId) -> Self {
-        let buckets = (0..NUM_BUCKETS).map(|i| Bucket::new(i)).collect();
+        let buckets = (0..NUM_BUCKETS).map(Bucket::new).collect();
         Self {
             local_node_id,
             buckets,
@@ -243,7 +243,7 @@ impl RoutingTable {
             if b.nodes.is_empty() {
                 None
             } else {
-                use rand::Rng;
+                
                 let idx = rand::rng().random_range(0..b.nodes.len());
                 b.nodes.get(idx)
             }
@@ -263,7 +263,7 @@ impl RoutingTable {
             return None;
         }
 
-        use rand::Rng;
+        
         let bucket_idx = rand::rng().random_range(0..non_empty_buckets.len());
         let (_, bucket) = &non_empty_buckets[bucket_idx];
 
@@ -278,12 +278,12 @@ impl RoutingTable {
     /// Get a random ID within a bucket's range.
     /// Bucket i covers IDs with XOR distance having bit length (i+1).
     pub fn random_id_in_bucket_range(&self, bucket_index: usize) -> NodeId {
-        use rand::Rng;
+        
         let mut rng = rand::rng();
 
         // For bucket i, we want IDs with bitlen(distance) == i + 1
         // This means the (i)th bit of the distance should be set
-        let mut id_bytes = self.local_node_id.as_bytes();
+        let id_bytes = self.local_node_id.as_bytes();
         let mut result = [0u8; 20];
         result.copy_from_slice(&id_bytes);
 
@@ -310,7 +310,7 @@ impl RoutingTable {
     /// Generate a random ID in our own bucket with randomized last byte.
     /// Used for aggressive neighborhood maintenance.
     pub fn random_id_in_own_bucket(&self) -> NodeId {
-        use rand::Rng;
+        
         let mut rng = rand::rng();
 
         let mut result = self.local_node_id.as_bytes();
@@ -330,7 +330,7 @@ impl RoutingTable {
         if empty.is_empty() {
             return None;
         }
-        use rand::Rng;
+        
         let idx = rand::rng().random_range(0..empty.len());
         empty.get(idx).copied()
     }

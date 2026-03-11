@@ -338,7 +338,7 @@ impl PieceManager {
 
             // Find pieces that overlap with this file
             let start_piece = (current_offset / piece_length) as usize;
-            let end_piece = ((file_end + piece_length - 1) / piece_length) as usize;
+            let end_piece = file_end.div_ceil(piece_length) as usize;
 
             for i in start_piece..end_piece {
                 if i >= self.pieces.len() {
