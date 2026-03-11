@@ -7,6 +7,7 @@
 //! - Announce peer participation (announce_peer)
 //! - Server mode (responding to incoming queries)
 
+use rand::RngExt;
 use std::{
     fs,
     net::{Ipv4Addr, SocketAddr, ToSocketAddrs},

@@ -4,9 +4,7 @@
 //! and provide a stable interface between the daemon and clients.
 
 use bittorrent_common::types::InfoHash;
-use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 
 /// Torrent identifier - uses ``InfoHash`` for stability across restarts.
 ///

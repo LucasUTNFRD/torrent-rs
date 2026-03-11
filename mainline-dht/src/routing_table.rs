@@ -1,6 +1,6 @@
-use std::time::{Duration, Instant};
-
 use crate::{node::Node, node_id::NodeId};
+use rand::RngExt;
+use std::time::{Duration, Instant};
 
 /// K is the maximum number of nodes per bucket (per BEP 0005).
 pub const K: usize = 8;
