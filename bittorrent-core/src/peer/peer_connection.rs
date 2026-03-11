@@ -376,23 +376,11 @@ impl Peer<Connected> {
     fn metric_update(&mut self) {
         self.state.metrics.update_rates();
 
-        // debug!(
-        //     "dr : {} | choked: {} | interested: {} | max_queue_size : {}, outgoing_requests: {} | slow_start : {}",
-        //     self.state.metrics.get_download_rate_human(),
-        //     self.state.choked,
-        //     self.state.interesting,
-        //     self.state.target_request_queue,
-        //     self.state.outgoing_request.len(),
-        //     self.state.slow_start
-        // );
-
         let current_rate = self.state.metrics.get_download_rate();
         if self.state.slow_start {
             let rate_increase = current_rate.saturating_sub(self.state.prev_download_rate);
 
-            // 2025 Logic: Require at least 5% growth to stay in slow start.
-            // On high speed networks, 10kB/s is just noise.
-            // We use a minimum threshold of 10kB/s to avoid division issues at very low speeds.
+            // Logic: Require at least 5% growth to stay in slow start.
             let threshold = std::cmp::max(current_rate / 20, 10_240);
 
             if current_rate > 0 && rate_increase < threshold {
@@ -842,57 +830,12 @@ impl Peer<Connected> {
                 .await;
 
             if self.state.slow_start {
-                // BUFFERBLOAT PROTECTION
-                // Calculate how many seconds of data are currently queued
-                let pending_bytes = self.state.outgoing_request.len() as u64 * 16384;
-                let current_rate = self.state.metrics.get_download_rate().max(1); // avoid div/0
-
-                let queue_duration_secs = pending_bytes / current_rate;
-
-                // If we have more than 5 seconds of data queued, STOP increasing.
-                // We are requesting faster than the peer can send.
-                if queue_duration_secs < 5 {
-                    self.state.target_request_queue += 1;
-
-                    // Cap it at max_outgoing_request
-                    if self.state.target_request_queue > self.state.max_outgoing_request {
-                        self.state.target_request_queue = self.state.max_outgoing_request;
-                    }
-                } else {
-                    debug!(
-                        "Bufferbloat detected ({}s queue). Exiting slow start.",
-                        queue_duration_secs
-                    );
-                    self.state.slow_start = false;
-                    // Note: We don't reset target_request_queue here immediately;
-                    // the metric_update tick (every 1s) will snap it back to BDP.
-                    // But request_block() will stop sending because in_flight (huge) > target (will be BDP).
-                }
-            }
-            // Calculate how many seconds of data are currently queued
-            let pending_bytes = self.state.outgoing_request.len() as u64 * 16384;
-            let current_rate = self.state.metrics.get_download_rate().max(1);
-
-            let queue_duration_secs = pending_bytes / current_rate;
-
-            // If we have more than 5 seconds of data queued, STOP increasing.
-            // We are requesting faster than the peer can send.
-            if queue_duration_secs < 5 {
                 self.state.target_request_queue += 1;
 
                 // Cap it at max_outgoing_request
                 if self.state.target_request_queue > self.state.max_outgoing_request {
                     self.state.target_request_queue = self.state.max_outgoing_request;
                 }
-            } else {
-                debug!(
-                    "Bufferbloat detected ({}s queue). Exiting slow start.",
-                    queue_duration_secs
-                );
-                self.state.slow_start = false;
-                // Note: We don't reset target_request_queue here immediately;
-                // the metric_update tick (every 1s) will snap it back to BDP.
-                // But request_block() will stop sending because in_flight (huge) > target (will be BDP).
             }
 
             self.request_block().await?;
