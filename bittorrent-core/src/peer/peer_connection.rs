@@ -26,7 +26,6 @@ use peer_protocol::{
 use thiserror::Error;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpStream,
     sync::{mpsc, oneshot},
     time::interval,
 };
@@ -36,8 +35,8 @@ use tracing::{debug, instrument};
 
 use crate::{
     bitfield::{Bitfield, BitfieldError},
+    net::TcpStream,
     peer::{ConnectTimeout, PeerMessage, metrics::PeerMetrics},
-    // piece_picker::DownloadTask,
     session::CLIENT_ID,
     torrent::{Pid, TorrentMessage},
 };
@@ -997,6 +996,16 @@ impl Peer<Connected> {
             && reqq > 0
         {
             self.state.max_outgoing_request = self.state.max_outgoing_request.max(reqq as usize);
+        }
+
+        if let Some(v) = handshake.v {
+            let _ = self
+                .torrent_tx
+                .send(TorrentMessage::PeerExtendedHandshake {
+                    pid: self.pid,
+                    client_version: v,
+                })
+                .await;
         }
 
         Ok(())

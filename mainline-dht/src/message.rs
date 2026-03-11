@@ -35,6 +35,7 @@ pub struct KrpcMessage {
     /// Transaction ID for request/response correlation.
     pub transaction_id: TransactionId,
     /// Client version string (optional, 4 bytes: 2-char client ID + 2-char version).
+    // TODO: use [u8;VERSION_STRING_LEN]
     pub version: Option<Vec<u8>>,
     /// Sender's external IP as seen by responder (BEP 42).
     pub sender_ip: Option<SocketAddr>,
