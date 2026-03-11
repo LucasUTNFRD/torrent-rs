@@ -169,10 +169,6 @@ pub enum TorrentMessage {
         supports_ext: bool,
         peer_id: PeerID,
     },
-    /// Get torrent statistics
-    GetStats {
-        resp: oneshot::Sender<TorrentStats>,
-    },
 }
 
 /// Statistics for a torrent
@@ -857,102 +853,8 @@ impl Torrent {
                     peer_id,
                 });
             }
-            TorrentMessage::GetStats { resp } => {
-                let stats = self.get_stats();
-                let _ = resp.send(stats);
-            }
         }
         Ok(())
-    }
-
-    /// Get current torrent statistics
-    fn get_stats(&self) -> TorrentStats {
-        // Aggregate peer metrics
-        let mut total_download_rate = 0u64;
-        let mut total_upload_rate = 0u64;
-        let mut downloaded_bytes = 0u64;
-        let mut uploaded_bytes = 0u64;
-
-        let mut peer_infos = Vec::new();
-
-        for peer in self.peers.values() {
-            let dr = peer.metrics.get_download_rate();
-            let ur = peer.metrics.get_upload_rate();
-            total_download_rate += dr;
-            total_upload_rate += ur;
-            downloaded_bytes += peer.metrics.get_bytes_downloaded();
-            uploaded_bytes += peer.metrics.get_bytes_uploaded();
-
-            peer_infos.push(PeerInfo {
-                id: peer.peer_id.map(|id| id.to_string()).unwrap_or_default(),
-                client_id: peer.client_name.clone().unwrap_or_default(),
-                ip: peer.addr.ip().to_string(),
-                rate_up: ur * 8,   // bits/sec
-                rate_down: dr * 8, // bits/sec
-            });
-        }
-
-        let progress = self
-            .piece_mananger
-            .as_ref()
-            .map_or(0.0, PieceManager::get_progress);
-
-        // Determine state based on progress and metadata availability
-        let state = if !self.metadata.has_metadata() {
-            TorrentState::FetchingMetadata
-        } else if progress >= 1.0 {
-            TorrentState::Seeding
-        } else {
-            self.state
-        };
-
-        let file_progress = self
-            .piece_mananger
-            .as_ref()
-            .map(|pm| pm.get_file_progress())
-            .unwrap_or_default();
-
-        let file_infos = if let Some(info) = self.metadata.info() {
-            info.files()
-                .into_iter()
-                .enumerate()
-                .map(|(i, f)| {
-                    let path = f.path.to_string_lossy().to_string();
-                    let size = f.length as u64;
-                    FileInfo {
-                        path,
-                        size,
-                        progress: file_progress.get(i).copied().unwrap_or(0.0),
-                    }
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
-
-        let tracker_infos = self
-            .trackers
-            .values()
-            .map(|t| TrackerInfo {
-                url: t.url.to_string(),
-                error: t.error.clone(),
-                last_report: t.last_report,
-            })
-            .collect();
-
-        TorrentStats {
-            state,
-            progress,
-            download_rate: total_download_rate,
-            upload_rate: total_upload_rate,
-            peers_connected: self.peers.len(),
-            peers_discovered: self.metrics.peers_discovered.load(Ordering::Relaxed),
-            downloaded_bytes,
-            uploaded_bytes,
-            peers: peer_infos,
-            trackers: tracker_infos,
-            files: file_infos,
-        }
     }
 
     async fn incoming_block(&mut self, pid: Pid, block: Block) {

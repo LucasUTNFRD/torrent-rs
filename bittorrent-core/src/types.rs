@@ -94,28 +94,3 @@ pub struct FileInfo {
     pub size: u64,
     pub progress: f64,
 }
-
-/// Detailed information about a torrent, including peers, trackers, and files.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TorrentDetails {
-    #[serde(flatten)]
-    pub summary: TorrentSummary,
-    pub peers: Vec<PeerInfo>,
-    pub trackers: Vec<TrackerInfo>,
-    pub files: Vec<FileInfo>,
-}
-
-/// Aggregate statistics for the entire session.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct SessionStats {
-    /// Number of torrents currently downloading
-    pub torrents_downloading: usize,
-    /// Number of torrents currently seeding
-    pub torrents_seeding: usize,
-    /// Total download rate across all torrents (bytes/sec)
-    pub total_download_rate: u64,
-    /// Total upload rate across all torrents (bytes/sec)
-    pub total_upload_rate: u64,
-    /// Number of nodes in the DHT routing table (None if DHT disabled)
-    pub dht_nodes: Option<usize>,
-}

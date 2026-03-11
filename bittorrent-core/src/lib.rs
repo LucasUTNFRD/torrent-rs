@@ -54,4 +54,4 @@ pub use session::{Session, SessionError};
 pub use session_config::SessionConfig;
 pub use storage::StorageBackend;
 pub use torrent::{TorrentState as InternalTorrentState, TorrentStats};
-pub use types::{SessionStats, TorrentId, TorrentState, TorrentSummary};
+pub use types::{TorrentId, TorrentState, TorrentSummary};
