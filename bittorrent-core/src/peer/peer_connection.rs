@@ -35,8 +35,8 @@ use tracing::{debug, instrument};
 
 use crate::{
     bitfield::{Bitfield, BitfieldError},
-    peer::{ConnectTimeout, PeerMessage, metrics::PeerMetrics},
     net::TcpStream,
+    peer::{ConnectTimeout, PeerMessage, metrics::PeerMetrics},
     // piece_picker::DownloadTask,
     session::CLIENT_ID,
     torrent::{Pid, TorrentMessage},
