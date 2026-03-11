@@ -104,18 +104,21 @@ impl Choker {
 
     /// Returns true if the peer is currently unchoked
     #[must_use]
+    #[allow(dead_code)]
     pub fn is_unchoked(&self, pid: Pid) -> bool {
         self.unchoked_peers.contains(&pid)
     }
 
     /// Returns the number of available upload slots
     #[must_use]
+    #[allow(dead_code)]
     pub fn available_slots(&self) -> usize {
         self.upload_slots.saturating_sub(self.unchoked_peers.len())
     }
 
     /// Returns the set of currently unchoked peers
     #[must_use]
+    #[allow(dead_code)]
     pub fn unchoked_peers(&self) -> &HashSet<Pid> {
         &self.unchoked_peers
     }

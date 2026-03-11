@@ -84,9 +84,11 @@ pub enum TorrentError {
     Tracker(TrackerError),
 
     #[error("Invalid Magnet URI: {0}")]
+    #[allow(dead_code)]
     InvalidMagnet(String),
 
     #[error("Verification error: {0}")]
+    #[allow(dead_code)]
     Verification(String),
 
     #[error("I/O error: {0}")]
@@ -107,12 +109,14 @@ pub enum TorrentMessage {
         node_addr: SocketAddr,
     },
     Have {
+        #[allow(dead_code)]
         pid: Pid,
         piece_idx: u32,
     },
     ReceiveBlock(Pid, peer_protocol::protocol::Block),
     // Peer state management
     ShouldBeInterested {
+        #[allow(dead_code)]
         pid: Pid,
         bitfield: Bitfield,
         resp_tx: oneshot::Sender<bool>,
@@ -135,6 +139,7 @@ pub enum TorrentMessage {
 
     // -- METADATA REQUEST --
     PeerWithMetadata {
+        #[allow(dead_code)]
         pid: Pid,
         metadata_size: usize,
     },
@@ -143,10 +148,12 @@ pub enum TorrentMessage {
         client_version: String,
     },
     FillMetadataRequest {
+        #[allow(dead_code)]
         pid: Pid,
         metadata_piece: oneshot::Sender<u32>,
     },
     ReceiveMetadata {
+        #[allow(dead_code)]
         pid: Pid,
         piece_idx: u32,
         metadata: Bytes,
@@ -190,7 +197,9 @@ pub struct TorrentStats {
 
 #[derive(Debug, Default)]
 pub struct Metrics {
+    #[allow(dead_code)]
     pub downloaded_bytes: AtomicU64,
+    #[allow(dead_code)]
     pub uploaded_bytes: AtomicU64,
     /// Total number of unique peers discovered from trackers/DHT (cumulative, never decrements)
     pub peers_discovered: AtomicUsize,
@@ -770,7 +779,7 @@ impl Torrent {
                 }
             }
             TorrentMessage::FillMetadataRequest {
-                pid, // maybe use this to mark the peer as participant in the construction of
+                pid: _, // maybe use this to mark the peer as participant in the construction of
                 // metadata, and use it to penalize it in the case of a info hash mismatch
                 metadata_piece,
             } => {
@@ -1169,6 +1178,7 @@ impl Torrent {
     }
 
     /// Send a protocol message to a specific peer
+    #[allow(dead_code)]
     async fn send_message_to_peer(&self, pid: Pid, message: Message) {
         self.send_to_peer(pid, PeerMessage::SendMessage(message))
             .await;
@@ -1203,7 +1213,7 @@ impl Torrent {
             // TODO: Why use .to_string()?
             let announce = announce_url.to_string();
             let discovered_peers_tx = discovered_peers_tx.clone();
-            let torrent_tx = self.tx.clone();
+            let _torrent_tx = self.tx.clone();
             tokio::spawn(async move {
                 loop {
                     let response = tracker_client

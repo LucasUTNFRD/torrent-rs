@@ -9,6 +9,7 @@ use crate::bitfield::Bitfield;
 const BLOCK_SIZE: u32 = 16384;
 
 type PieceIndex = usize;
+#[allow(dead_code)]
 type BlockOffset = u32;
 
 /// Represents a unique block request
@@ -40,6 +41,7 @@ impl From<BlockRequest> for BlockInfo {
 }
 
 #[derive(Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[allow(dead_code)]
 struct PieceAvailability {
     npeers: usize,
     piece_index: PieceIndex,
@@ -72,6 +74,7 @@ pub struct PieceManager {
 }
 
 struct PieceMetadata {
+    #[allow(dead_code)]
     index: PieceIndex,
     /// Number of peers that have this piece
     num_peer: usize,
@@ -151,7 +154,7 @@ impl PieceManager {
         self.pieces.iter().all(|p| p.state == PieceState::Have)
     }
 
-    fn create_blocks_for_piece(piece_index: usize, piece_len: u32) -> Vec<BlockMetadata> {
+    fn create_blocks_for_piece(_piece_index: usize, piece_len: u32) -> Vec<BlockMetadata> {
         let mut blocks = Vec::new();
         let mut offset = 0;
 
@@ -169,7 +172,7 @@ impl PieceManager {
     }
 
     fn create_blocks_for_piece_downloaded(
-        piece_index: usize,
+        _piece_index: usize,
         piece_len: u32,
     ) -> Vec<BlockMetadata> {
         let mut blocks = Vec::new();
@@ -295,6 +298,7 @@ impl PieceManager {
         false
     }
 
+    #[allow(dead_code)]
     pub fn info_progress(&self) {
         let have = self
             .pieces
@@ -507,6 +511,7 @@ impl PieceManager {
     }
 
     /// Get all pending blocks for a piece (for debugging/monitoring)
+    #[allow(dead_code)]
     pub fn get_pending_blocks(&self, piece_index: u32) -> Vec<BlockInfo> {
         self.pieces
             .get(piece_index as usize)
@@ -555,6 +560,7 @@ impl PieceManager {
     }
 
     /// Check if all blocks in a piece have been downloaded
+    #[allow(dead_code)]
     pub fn is_piece_complete(&self, piece_index: u32) -> bool {
         self.pieces
             .get(piece_index as usize)
@@ -568,6 +574,7 @@ impl PieceManager {
     }
 
     /// Get statistics about pending bytes per piece (for prioritization)
+    #[allow(dead_code)]
     pub fn pieces_by_pending_bytes(&self) -> Vec<(PieceIndex, usize)> {
         let mut pieces_with_pending: Vec<_> = self
             .pieces
@@ -597,6 +604,7 @@ impl PieceManager {
         }
     }
     /// Print detailed debug information about all pieces and their blocks
+    #[allow(dead_code)]
     pub fn debug_print_state(&self) {
         println!("\n========== PIECE PICKER STATE DEBUG ==========");
         println!("Total Pieces: {}", self.pieces.len());
@@ -752,6 +760,8 @@ impl PieceBuffer {
     }
 
     /// Get missing byte ranges that haven't been received yet
+    #[allow(dead_code)]
+    #[allow(clippy::single_range_in_vec_init)]
     pub fn get_missing_ranges(&self) -> Vec<std::ops::Range<u32>> {
         if self.completed_ranges.is_empty() {
             return vec![0..self.expected_length];

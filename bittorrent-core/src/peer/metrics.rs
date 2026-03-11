@@ -23,6 +23,7 @@ pub struct PeerMetrics {
     ema_upload: AtomicU64, // f64 bits stored as u64
 
     // Choking algorithm specific tracking
+    #[allow(dead_code)]
     uploaded_in_last_round: AtomicU64,
     uploaded_since_unchoked: AtomicU64,
 }
@@ -87,16 +88,19 @@ impl PeerMetrics {
     }
 
     /// Get download rate in human-readable format
+    #[allow(dead_code)]
     pub fn get_download_rate_human(&self) -> String {
         format_bytes_per_second(self.get_download_rate())
     }
 
     /// Get bytes downloaded in human-readable format
+    #[allow(dead_code)]
     pub fn get_bytes_downloaded_human(&self) -> String {
         format_bytes(self.get_bytes_downloaded())
     }
 
     /// Get window downloaded bytes (since last update)
+    #[allow(dead_code)]
     pub fn window_downloaded(&self) -> u64 {
         self.window_downloaded.load(Ordering::Relaxed)
     }
@@ -155,6 +159,7 @@ impl PeerMetrics {
     // ==================== UPLOAD TRACKING ====================
 
     /// Record uploaded bytes
+    #[allow(dead_code)]
     pub fn record_upload(&self, bytes: u64) {
         self.total_uploaded.fetch_add(bytes, Ordering::Relaxed);
         self.window_uploaded.fetch_add(bytes, Ordering::Relaxed);
@@ -181,16 +186,19 @@ impl PeerMetrics {
     }
 
     /// Get upload rate in human-readable format
+    #[allow(dead_code)]
     pub fn get_upload_rate_human(&self) -> String {
         format_bytes_per_second(self.get_upload_rate())
     }
 
     /// Get bytes uploaded in human-readable format
+    #[allow(dead_code)]
     pub fn get_bytes_uploaded_human(&self) -> String {
         format_bytes(self.get_bytes_uploaded())
     }
 
     /// Get window uploaded bytes (since last update)
+    #[allow(dead_code)]
     pub fn window_uploaded(&self) -> u64 {
         self.window_uploaded.load(Ordering::Relaxed)
     }
@@ -198,27 +206,32 @@ impl PeerMetrics {
     // ==================== CHOKING ALGORITHM TRACKING ====================
 
     /// Get bytes uploaded in the last unchoke round
+    #[allow(dead_code)]
     pub fn uploaded_in_last_round(&self) -> u64 {
         self.uploaded_in_last_round.load(Ordering::Relaxed)
     }
 
     /// Get bytes uploaded since this peer was last unchoked
+    #[allow(dead_code)]
     pub fn uploaded_since_unchoked(&self) -> u64 {
         self.uploaded_since_unchoked.load(Ordering::Relaxed)
     }
 
     /// Reset the "last round" counter. Called at each unchoke interval.
+    #[allow(dead_code)]
     pub fn reset_round_counters(&self) {
         self.uploaded_in_last_round.store(0, Ordering::Relaxed);
     }
 
     /// Reset the "since unchoked" counter. Called when peer is choked.
+    #[allow(dead_code)]
     pub fn reset_since_unchoked(&self) {
         self.uploaded_since_unchoked.store(0, Ordering::Relaxed);
     }
 }
 
 /// Format bytes in human-readable format
+#[allow(dead_code)]
 pub fn format_bytes(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = 1024 * KB;
@@ -239,6 +252,7 @@ pub fn format_bytes(bytes: u64) -> String {
 }
 
 /// Format bytes per second in human-readable format
+#[allow(dead_code)]
 pub fn format_bytes_per_second(bytes_per_sec: u64) -> String {
     format!("{}/s", format_bytes(bytes_per_sec))
 }

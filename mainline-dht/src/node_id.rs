@@ -6,7 +6,7 @@ use std::{
 };
 
 use bittorrent_common::types::InfoHash;
-use crc::{CRC_32_ISCSI, Crc};
+use crc::{Crc, CRC_32_ISCSI};
 use rand::{RngExt, TryRng};
 
 const CASTAGNOLI: Crc<u32> = Crc::<u32>::new(&CRC_32_ISCSI);
@@ -84,7 +84,7 @@ impl NodeId {
 
         let mut rng = rand::rng();
 
-        rng.try_fill_bytes(&mut bytes);
+        let _ = rng.try_fill_bytes(&mut bytes);
 
         Self(bytes)
     }
@@ -277,7 +277,7 @@ impl NodeId {
 
 #[cfg(test)]
 mod test {
-    use crate::node_id::{NodeId, is_local_ipv4};
+    use crate::node_id::{is_local_ipv4, NodeId};
     use std::net::Ipv4Addr;
 
     #[test]
@@ -468,7 +468,7 @@ mod test {
         let temp_path = temp_dir().join("test_node_id_invalid.tmp");
 
         // Write invalid data (not 20 bytes)
-        std::fs::write(&temp_path, &[1, 2, 3, 4, 5]).expect("Failed to write test file");
+        std::fs::write(&temp_path, [1, 2, 3, 4, 5]).expect("Failed to write test file");
 
         // Should fail with InvalidData error
         let result = NodeId::load_or_generate(&temp_path);

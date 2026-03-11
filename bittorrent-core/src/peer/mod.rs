@@ -17,12 +17,14 @@ pub enum PeerMessage {
     SendBitfield { bitfield: Bitfield },
     SendChoke,
     SendUnchoke,
+    #[allow(dead_code)]
     Disconnect,
     SendMessage(Message),
     HaveMetadata(Arc<Info>),
     Connected { metrics: Arc<PeerMetrics> },
 }
 
+#[allow(dead_code)]
 pub struct PeerState {
     pub addr: SocketAddr,
     pub metrics: Arc<PeerMetrics>,

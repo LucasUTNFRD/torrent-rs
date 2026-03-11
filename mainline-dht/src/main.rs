@@ -91,7 +91,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn get_peers(dht: &Dht, info_hash: InfoHash) -> Result<(), Box<dyn std::error::Error>> {
-    let start = Instant::now();
+    let _start = Instant::now();
 
     let mut peer_recv = dht.get_peers(info_hash).await;
     let mut count = 0;

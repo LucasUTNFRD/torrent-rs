@@ -55,6 +55,7 @@ pub enum ConnectionError {
     Protocol(String),
 
     #[error("Connection timeout")]
+    #[allow(dead_code)]
     Timeout,
 
     #[error("Invalid handshake")]
@@ -434,7 +435,7 @@ impl Peer<Connected> {
             Message::Bitfield(payload) => self.on_bitfield(payload).await?,
             Message::Request(request_block) => self.on_request(request_block).await?,
             Message::Piece(block) => self.on_incoming_piece(block).await?,
-            Message::Cancel(block) => self.on_cancel().await?,
+            Message::Cancel(_block) => self.on_cancel().await?,
             Message::Port { port } => {
                 // Peers that receive this message should attempt to ping the node on the received port and IP address of the remote peer.
                 let node_addr: SocketAddr = SocketAddr::new(self.addr.ip(), port);
@@ -487,7 +488,7 @@ impl Peer<Connected> {
             }
             PeerMessage::Disconnect => todo!(),
             PeerMessage::SendMessage(protocol_msg) => {
-                if let Message::Piece(block) = &protocol_msg {}
+                if let Message::Piece(_block) = &protocol_msg {}
                 self.state.sink.send(protocol_msg).await?;
             }
 
@@ -1167,6 +1168,7 @@ pub fn spawn_outgoing_peer(
 }
 
 /// Spawn a peer task for an inbound connection (handshake already completed by session)
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_inbound_peer(
     pid: Pid,
     addr: SocketAddr,

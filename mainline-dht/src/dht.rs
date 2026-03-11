@@ -395,6 +395,7 @@ enum DhtCommand {
 // Internal: Pending request tracking
 // ============================================================================
 
+#[allow(dead_code)]
 struct PendingRequest {
     resp_tx: oneshot::Sender<KrpcMessage>,
 }
@@ -413,6 +414,7 @@ struct DhtActor {
     /// Token generation and validation.
     token_manager: TokenManager,
     /// Path to store the node ID file for persistence.
+    #[allow(dead_code)]
     id_file_path: Option<PathBuf>,
     /// Path to store the DHT state (routing table) for persistence.
     state_file_path: Option<PathBuf>,
@@ -429,10 +431,12 @@ struct GetPeersLookupState {
     /// Nodes with tokens for potential announce
     nodes_with_tokens: Vec<(CompactNodeInfo, Vec<u8>)>,
     /// Nodes we've queried
+    #[allow(dead_code)]
     queried_nodes: std::collections::HashSet<SocketAddr>,
     /// Channel to stream discovered peers to caller
     peer_tx: mpsc::Sender<Vec<SocketAddr>>,
     /// When the lookup started
+    #[allow(dead_code)]
     started_at: std::time::Instant,
 }
 
@@ -458,7 +462,7 @@ impl DhtActor {
         }
     }
 
-    async fn run(mut self, shared_node_id: Arc<std::sync::RwLock<NodeId>>) -> Result<(), DhtError> {
+    async fn run(mut self, _shared_node_id: Arc<std::sync::RwLock<NodeId>>) -> Result<(), DhtError> {
         let mut buf = [0u8; 4096];
         // Check for transaction timeouts every 500ms
         let mut timeout_interval = interval(Duration::from_millis(500));
@@ -635,7 +639,7 @@ impl DhtActor {
         }
 
         // Add persisted nodes to routing table
-        if let Some((saved_id, ref saved_nodes)) = persisted_nodes {
+        if let Some((_saved_id, ref saved_nodes)) = persisted_nodes {
             tracing::info!(
                 "Adding {} persisted nodes to routing table",
                 saved_nodes.len()

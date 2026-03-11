@@ -30,6 +30,7 @@ pub(crate) struct StorageState {
 
 pub struct TorrentCache {
     pub metainfo: Arc<Info>,
+    #[allow(dead_code)]
     pub name: String,
     pub files: Arc<[FileInfo]>,
     pub content_dir: PathBuf,

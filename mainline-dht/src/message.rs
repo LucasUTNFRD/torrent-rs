@@ -544,7 +544,11 @@ fn parse_response(dict: &BTreeMap<Vec<u8>, Bencode>) -> Result<MessageBody, DhtE
                     _ => {}
                 }
             }
-            if peers.is_empty() { None } else { Some(peers) }
+            if peers.is_empty() {
+                None
+            } else {
+                Some(peers)
+            }
         } else {
             None
         };
@@ -745,6 +749,7 @@ pub fn encode_compact_peer(addr: &SocketAddr) -> Vec<u8> {
 }
 
 /// Encode a single peer to compact format (6 bytes).
+#[allow(dead_code)]
 fn encode_compact_peer_v4(addr: &SocketAddrV4) -> Vec<u8> {
     let mut result = Vec::with_capacity(6);
     result.extend_from_slice(&addr.ip().octets());
