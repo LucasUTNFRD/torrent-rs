@@ -11,7 +11,7 @@ mod sim_tests {
     use std::sync::Arc;
     use turmoil;
 
-    use crate::mock::storage::{generate_piece, MockStorage};
+    use crate::mock::storage::{MockStorage, generate_piece};
 
     /// Build a synthetic single-file TorrentInfo with deterministic piece data.
     fn make_test_torrent(piece_length: u32, num_pieces: usize) -> TorrentInfo {
@@ -55,7 +55,7 @@ mod sim_tests {
     }
 
     #[test]
-    fn test_seeder_to_downloader_transfer() {
+    fn test_seeder_to_leecher_transfer() {
         let mut sim = turmoil::Builder::new().build();
 
         // Create a small test torrent: 2 pieces of 16 KiB each
@@ -79,9 +79,7 @@ mod sim_tests {
                     torrent.info.clone(),
                 ));
 
-                let session = Session::builder(config)
-                    .with_storage(storage)
-                    .build();
+                let session = Session::builder(config).with_storage(storage).build();
 
                 // Add torrent as a completed seed
                 let _id = session
@@ -108,9 +106,7 @@ mod sim_tests {
 
                 let storage = Arc::new(MockStorage::new());
 
-                let session = Session::builder(config)
-                    .with_storage(storage)
-                    .build();
+                let session = Session::builder(config).with_storage(storage).build();
 
                 // Add torrent as a download
                 let id = session
@@ -137,5 +133,10 @@ mod sim_tests {
 
         // Run the simulation until completion or timeout
         sim.run().expect("Simulation failed");
+    }
+
+    #[test]
+    fn test_optimistic_unchoke() {
+        todo!()
     }
 }
