@@ -42,6 +42,57 @@ impl std::fmt::Display for TorrentState {
     }
 }
 
+/// Current metrics and state for a specific torrent.
+///
+/// This is intended for high-frequency updates via watch channels.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TorrentMetrics {
+    pub id: TorrentId,
+    pub name: String,
+    pub state: TorrentState,
+    pub progress: f64,
+    pub download_rate: u64,
+    pub upload_rate: u64,
+    pub peers_connected: usize,
+    pub peers_discovered: usize,
+    pub size_bytes: u64,
+    pub downloaded_bytes: u64,
+    pub uploaded_bytes: u64,
+}
+
+impl Default for TorrentMetrics {
+    fn default() -> Self {
+        Self {
+            id: InfoHash::new([0u8; 20]),
+            name: String::new(),
+            state: TorrentState::Checking,
+            progress: 0.0,
+            download_rate: 0,
+            upload_rate: 0,
+            peers_connected: 0,
+            peers_discovered: 0,
+            size_bytes: 0,
+            downloaded_bytes: 0,
+            uploaded_bytes: 0,
+        }
+    }
+}
+
+/// Events emitted by the session for lifecycle changes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SessionEvent {
+    /// A new torrent has been added to the session.
+    TorrentAdded(TorrentId),
+    /// A torrent has been removed from the session.
+    TorrentRemoved(TorrentId),
+    /// A torrent has completed its download.
+    TorrentCompleted(TorrentId),
+    /// Metadata for a magnet link has been successfully fetched.
+    MetadataFetched(TorrentId),
+    /// An error occurred in a torrent.
+    TorrentError(TorrentId, String),
+}
+
 /// Summary information about a torrent.
 ///
 /// This provides a snapshot of a torrent's current state and progress.
