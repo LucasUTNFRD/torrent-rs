@@ -40,11 +40,12 @@
 mod bitfield;
 mod choker;
 mod metadata;
+mod net;
 mod peer;
 mod piece_picker;
 mod session;
 pub mod session_config;
-mod storage;
+pub mod storage;
 mod torrent;
 pub mod types;
 mod verify_torrent_file;

@@ -3,9 +3,9 @@ use std::{net::SocketAddr, sync::Arc, time::Duration};
 use async_trait::async_trait;
 use bittorrent_common::metainfo::Info;
 use peer_protocol::protocol::{BlockInfo, Message};
-use tokio::{net::TcpStream, sync::mpsc};
+use tokio::sync::mpsc;
 
-use crate::{bitfield::Bitfield, peer::metrics::PeerMetrics};
+use crate::{bitfield::Bitfield, net::TcpStream, peer::metrics::PeerMetrics};
 
 pub mod peer_connection;
 

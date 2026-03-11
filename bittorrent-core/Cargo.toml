@@ -3,6 +3,8 @@ name = "bittorrent-core"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+sim = ["dep:turmoil"]
 
 [dependencies]
 tokio.workspace = true
@@ -29,14 +31,13 @@ mainline-dht = { path = "../mainline-dht/" }
 directories.workspace = true
 chrono = { version = "0.4", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
-turmoil = "0.6"
+turmoil = { version = "0.7.1 ", optional = true }
 
 [[bench]]
 name = "storage_contention"
 harness = false
 
 [dev-dependencies]
-turmoil = "0.6"
 criterion = { version = "0.8", features = ["async_tokio"] }
 peer-protocol = { path = "../peer-protocol/" }
 tempfile = "3"

@@ -41,7 +41,8 @@ use bittorrent_common::{
     metainfo::{FileMode, Info},
     types::InfoHash,
 };
-use bittorrent_core::Storage;
+
+use bittorrent_core::storage::{DiskStorage, StorageBackend};
 use criterion::{BenchmarkId, Criterion, criterion_group, measurement::WallTime};
 use peer_protocol::protocol::BlockInfo;
 use sha1::{Digest, Sha1};
@@ -104,7 +105,7 @@ impl Drop for TempDir {
 }
 
 struct BenchEnv {
-    storage: Arc<Storage>,
+    storage: Arc<dyn StorageBackend>,
     setups: Vec<(InfoHash, Vec<Arc<[u8]>>)>,
     _tmp_dir: TempDir,
 }
@@ -120,7 +121,7 @@ async fn setup_env(num_torrents: usize) -> BenchEnv {
     ));
     std::fs::create_dir_all(&tmp_dir).unwrap();
 
-    let storage = Arc::new(Storage::with_download_dir(tmp_dir.clone()));
+    let storage = Arc::new(DiskStorage::with_download_dir(tmp_dir.clone()));
 
     let mut setups = Vec::with_capacity(num_torrents);
     for t in 0..num_torrents {
@@ -164,7 +165,7 @@ async fn seed_all_pieces(env: &BenchEnv) {
 
 /// One torrent session downloading: verify then write each piece.
 async fn simulate_download_session(
-    storage: Arc<Storage>,
+    storage: Arc<dyn StorageBackend>,
     info_hash: InfoHash,
     pieces_data: Vec<Arc<[u8]>>,
     latencies: Option<Arc<Mutex<Vec<Duration>>>>,
@@ -200,7 +201,7 @@ async fn simulate_download_session(
 /// until the storage thread processes it. With a single storage thread,
 /// reads from different torrents queue behind each other.
 async fn simulate_seed_session(
-    storage: Arc<Storage>,
+    storage: Arc<dyn StorageBackend>,
     info_hash: InfoHash,
     num_reads: usize,
     num_pieces: usize,

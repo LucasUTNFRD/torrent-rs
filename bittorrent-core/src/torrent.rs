@@ -19,11 +19,11 @@ use mainline_dht::DhtHandler;
 use peer_protocol::protocol::{Block, BlockInfo, Message};
 use thiserror::Error;
 use tokio::{
-    net::TcpStream,
     sync::{mpsc, oneshot, watch},
     time::sleep,
 };
-use tracing::{debug, field::debug, info, instrument, warn};
+
+use tracing::{debug, info, instrument, warn};
 use tracker_client::{ClientState, Events, TrackerError, TrackerHandler};
 use url::Url;
 
@@ -32,6 +32,7 @@ use crate::{
     bitfield::Bitfield,
     choker::Choker,
     metadata::{Metadata, MetadataState},
+    net::TcpStream,
     peer::{
         PeerMessage,
         metrics::PeerMetrics,
@@ -481,7 +482,7 @@ impl Torrent {
     // init piece collector
     async fn init_interal(&mut self) {
         if !self.metadata.has_metadata() {
-            debug("Should return here");
+            debug!("Should return here");
             return;
         }
 

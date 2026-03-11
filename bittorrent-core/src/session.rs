@@ -2,7 +2,6 @@
 //!
 //! The `Session` struct provides the public API for controlling the daemon,
 //! while `SessionManager` runs as a background task handling commands.
-
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -18,7 +17,6 @@ use magnet_uri::{Magnet, MagnetError};
 use peer_protocol::protocol::Handshake;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpListener,
     sync::{
         mpsc::{self, UnboundedSender},
         oneshot, watch,
@@ -31,6 +29,7 @@ use tracker_client::TrackerHandler;
 
 use crate::{
     SessionConfig,
+    net::TcpListener,
     storage::{DiskStorage, StorageBackend},
     torrent::{Torrent, TorrentError, TorrentMessage, TorrentStats},
     types::{SessionStats, TorrentDetails, TorrentId, TorrentState, TorrentSummary},
@@ -295,7 +294,6 @@ impl SessionManager {
     /// Main entry point - runs the session manager loop.
     pub async fn start(mut self) {
         let tracker = Arc::new(TrackerHandler::new(*CLIENT_ID));
-        let storage = self.storage.clone();
 
         // TODO: FOr now im ignoring the config builder of the DHT
         // but some ke feature we will need is to give a list of nodes as boostrap source
