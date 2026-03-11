@@ -33,7 +33,7 @@ use crate::{
     net::TcpListener,
     storage::{DiskStorage, StorageBackend},
     torrent::{Torrent, TorrentError, TorrentMessage},
-    types::{TorrentId, SessionEvent, TorrentMetrics},
+    types::{SessionEvent, TorrentId, TorrentMetrics},
     verify_torrent_file::verify_content,
 };
 

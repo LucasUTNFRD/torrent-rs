@@ -26,6 +26,7 @@ use peer_protocol::{
 use thiserror::Error;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
     sync::{mpsc, oneshot},
     time::interval,
 };
@@ -35,7 +36,6 @@ use tracing::{debug, instrument};
 
 use crate::{
     bitfield::{Bitfield, BitfieldError},
-    net::TcpStream,
     peer::{ConnectTimeout, PeerMessage, metrics::PeerMetrics},
     // piece_picker::DownloadTask,
     session::CLIENT_ID,
@@ -55,7 +55,6 @@ pub enum ConnectionError {
     Protocol(String),
 
     #[error("Connection timeout")]
-    #[allow(dead_code)]
     Timeout,
 
     #[error("Invalid handshake")]
@@ -376,11 +375,23 @@ impl Peer<Connected> {
     fn metric_update(&mut self) {
         self.state.metrics.update_rates();
 
+        // debug!(
+        //     "dr : {} | choked: {} | interested: {} | max_queue_size : {}, outgoing_requests: {} | slow_start : {}",
+        //     self.state.metrics.get_download_rate_human(),
+        //     self.state.choked,
+        //     self.state.interesting,
+        //     self.state.target_request_queue,
+        //     self.state.outgoing_request.len(),
+        //     self.state.slow_start
+        // );
+
         let current_rate = self.state.metrics.get_download_rate();
         if self.state.slow_start {
             let rate_increase = current_rate.saturating_sub(self.state.prev_download_rate);
 
-            // Logic: Require at least 5% growth to stay in slow start.
+            // 2025 Logic: Require at least 5% growth to stay in slow start.
+            // On high speed networks, 10kB/s is just noise.
+            // We use a minimum threshold of 10kB/s to avoid division issues at very low speeds.
             let threshold = std::cmp::max(current_rate / 20, 10_240);
 
             if current_rate > 0 && rate_increase < threshold {
@@ -423,7 +434,7 @@ impl Peer<Connected> {
             Message::Bitfield(payload) => self.on_bitfield(payload).await?,
             Message::Request(request_block) => self.on_request(request_block).await?,
             Message::Piece(block) => self.on_incoming_piece(block).await?,
-            Message::Cancel(_block) => self.on_cancel().await?,
+            Message::Cancel(block) => self.on_cancel().await?,
             Message::Port { port } => {
                 // Peers that receive this message should attempt to ping the node on the received port and IP address of the remote peer.
                 let node_addr: SocketAddr = SocketAddr::new(self.addr.ip(), port);
@@ -476,7 +487,7 @@ impl Peer<Connected> {
             }
             PeerMessage::Disconnect => todo!(),
             PeerMessage::SendMessage(protocol_msg) => {
-                if let Message::Piece(_block) = &protocol_msg {}
+                if let Message::Piece(block) = &protocol_msg {}
                 self.state.sink.send(protocol_msg).await?;
             }
 
@@ -640,9 +651,11 @@ impl Peer<Connected> {
 
             self.state.outgoing_request.insert(block);
             self.state.last_block_request = Instant::now();
-            self.state.sink.send(Message::Request(block)).await?;
+            self.state.sink.feed(Message::Request(block)).await?;
             debug!("SENT");
         }
+
+        self.state.sink.flush().await?;
 
         Ok(())
     }
@@ -830,12 +843,57 @@ impl Peer<Connected> {
                 .await;
 
             if self.state.slow_start {
+                // BUFFERBLOAT PROTECTION
+                // Calculate how many seconds of data are currently queued
+                let pending_bytes = self.state.outgoing_request.len() as u64 * 16384;
+                let current_rate = self.state.metrics.get_download_rate().max(1); // avoid div/0
+
+                let queue_duration_secs = pending_bytes / current_rate;
+
+                // If we have more than 5 seconds of data queued, STOP increasing.
+                // We are requesting faster than the peer can send.
+                if queue_duration_secs < 5 {
+                    self.state.target_request_queue += 1;
+
+                    // Cap it at max_outgoing_request
+                    if self.state.target_request_queue > self.state.max_outgoing_request {
+                        self.state.target_request_queue = self.state.max_outgoing_request;
+                    }
+                } else {
+                    debug!(
+                        "Bufferbloat detected ({}s queue). Exiting slow start.",
+                        queue_duration_secs
+                    );
+                    self.state.slow_start = false;
+                    // Note: We don't reset target_request_queue here immediately;
+                    // the metric_update tick (every 1s) will snap it back to BDP.
+                    // But request_block() will stop sending because in_flight (huge) > target (will be BDP).
+                }
+            }
+            // Calculate how many seconds of data are currently queued
+            let pending_bytes = self.state.outgoing_request.len() as u64 * 16384;
+            let current_rate = self.state.metrics.get_download_rate().max(1);
+
+            let queue_duration_secs = pending_bytes / current_rate;
+
+            // If we have more than 5 seconds of data queued, STOP increasing.
+            // We are requesting faster than the peer can send.
+            if queue_duration_secs < 5 {
                 self.state.target_request_queue += 1;
 
                 // Cap it at max_outgoing_request
                 if self.state.target_request_queue > self.state.max_outgoing_request {
                     self.state.target_request_queue = self.state.max_outgoing_request;
                 }
+            } else {
+                debug!(
+                    "Bufferbloat detected ({}s queue). Exiting slow start.",
+                    queue_duration_secs
+                );
+                self.state.slow_start = false;
+                // Note: We don't reset target_request_queue here immediately;
+                // the metric_update tick (every 1s) will snap it back to BDP.
+                // But request_block() will stop sending because in_flight (huge) > target (will be BDP).
             }
 
             self.request_block().await?;
@@ -939,16 +997,6 @@ impl Peer<Connected> {
             && reqq > 0
         {
             self.state.max_outgoing_request = self.state.max_outgoing_request.max(reqq as usize);
-        }
-
-        if let Some(v) = handshake.v {
-            let _ = self
-                .torrent_tx
-                .send(TorrentMessage::PeerExtendedHandshake {
-                    pid: self.pid,
-                    client_version: v,
-                })
-                .await;
         }
 
         Ok(())
@@ -1111,7 +1159,6 @@ pub fn spawn_outgoing_peer(
 }
 
 /// Spawn a peer task for an inbound connection (handshake already completed by session)
-#[allow(clippy::too_many_arguments)]
 pub fn spawn_inbound_peer(
     pid: Pid,
     addr: SocketAddr,

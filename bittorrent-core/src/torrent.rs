@@ -39,7 +39,7 @@ use crate::{
         peer_connection::{ConnectionError, spawn_inbound_peer, spawn_outgoing_peer},
     },
     piece_picker::{AvailabilityUpdate, BlockRequest, PieceManager, PieceState},
-    types::{FileInfo, PeerInfo, TrackerInfo, TorrentMetrics, SessionEvent},
+    types::{FileInfo, PeerInfo, SessionEvent, TorrentMetrics, TrackerInfo},
 };
 
 // Peer related
@@ -278,7 +278,11 @@ impl Torrent {
         shutdown_rx: watch::Receiver<()>,
         torrents_dir: PathBuf,
         event_tx: broadcast::Sender<SessionEvent>,
-    ) -> (Self, mpsc::Sender<TorrentMessage>, watch::Receiver<TorrentMetrics>) {
+    ) -> (
+        Self,
+        mpsc::Sender<TorrentMessage>,
+        watch::Receiver<TorrentMetrics>,
+    ) {
         let info_hash = torrent_info.info_hash;
         let trackers = torrent_info
             .all_trackers()
@@ -305,9 +309,13 @@ impl Torrent {
 
         let initial_metrics = TorrentMetrics {
             id: info_hash,
-            name: metadata.display_name().map(|s| s.to_string()).unwrap_or_else(|| info_hash.to_string()),
+            name: metadata
+                .display_name()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| info_hash.to_string()),
             state: crate::types::TorrentState::Downloading,
-            size_bytes: u64::try_from(metadata.info().map(|i| i.total_size()).unwrap_or(0)).unwrap_or(0),
+            size_bytes: u64::try_from(metadata.info().map(|i| i.total_size()).unwrap_or(0))
+                .unwrap_or(0),
             ..Default::default()
         };
         let (metrics_tx, metrics_rx) = watch::channel(initial_metrics);
@@ -348,7 +356,11 @@ impl Torrent {
         shutdown_rx: watch::Receiver<()>,
         torrents_dir: PathBuf,
         event_tx: broadcast::Sender<SessionEvent>,
-    ) -> (Self, mpsc::Sender<TorrentMessage>, watch::Receiver<TorrentMetrics>) {
+    ) -> (
+        Self,
+        mpsc::Sender<TorrentMessage>,
+        watch::Receiver<TorrentMetrics>,
+    ) {
         let info_hash = magnet.info_hash().expect("InfoHash is a mandatory field");
 
         let trackers = magnet
@@ -376,7 +388,10 @@ impl Torrent {
 
         let initial_metrics = TorrentMetrics {
             id: info_hash,
-            name: metadata.display_name().map(|s| s.to_string()).unwrap_or_else(|| info_hash.to_string()),
+            name: metadata
+                .display_name()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| info_hash.to_string()),
             state: crate::types::TorrentState::FetchingMetadata,
             ..Default::default()
         };
@@ -420,7 +435,11 @@ impl Torrent {
         shutdown_rx: watch::Receiver<()>,
         torrents_dir: PathBuf,
         event_tx: broadcast::Sender<SessionEvent>,
-    ) -> (Self, mpsc::Sender<TorrentMessage>, watch::Receiver<TorrentMetrics>) {
+    ) -> (
+        Self,
+        mpsc::Sender<TorrentMessage>,
+        watch::Receiver<TorrentMetrics>,
+    ) {
         let info_hash = torrent_info.info_hash;
         let trackers = torrent_info
             .all_trackers()
@@ -447,11 +466,16 @@ impl Torrent {
 
         let initial_metrics = TorrentMetrics {
             id: info_hash,
-            name: metadata.display_name().map(|s| s.to_string()).unwrap_or_else(|| info_hash.to_string()),
+            name: metadata
+                .display_name()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| info_hash.to_string()),
             state: crate::types::TorrentState::Seeding,
             progress: 1.0,
-            size_bytes: u64::try_from(metadata.info().map(|i| i.total_size()).unwrap_or(0)).unwrap_or(0),
-            downloaded_bytes: u64::try_from(metadata.info().map(|i| i.total_size()).unwrap_or(0)).unwrap_or(0),
+            size_bytes: u64::try_from(metadata.info().map(|i| i.total_size()).unwrap_or(0))
+                .unwrap_or(0),
+            downloaded_bytes: u64::try_from(metadata.info().map(|i| i.total_size()).unwrap_or(0))
+                .unwrap_or(0),
             ..Default::default()
         };
         let (metrics_tx, metrics_rx) = watch::channel(initial_metrics);
@@ -1038,7 +1062,9 @@ impl Torrent {
             } else {
                 info!("Torrent Download Completed");
             }
-            let _ = self.event_tx.send(SessionEvent::TorrentCompleted(self.info_hash));
+            let _ = self
+                .event_tx
+                .send(SessionEvent::TorrentCompleted(self.info_hash));
         }
     }
 
@@ -1061,7 +1087,9 @@ impl Torrent {
 
             self.broadcast_to_peers(PeerMessage::HaveMetadata(info))
                 .await;
-            let _ = self.event_tx.send(SessionEvent::MetadataFetched(self.info_hash));
+            let _ = self
+                .event_tx
+                .send(SessionEvent::MetadataFetched(self.info_hash));
         }
 
         Ok(())
@@ -1159,7 +1187,11 @@ impl Torrent {
             upload_rate,
             peers_connected: self.peers.len(),
             peers_discovered: self.metrics.peers_discovered.load(Ordering::Relaxed),
-            size_bytes: self.metadata.info().map(|i| i.total_size() as u64).unwrap_or(0),
+            size_bytes: self
+                .metadata
+                .info()
+                .map(|i| i.total_size() as u64)
+                .unwrap_or(0),
             downloaded_bytes: self.metrics.downloaded_bytes.load(Ordering::Relaxed),
             uploaded_bytes: self.metrics.uploaded_bytes.load(Ordering::Relaxed),
         };
