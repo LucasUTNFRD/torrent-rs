@@ -169,6 +169,10 @@ pub enum TorrentMessage {
         supports_ext: bool,
         peer_id: PeerID,
     },
+    /// Direct peer injection (for simulation testing, bypasses tracker/DHT)
+    ConnectPeer {
+        addr: SocketAddr,
+    },
 }
 
 /// Statistics for a torrent
@@ -927,6 +931,10 @@ impl Torrent {
                     supports_ext,
                     peer_id,
                 });
+            }
+            TorrentMessage::ConnectPeer { addr } => {
+                info!("Injected outbound peer connection to {}", addr);
+                self.add_peer(PeerSource::Outbound(addr));
             }
         }
         Ok(())

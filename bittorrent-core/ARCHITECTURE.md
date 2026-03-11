@@ -9,7 +9,7 @@ The system follows a hierarchical actor model where each level manages the lifec
 ```text
 Session (Root)
 ├── DhtHandler (Mainline DHT)
-├── Storage (Disk Actor)
+├── Storage (Disk Actor) - Now injected via Arc<Dyn StorageBackend>
 └── Torrent (Per-InfoHash Actor)
     ├── TrackerHandler (Announce Logic)
     └── Peer (Wire Protocol Actor - One per connection)

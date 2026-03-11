@@ -51,7 +51,7 @@ pub mod types;
 pub mod utils;
 mod verify_torrent_file;
 
-pub use session::{Session, SessionError};
+pub use session::{Session, SessionBuilder, SessionError};
 pub use session_config::SessionConfig;
 pub use storage::StorageBackend;
 pub use torrent::{TorrentState as InternalTorrentState, TorrentStats};

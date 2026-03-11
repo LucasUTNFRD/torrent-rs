@@ -65,6 +65,11 @@ impl SessionBuilder {
         }
     }
 
+    pub fn with_storage(mut self, storage: Arc<dyn StorageBackend>) -> Self {
+        self.storage = Some(storage);
+        self
+    }
+
     pub fn build(self) -> Session {
         let (tx, rx) = mpsc::unbounded_channel();
         let (event_tx, event_rx) = broadcast::channel(1024);
@@ -107,6 +112,11 @@ pub enum SessionCommand {
         resp: oneshot::Sender<Result<watch::Receiver<TorrentMetrics>, SessionError>>,
     },
     Shutdown {
+        resp: oneshot::Sender<Result<(), SessionError>>,
+    },
+    ConnectPeer {
+        id: TorrentId,
+        addr: std::net::SocketAddr,
         resp: oneshot::Sender<Result<(), SessionError>>,
     },
 }
@@ -159,6 +169,21 @@ impl Session {
                 info: metainfo,
                 resp: tx,
             })
+            .map_err(|_| SessionError::SessionClosed)?;
+        rx.await.map_err(|_| SessionError::SessionClosed)?
+    }
+
+    /// Add a torrent from a pre-built `TorrentInfo` struct.
+    ///
+    /// This is primarily useful for simulation testing where torrent
+    /// metadata is generated programmatically.
+    pub async fn add_torrent_info(
+        &self,
+        info: TorrentInfo,
+    ) -> Result<TorrentId, SessionError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(SessionCommand::AddTorrent { info, resp: tx })
             .map_err(|_| SessionError::SessionClosed)?;
         rx.await.map_err(|_| SessionError::SessionClosed)?
     }
@@ -244,6 +269,22 @@ impl Session {
             }
         }
         Err(SessionError::SessionClosed)
+    }
+
+    /// Instruct a torrent to connect to a peer at the given address.
+    ///
+    /// This bypasses tracker/DHT discovery and is primarily used for
+    /// simulation testing where peers are known ahead of time.
+    pub async fn connect_peer(
+        &self,
+        id: TorrentId,
+        addr: std::net::SocketAddr,
+    ) -> Result<(), SessionError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(SessionCommand::ConnectPeer { id, addr, resp: tx })
+            .map_err(|_| SessionError::SessionClosed)?;
+        rx.await.map_err(|_| SessionError::SessionClosed)?
     }
 
     pub fn suscribe(&self) -> broadcast::Receiver<SessionEvent> {
@@ -400,6 +441,19 @@ impl SessionManager {
                     let result = self.handle_shutdown(&shutdown_tx, dht.as_ref()).await;
                     let _ = resp.send(result);
                     break;
+                }
+                SessionCommand::ConnectPeer { id, addr, resp } => {
+                    let result = {
+                        let sessions = self.sessions.read().unwrap();
+                        match sessions.get(&id) {
+                            Some(entry) => {
+                                let _ = entry.tx.try_send(TorrentMessage::ConnectPeer { addr });
+                                Ok(())
+                            }
+                            None => Err(SessionError::TorrentNotFound(id)),
+                        }
+                    };
+                    let _ = resp.send(result);
                 }
             }
         }
