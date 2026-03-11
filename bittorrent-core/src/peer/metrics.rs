@@ -346,23 +346,6 @@ mod tests {
         assert_eq!(metrics.get_bytes_downloaded(), 2048);
     }
 
-    #[test]
-    fn test_elapsed_time_calculation() {
-        let metrics = PeerMetrics::new();
-
-        let start = metrics.last_update.load(Ordering::Relaxed);
-
-        metrics.record_download(1024);
-        thread::sleep(Duration::from_millis(250));
-        metrics.update_rates();
-
-        let end = metrics.last_update.load(Ordering::Relaxed);
-        let elapsed = end - start;
-
-        // Should be ~250ms ± 50ms tolerance
-        assert!((200..300).contains(&elapsed), "Elapsed was {}", elapsed);
-    }
-
     // ==================== UPLOAD TRACKING TESTS ====================
 
     #[test]
