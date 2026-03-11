@@ -51,6 +51,6 @@ mod verify_torrent_file;
 
 pub use session::{Session, SessionError};
 pub use session_config::SessionConfig;
-pub use storage::Storage;
+pub use storage::StorageBackend;
 pub use torrent::{TorrentState as InternalTorrentState, TorrentStats};
 pub use types::{SessionStats, TorrentId, TorrentState, TorrentSummary};

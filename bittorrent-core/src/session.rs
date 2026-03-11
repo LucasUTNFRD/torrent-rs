@@ -31,7 +31,7 @@ use tracker_client::TrackerHandler;
 
 use crate::{
     SessionConfig,
-    storage::Storage,
+    storage::{DiskStorage, StorageBackend},
     torrent::{Torrent, TorrentError, TorrentMessage, TorrentStats},
     types::{SessionStats, TorrentDetails, TorrentId, TorrentState, TorrentSummary},
     verify_torrent_file::verify_content,
@@ -49,6 +49,32 @@ pub struct Session {
     pub handle: JoinHandle<()>,
     /// Channel for sending commands to the ``SessionManager``
     tx: UnboundedSender<SessionCommand>,
+}
+
+pub struct SessionBuilder {
+    config: SessionConfig,
+    storage: Option<Arc<dyn StorageBackend>>,
+}
+
+impl SessionBuilder {
+    pub fn new(config: SessionConfig) -> Self {
+        Self {
+            config,
+            storage: None,
+        }
+    }
+
+    pub fn build(self) -> Session {
+        let (tx, rx) = mpsc::unbounded_channel();
+
+        let storage = self.storage.unwrap_or_else(|| Arc::new(DiskStorage::new()));
+
+        let manager = SessionManager::new(self.config, rx, storage);
+
+        let handle = tokio::task::spawn(async move { manager.start().await });
+
+        Session { handle, tx }
+    }
 }
 
 /// Commands sent from Session to ``SessionManager``.
@@ -118,13 +144,12 @@ impl Session {
     /// Create a new session with the given configuration.
     ///
     /// This spawns a background task that manages torrents and handles commands.
-    #[must_use]
     pub fn new(config: SessionConfig) -> Self {
-        let (tx, rx) = mpsc::unbounded_channel();
+        SessionBuilder::new(config).build()
+    }
 
-        let manager = SessionManager::new(config, rx);
-        let handle = tokio::task::spawn(async move { manager.start().await });
-        Self { handle, tx }
+    pub fn builder(config: SessionConfig) -> SessionBuilder {
+        SessionBuilder::new(config)
     }
 
     /// Add a torrent from a .torrent file.
@@ -250,21 +275,27 @@ struct SessionManager {
     config: SessionConfig,
     rx: mpsc::UnboundedReceiver<SessionCommand>,
     sessions: Arc<RwLock<HashMap<InfoHash, TorrentEntry>>>,
+    storage: Arc<dyn StorageBackend>,
 }
 
 impl SessionManager {
-    pub fn new(config: SessionConfig, rx: mpsc::UnboundedReceiver<SessionCommand>) -> Self {
+    pub fn new(
+        config: SessionConfig,
+        rx: mpsc::UnboundedReceiver<SessionCommand>,
+        storage: Arc<dyn StorageBackend>,
+    ) -> Self {
         Self {
             config,
             rx,
             sessions: Arc::new(RwLock::new(HashMap::new())),
+            storage,
         }
     }
 
     /// Main entry point - runs the session manager loop.
     pub async fn start(mut self) {
         let tracker = Arc::new(TrackerHandler::new(*CLIENT_ID));
-        let storage = Arc::new(Storage::new());
+        let storage = self.storage.clone();
 
         // TODO: FOr now im ignoring the config builder of the DHT
         // but some ke feature we will need is to give a list of nodes as boostrap source
@@ -320,23 +351,13 @@ impl SessionManager {
         while let Some(cmd) = self.rx.recv().await {
             match cmd {
                 SessionCommand::AddTorrent { info, resp } => {
-                    let result = self.handle_add_torrent(
-                        info,
-                        &tracker,
-                        dht.as_ref(),
-                        &storage,
-                        &shutdown_rx,
-                    );
+                    let result =
+                        self.handle_add_torrent(info, &tracker, dht.as_ref(), &shutdown_rx);
                     let _ = resp.send(result);
                 }
                 SessionCommand::AddMagnet { magnet, resp } => {
-                    let result = self.handle_add_magnet(
-                        magnet,
-                        &tracker,
-                        dht.as_ref(),
-                        &storage,
-                        &shutdown_rx,
-                    );
+                    let result =
+                        self.handle_add_magnet(magnet, &tracker, dht.as_ref(), &shutdown_rx);
                     let _ = resp.send(result);
                 }
                 SessionCommand::SeedFile {
@@ -353,7 +374,6 @@ impl SessionManager {
                             content_dir,
                             &tracker,
                             dht.as_ref(),
-                            &storage,
                             &shutdown_rx,
                         )
                         .await
@@ -400,7 +420,6 @@ impl SessionManager {
         content_dir: PathBuf,
         tracker: &Arc<TrackerHandler>,
         dht: Option<&Arc<DhtHandler>>,
-        storage: &Arc<Storage>,
         shutdown_rx: &watch::Receiver<()>,
     ) -> Result<TorrentId, SessionError> {
         let info_hash = metainfo.info_hash;
@@ -423,7 +442,7 @@ impl SessionManager {
             metainfo,
             tracker.clone(),
             dht.cloned(),
-            storage.clone(),
+            self.storage.clone(),
             shutdown_rx.clone(),
             self.config.torrents_dir.clone(),
         );
@@ -450,7 +469,6 @@ impl SessionManager {
         metainfo: TorrentInfo,
         tracker: &Arc<TrackerHandler>,
         dht: Option<&Arc<DhtHandler>>,
-        storage: &Arc<Storage>,
         shutdown_rx: &watch::Receiver<()>,
     ) -> Result<TorrentId, SessionError> {
         let info_hash = metainfo.info_hash;
@@ -472,7 +490,7 @@ impl SessionManager {
             metainfo,
             tracker.clone(),
             dht.cloned(),
-            storage.clone(),
+            self.storage.clone(),
             shutdown_rx.clone(),
             self.config.torrents_dir.clone(),
         );
@@ -499,7 +517,6 @@ impl SessionManager {
         magnet: Magnet,
         tracker: &Arc<TrackerHandler>,
         dht: Option<&Arc<DhtHandler>>,
-        storage: &Arc<Storage>,
         shutdown_rx: &watch::Receiver<()>,
     ) -> Result<TorrentId, SessionError> {
         let info_hash = magnet.info_hash().ok_or(SessionError::InvalidMagnet)?;
@@ -532,7 +549,7 @@ impl SessionManager {
             magnet,
             tracker.clone(),
             dht.cloned(),
-            storage.clone(),
+            self.storage.clone(),
             shutdown_rx.clone(),
             self.config.torrents_dir.clone(),
         );

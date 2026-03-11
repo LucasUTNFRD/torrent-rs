@@ -28,7 +28,7 @@ use tracker_client::{ClientState, Events, TrackerError, TrackerHandler};
 use url::Url;
 
 use crate::{
-    Storage,
+    StorageBackend,
     bitfield::Bitfield,
     choker::Choker,
     metadata::{Metadata, MetadataState},
@@ -216,7 +216,7 @@ pub struct Torrent {
 
     tracker_client: Arc<TrackerHandler>,
     dht_client: Option<Arc<DhtHandler>>,
-    storage: Arc<Storage>,
+    storage: Arc<dyn StorageBackend>,
 
     metrics: Arc<Metrics>,
     peers: HashMap<Pid, InternalPeerState>,
@@ -263,7 +263,7 @@ impl Torrent {
         torrent_info: TorrentInfo,
         tracker_client: Arc<TrackerHandler>,
         dht_client: Option<Arc<DhtHandler>>,
-        storage: Arc<Storage>,
+        storage: Arc<dyn StorageBackend>,
         shutdown_rx: watch::Receiver<()>,
         torrents_dir: PathBuf,
     ) -> (Self, mpsc::Sender<TorrentMessage>) {
@@ -320,7 +320,7 @@ impl Torrent {
         magnet: Magnet,
         tracker_client: Arc<TrackerHandler>,
         dht_client: Option<Arc<DhtHandler>>,
-        storage: Arc<Storage>,
+        storage: Arc<dyn StorageBackend>,
         shutdown_rx: watch::Receiver<()>,
         torrents_dir: PathBuf,
     ) -> (Self, mpsc::Sender<TorrentMessage>) {
@@ -380,7 +380,7 @@ impl Torrent {
         torrent_info: TorrentInfo,
         tracker_client: Arc<TrackerHandler>,
         dht_client: Option<Arc<DhtHandler>>,
-        storage: Arc<Storage>,
+        storage: Arc<dyn StorageBackend>,
         shutdown_rx: watch::Receiver<()>,
         torrents_dir: PathBuf,
     ) -> (Self, mpsc::Sender<TorrentMessage>) {
