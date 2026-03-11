@@ -48,6 +48,7 @@ pub mod session_config;
 pub mod storage;
 mod torrent;
 pub mod types;
+pub mod utils;
 mod verify_torrent_file;
 
 pub use session::{Session, SessionError};
