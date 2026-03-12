@@ -4,6 +4,7 @@ use std::{
     time::Duration,
 };
 
+use bittorrent_common::types::PeerID;
 use directories::ProjectDirs;
 
 /// Configuration for creating a new Session.
@@ -23,6 +24,9 @@ pub struct SessionConfig {
     pub unchoke_slots_limit: u32,
     /// How long to wait before dropping a stalled peer (test_timeout.cpp)
     pub peer_timeout: std::time::Duration,
+
+    /// Custom peer ID for this session. If None, a global one is used.
+    pub peer_id: Option<PeerID>,
 }
 
 impl Default for SessionConfig {
@@ -42,6 +46,7 @@ impl Default for SessionConfig {
             unchoke_slots_limit: 4,
             max_connections_per_torrent: 50,
             peer_timeout: Duration::from_secs(120),
+            peer_id: None,
         }
     }
 }

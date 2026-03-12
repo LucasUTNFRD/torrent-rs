@@ -38,8 +38,11 @@ harness = false
 
 [dev-dependencies]
 async-trait = "0.1"
+bittorrent-common = { path = "../bittorrent-common/" }
 criterion = { version = "0.8", features = ["async_tokio"] }
+futures = "0.3.31"
 peer-protocol = { path = "../peer-protocol/" }
 sha1 = "0.10"
 bytes = "1.10.1"
 tempfile = "3"
+tokio-util = { version = "0.7.15", features = ["codec"] }

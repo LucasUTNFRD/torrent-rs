@@ -60,7 +60,7 @@ pub enum PeerSource {
         supports_ext: bool,
         peer_id: PeerID,
     },
-    Outbound(SocketAddr), // Socket to connect + Our peer id
+    Outbound(SocketAddr),
 }
 
 impl PeerSource {
@@ -76,7 +76,7 @@ impl PeerSource {
         }
     }
 }
-//
+
 #[derive(Debug, Error)]
 pub enum TorrentError {
     #[error("Failed {0}")]
@@ -86,10 +86,6 @@ pub enum TorrentError {
     #[error("Invalid Magnet URI: {0}")]
     #[allow(dead_code)]
     InvalidMagnet(String),
-
-    #[error("Verification error: {0}")]
-    #[allow(dead_code)]
-    Verification(String),
 
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
@@ -218,6 +214,7 @@ struct TrackerState {
 
 pub struct Torrent {
     info_hash: InfoHash,
+    peer_id: PeerID,
 
     /// metadata and metadata state of the torrent
     metadata: Metadata,
@@ -275,6 +272,7 @@ struct InternalPeerState {
 impl Torrent {
     /// Create a new Torrent from a .torrent file (with complete metadata)
     pub fn from_torrent_info(
+        peer_id: PeerID,
         torrent_info: TorrentInfo,
         tracker_client: Arc<TrackerHandler>,
         dht_client: Option<Arc<DhtHandler>>,
@@ -282,6 +280,7 @@ impl Torrent {
         shutdown_rx: watch::Receiver<()>,
         torrents_dir: PathBuf,
         event_tx: broadcast::Sender<SessionEvent>,
+        unchoke_slots: usize,
     ) -> (
         Self,
         mpsc::Sender<TorrentMessage>,
@@ -327,6 +326,7 @@ impl Torrent {
         (
             Self {
                 info_hash,
+                peer_id,
                 metadata,
                 state: TorrentState::Leeching,
                 trackers,
@@ -340,7 +340,7 @@ impl Torrent {
                 rx,
                 bitfield,
                 piece_mananger: None,
-                choker: Choker::new(4),
+                choker: Choker::new(unchoke_slots),
                 torrents_dir,
                 content_dir: None,
                 metrics_tx,
@@ -353,6 +353,7 @@ impl Torrent {
 
     /// Create a new Torrent from a magnet URI (metadata needs to be fetched)
     pub fn from_magnet(
+        peer_id: PeerID,
         magnet: Magnet,
         tracker_client: Arc<TrackerHandler>,
         dht_client: Option<Arc<DhtHandler>>,
@@ -360,6 +361,7 @@ impl Torrent {
         shutdown_rx: watch::Receiver<()>,
         torrents_dir: PathBuf,
         event_tx: broadcast::Sender<SessionEvent>,
+        unchoke_slots: usize,
     ) -> (
         Self,
         mpsc::Sender<TorrentMessage>,
@@ -404,6 +406,7 @@ impl Torrent {
         (
             Self {
                 info_hash,
+                peer_id,
                 metadata,
                 state: TorrentState::Leeching,
                 trackers,
@@ -417,7 +420,7 @@ impl Torrent {
                 rx,
                 bitfield: Bitfield::new(),
                 piece_mananger: None,
-                choker: Choker::new(4),
+                choker: Choker::new(unchoke_slots),
                 torrents_dir,
                 content_dir: None,
                 metrics_tx,
@@ -428,9 +431,8 @@ impl Torrent {
         )
     }
 
-    const DEFAULT_UPLOAD_SLOTS: usize = 4;
-
     pub fn as_seed(
+        peer_id: PeerID,
         content_dir: PathBuf,
         torrent_info: TorrentInfo,
         tracker_client: Arc<TrackerHandler>,
@@ -439,6 +441,7 @@ impl Torrent {
         shutdown_rx: watch::Receiver<()>,
         torrents_dir: PathBuf,
         event_tx: broadcast::Sender<SessionEvent>,
+        unchoke_slots: usize,
     ) -> (
         Self,
         mpsc::Sender<TorrentMessage>,
@@ -487,6 +490,7 @@ impl Torrent {
         (
             Self {
                 info_hash,
+                peer_id,
                 metadata,
                 state: TorrentState::Seeding,
                 trackers,
@@ -500,7 +504,7 @@ impl Torrent {
                 rx,
                 bitfield,
                 piece_mananger: None,
-                choker: Choker::new(Self::DEFAULT_UPLOAD_SLOTS),
+                choker: Choker::new(unchoke_slots),
                 torrents_dir,
                 content_dir: Some(content_dir),
                 metrics_tx,
@@ -525,7 +529,7 @@ impl Torrent {
         self.announce(&discovered_peers_tx);
 
         // Periodic choker tick (every 10 seconds)
-        let mut choker_ticker = tokio::time::interval(Duration::from_secs(10));
+        let mut choker_ticker = tokio::time::interval(Duration::from_secs(30));
         choker_ticker.tick().await;
 
         // Periodic metrics update (every 1 second)
@@ -676,22 +680,33 @@ impl Torrent {
 
         match peer {
             PeerSource::Inbound {
-                stream,
-                remote_addr,
-                supports_ext,
-                peer_id,
-            } => spawn_inbound_peer(
-                pid,
-                remote_addr,
+                peer_id: remote_peer_id,
                 stream,
                 supports_ext,
-                self.info_hash,
-                peer_id,
-                self.tx.clone(),
-                peer_rx,
-            ),
+                remote_addr,
+            } => {
+                spawn_inbound_peer(
+                    pid,
+                    remote_addr,
+                    stream,
+                    supports_ext,
+                    self.info_hash,
+                    self.peer_id,
+                    remote_peer_id,
+                    self.tx.clone(),
+                    peer_rx,
+                );
+            }
+
             PeerSource::Outbound(remote_addr) => {
-                spawn_outgoing_peer(pid, remote_addr, self.info_hash, self.tx.clone(), peer_rx)
+                spawn_outgoing_peer(
+                    pid,
+                    remote_addr,
+                    self.info_hash,
+                    self.peer_id,
+                    self.tx.clone(),
+                    peer_rx,
+                )
             }
         }
 

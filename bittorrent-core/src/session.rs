@@ -107,6 +107,12 @@ pub enum SessionCommand {
         content_dir: PathBuf,
         resp: oneshot::Sender<Result<TorrentId, SessionError>>,
     },
+    /// Seed a torrent without verifying content on disk.
+    /// Used for simulation testing where storage is mock/in-memory.
+    SeedTorrentUnchecked {
+        info: TorrentInfo,
+        resp: oneshot::Sender<Result<TorrentId, SessionError>>,
+    },
     GetMetrics {
         id: TorrentId,
         resp: oneshot::Sender<Result<watch::Receiver<TorrentMetrics>, SessionError>>,
@@ -177,10 +183,7 @@ impl Session {
     ///
     /// This is primarily useful for simulation testing where torrent
     /// metadata is generated programmatically.
-    pub async fn add_torrent_info(
-        &self,
-        info: TorrentInfo,
-    ) -> Result<TorrentId, SessionError> {
+    pub async fn add_torrent_info(&self, info: TorrentInfo) -> Result<TorrentId, SessionError> {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(SessionCommand::AddTorrent { info, resp: tx })
@@ -226,6 +229,21 @@ impl Session {
             })
             .map_err(|_| SessionError::SessionClosed)?;
 
+        rx.await.map_err(|_| SessionError::SessionClosed)?
+    }
+
+    /// Seed a torrent without verifying content on disk.
+    ///
+    /// This is used for simulation testing where storage is mock/in-memory
+    /// and no real files exist on disk.
+    pub async fn seed_torrent_unchecked(
+        &self,
+        info: TorrentInfo,
+    ) -> Result<TorrentId, SessionError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(SessionCommand::SeedTorrentUnchecked { info, resp: tx })
+            .map_err(|_| SessionError::SessionClosed)?;
         rx.await.map_err(|_| SessionError::SessionClosed)?
     }
 
@@ -309,6 +327,7 @@ struct TorrentEntry {
 /// Internal session manager that runs as a background task.
 struct SessionManager {
     config: SessionConfig,
+    peer_id: PeerID,
     event_tx: broadcast::Sender<SessionEvent>,
     rx: mpsc::UnboundedReceiver<SessionCommand>,
     sessions: Arc<RwLock<HashMap<InfoHash, TorrentEntry>>>,
@@ -322,8 +341,10 @@ impl SessionManager {
         storage: Arc<dyn StorageBackend>,
         event_tx: broadcast::Sender<SessionEvent>,
     ) -> Self {
+        let peer_id = config.peer_id.unwrap_or(*CLIENT_ID);
         Self {
             config,
+            peer_id,
             event_tx,
             rx,
             sessions: Arc::new(RwLock::new(HashMap::new())),
@@ -333,7 +354,12 @@ impl SessionManager {
 
     /// Main entry point - runs the session manager loop.
     pub async fn start(mut self) {
+        // TrackerHandler eagerly binds a UDP socket, which turmoil doesn't support.
+        // In sim mode, create a no-op handler (announce calls will return channel errors).
+        #[cfg(not(feature = "sim"))]
         let tracker = Arc::new(TrackerHandler::new(*CLIENT_ID));
+        #[cfg(feature = "sim")]
+        let tracker = Arc::new(TrackerHandler::new_noop());
 
         // TODO: FOr now im ignoring the config builder of the DHT
         // but some ke feature we will need is to give a list of nodes as boostrap source
@@ -404,7 +430,7 @@ impl SessionManager {
                     resp,
                 } => {
                     // 1. Validate metadate from .torrent with  content_dir
-                    let is_valid = verify_content(&content_dir, &info).unwrap();
+                    let is_valid = verify_content(&content_dir, &info).expect("Failed to verify");
 
                     let result = if is_valid {
                         self.handle_seed_torrent(
@@ -420,6 +446,19 @@ impl SessionManager {
                         todo!("Return a proper session error");
                     };
 
+                    let _ = resp.send(result);
+                }
+                SessionCommand::SeedTorrentUnchecked { info, resp } => {
+                    // Skip verify_content — used for simulation with mock storage
+                    let result = self
+                        .handle_seed_torrent(
+                            info,
+                            PathBuf::new(),
+                            &tracker,
+                            dht.as_ref(),
+                            &shutdown_rx,
+                        )
+                        .await;
                     let _ = resp.send(result);
                 }
                 SessionCommand::RemoveTorrent { id, resp } => {
@@ -483,6 +522,7 @@ impl SessionManager {
         let size_bytes = u64::try_from(metainfo.info.total_size()).expect("size is non-negative");
 
         let (torrent, tx, metrics_rx) = Torrent::as_seed(
+            self.peer_id,
             content_dir,
             metainfo,
             tracker.clone(),
@@ -491,6 +531,7 @@ impl SessionManager {
             shutdown_rx.clone(),
             self.config.torrents_dir.clone(),
             self.event_tx.clone(),
+            self.config.unchoke_slots_limit as usize,
         );
 
         let handle = tokio::spawn(async move { torrent.start_session().await });
@@ -536,6 +577,7 @@ impl SessionManager {
         let size_bytes = u64::try_from(metainfo.info.total_size()).expect("size is non-negative");
 
         let (torrent, tx, metrics_rx) = Torrent::from_torrent_info(
+            self.peer_id,
             metainfo,
             tracker.clone(),
             dht.cloned(),
@@ -543,6 +585,7 @@ impl SessionManager {
             shutdown_rx.clone(),
             self.config.torrents_dir.clone(),
             self.event_tx.clone(),
+            self.config.unchoke_slots_limit as usize,
         );
 
         let handle = tokio::spawn(async move { torrent.start_session().await });
@@ -599,6 +642,7 @@ impl SessionManager {
             .unwrap_or_else(|| info_hash.to_string());
 
         let (torrent, tx, metrics_rx) = Torrent::from_magnet(
+            self.peer_id,
             magnet,
             tracker.clone(),
             dht.cloned(),
@@ -606,6 +650,7 @@ impl SessionManager {
             shutdown_rx.clone(),
             self.config.torrents_dir.clone(),
             self.event_tx.clone(),
+            self.config.unchoke_slots_limit as usize,
         );
 
         let handle = tokio::spawn(async move { torrent.start_session().await });
@@ -691,6 +736,7 @@ impl SessionManager {
     fn spawn_tcp_listener(&self) {
         let sessions = self.sessions.clone();
         let listen_addr = self.config.listen_addr;
+        let peer_id = self.peer_id;
 
         tokio::spawn(async move {
             let listener = TcpListener::bind(listen_addr)
@@ -701,6 +747,7 @@ impl SessionManager {
             while let Ok((mut stream, remote_addr)) = listener.accept().await {
                 tracing::debug!("Accepted connection from {:?}", remote_addr);
                 let sessions = sessions.clone();
+                let peer_id = peer_id;
 
                 tokio::spawn(async move {
                     let mut buf = BytesMut::zeroed(Handshake::HANDSHAKE_LEN);
@@ -734,7 +781,15 @@ impl SessionManager {
                         return;
                     }
 
-                    let handshake = Handshake::new(*CLIENT_ID, remote_handshake.info_hash);
+                    if remote_handshake.peer_id == peer_id {
+                        tracing::debug!(
+                            "Rejecting self-connection from {:?}",
+                            remote_addr
+                        );
+                        return;
+                    }
+
+                    let handshake = Handshake::new(peer_id, remote_handshake.info_hash);
                     if let Err(e) = stream.write_all(&handshake.to_bytes()).await {
                         tracing::debug!(
                             error = ?e,

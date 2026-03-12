@@ -1,10 +1,10 @@
-use std::{
-    collections::{BTreeMap, HashMap, HashSet},
-    net::SocketAddr,
-    sync::Arc,
-    time::{Duration },
+use crate::{
+    bitfield::{Bitfield, BitfieldError},
+    net::{ConnectTimeout, TcpStream},
+    peer::{PeerMessage, metrics::PeerMetrics},
+    session::CLIENT_ID,
+    torrent::{Pid, TorrentMessage},
 };
-
 use bencode::Bencode;
 use bittorrent_common::{
     metainfo::Info,
@@ -23,24 +23,20 @@ use peer_protocol::{
     },
     protocol::{Block, BlockInfo, Handshake, Message},
 };
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    net::SocketAddr,
+    sync::Arc,
+    time::Duration,
+};
 use thiserror::Error;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     sync::{mpsc, oneshot},
-    time::{Instant,interval},
-
+    time::{Instant, interval},
 };
-
 use tokio_util::codec::Framed;
 use tracing::{debug, instrument};
-
-use crate::{
-    bitfield::{Bitfield, BitfieldError},
-    net::TcpStream,
-    peer::{ConnectTimeout, PeerMessage, metrics::PeerMetrics},
-    session::CLIENT_ID,
-    torrent::{Pid, TorrentMessage},
-};
 
 ///The metadata is handled in blocks of 16KiB (16384 Bytes).
 const UT_METADATA_ID: u8 = 1;
@@ -62,6 +58,9 @@ pub enum ConnectionError {
 
     #[error("Bitfield error")]
     BitfieldError(#[from] BitfieldError),
+
+    #[error("Self connection detected")]
+    SelfConnection,
 }
 
 pub trait ConnectionState {}
@@ -71,6 +70,7 @@ pub struct Peer<S: ConnectionState> {
     torrent_tx: mpsc::Sender<TorrentMessage>,
     cmd_rx: mpsc::Receiver<PeerMessage>,
     info_hash: InfoHash,
+    peer_id: PeerID,
     pid: Pid,
 }
 
@@ -85,13 +85,15 @@ impl Peer<New> {
     pub const fn new(
         pid: Pid,
         addr: SocketAddr,
-        info_hash: InfoHash, //maybe move this into a new_outbound
+        info_hash: InfoHash,
+        peer_id: PeerID,
         torrent_tx: mpsc::Sender<TorrentMessage>,
         cmd_rx: mpsc::Receiver<PeerMessage>,
     ) -> Self {
         Self {
             addr,
             info_hash,
+            peer_id,
             torrent_tx,
             cmd_rx,
             pid,
@@ -108,6 +110,7 @@ impl Peer<New> {
             torrent_tx: self.torrent_tx,
             cmd_rx: self.cmd_rx,
             info_hash: self.info_hash,
+            peer_id: self.peer_id,
             pid: self.pid,
         })
     }
@@ -119,7 +122,7 @@ impl Peer<Handshaking> {
     pub async fn handshake(mut self) -> Result<Peer<Connected>, ConnectionError> {
         debug!("Initiating handshake with peer at {}", self.addr);
 
-        let handshake = Handshake::new(*CLIENT_ID, self.info_hash);
+        let handshake = Handshake::new(self.peer_id, self.info_hash);
 
         debug!("Sending handshake message to peer");
         self.state.stream.write_all(&handshake.to_bytes()).await?;
@@ -139,6 +142,11 @@ impl Peer<Handshaking> {
             return Err(ConnectionError::InvalidHandshake);
         }
 
+        if remote_handshake.peer_id == self.peer_id {
+            debug!("Handshake failed: self connection detected");
+            return Err(ConnectionError::SelfConnection);
+        }
+
         let _ = self
             .torrent_tx
             .send(TorrentMessage::PeerHandshake {
@@ -155,6 +163,7 @@ impl Peer<Handshaking> {
             addr: self.addr,
             torrent_tx: self.torrent_tx,
             info_hash: self.info_hash,
+            peer_id: self.peer_id,
             pid: self.pid,
         })
     }
@@ -1144,12 +1153,13 @@ pub fn spawn_outgoing_peer(
     pid: Pid,
     addr: SocketAddr,
     info_hash: InfoHash,
+    peer_id: PeerID,
     torrent_tx: mpsc::Sender<TorrentMessage>,
     cmd_rx: mpsc::Receiver<PeerMessage>,
 ) {
     tokio::spawn(async move {
         let result: Result<(), ConnectionError> = async {
-            let p0 = Peer::new(pid, addr, info_hash, torrent_tx.clone(), cmd_rx);
+            let p0 = Peer::new(pid, addr, info_hash, peer_id, torrent_tx.clone(), cmd_rx);
             // Establish connection to remote peer
             let p1 = p0.connect().await?;
             // Handshake remote peer
@@ -1176,12 +1186,16 @@ pub fn spawn_inbound_peer(
     supports_extended: bool,
     info_hash: InfoHash,
     peer_id: PeerID,
+    remote_peer_id: PeerID,
     torrent_tx: mpsc::Sender<TorrentMessage>,
     cmd_rx: mpsc::Receiver<PeerMessage>,
 ) {
     tokio::spawn(async move {
         let _ = torrent_tx
-            .send(TorrentMessage::PeerHandshake { pid, peer_id })
+            .send(TorrentMessage::PeerHandshake {
+                pid,
+                peer_id: remote_peer_id,
+            })
             .await;
 
         let peer: Peer<Connected> = Peer {
@@ -1190,6 +1204,7 @@ pub fn spawn_inbound_peer(
             torrent_tx,
             cmd_rx,
             info_hash,
+            peer_id,
             pid,
         };
 

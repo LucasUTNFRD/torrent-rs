@@ -20,7 +20,7 @@ use tokio::sync::mpsc;
 
 pub struct StorageManager {
     storage: Arc<StorageState>,
-    pub rx: tokio::sync::mpsc::Receiver<StorageMessage>,
+    pub rx: mpsc::Receiver<StorageMessage>,
 }
 
 pub(crate) struct StorageState {
