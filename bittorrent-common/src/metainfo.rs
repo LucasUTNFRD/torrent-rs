@@ -705,7 +705,7 @@ mod test {
         let file =
             parse_torrent_from_file("../sample_torrents/sample.torrent").expect("parse torrent");
 
-        let file2 =
+        let _file2 =
             parse_torrent_from_file("../sample_torrents/kubuntu-25.04-desktop-amd64.iso.torrent")
                 .expect("parse torrent");
 

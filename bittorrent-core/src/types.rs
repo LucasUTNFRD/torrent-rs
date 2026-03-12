@@ -4,9 +4,7 @@
 //! and provide a stable interface between the daemon and clients.
 
 use bittorrent_common::types::InfoHash;
-use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 
 /// Torrent identifier - uses ``InfoHash`` for stability across restarts.
 ///
@@ -42,6 +40,57 @@ impl std::fmt::Display for TorrentState {
             Self::Error => write!(f, "Error"),
         }
     }
+}
+
+/// Current metrics and state for a specific torrent.
+///
+/// This is intended for high-frequency updates via watch channels.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TorrentMetrics {
+    pub id: TorrentId,
+    pub name: String,
+    pub state: TorrentState,
+    pub progress: f64,
+    pub download_rate: u64,
+    pub upload_rate: u64,
+    pub peers_connected: usize,
+    pub peers_discovered: usize,
+    pub size_bytes: u64,
+    pub downloaded_bytes: u64,
+    pub uploaded_bytes: u64,
+}
+
+impl Default for TorrentMetrics {
+    fn default() -> Self {
+        Self {
+            id: InfoHash::new([0u8; 20]),
+            name: String::new(),
+            state: TorrentState::Checking,
+            progress: 0.0,
+            download_rate: 0,
+            upload_rate: 0,
+            peers_connected: 0,
+            peers_discovered: 0,
+            size_bytes: 0,
+            downloaded_bytes: 0,
+            uploaded_bytes: 0,
+        }
+    }
+}
+
+/// Events emitted by the session for lifecycle changes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SessionEvent {
+    /// A new torrent has been added to the session.
+    TorrentAdded(TorrentId),
+    /// A torrent has been removed from the session.
+    TorrentRemoved(TorrentId),
+    /// A torrent has completed its download.
+    TorrentCompleted(TorrentId),
+    /// Metadata for a magnet link has been successfully fetched.
+    MetadataFetched(TorrentId),
+    /// An error occurred in a torrent.
+    TorrentError(TorrentId, String),
 }
 
 /// Summary information about a torrent.
@@ -95,62 +144,4 @@ pub struct FileInfo {
     pub path: String,
     pub size: u64,
     pub progress: f64,
-}
-
-/// Detailed information about a torrent, including peers, trackers, and files.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TorrentDetails {
-    #[serde(flatten)]
-    pub summary: TorrentSummary,
-    pub peers: Vec<PeerInfo>,
-    pub trackers: Vec<TrackerInfo>,
-    pub files: Vec<FileInfo>,
-}
-
-/// Aggregate statistics for the entire session.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct SessionStats {
-    /// Number of torrents currently downloading
-    pub torrents_downloading: usize,
-    /// Number of torrents currently seeding
-    pub torrents_seeding: usize,
-    /// Total download rate across all torrents (bytes/sec)
-    pub total_download_rate: u64,
-    /// Total upload rate across all torrents (bytes/sec)
-    pub total_upload_rate: u64,
-    /// Number of nodes in the DHT routing table (None if DHT disabled)
-    pub dht_nodes: Option<usize>,
-}
-
-/// Configuration for creating a new Session.
-#[derive(Debug, Clone)]
-pub struct SessionConfig {
-    /// Port to listen on for incoming peer connections
-    pub port: u16,
-    /// Directory where downloaded files are saved
-    pub save_path: PathBuf,
-    /// Whether to enable DHT for peer discovery
-    pub enable_dht: bool,
-    /// Base config directory (e.g., ~/.config/torrent-rs/)
-    pub config_dir: PathBuf,
-    /// Directory for storing .torrent files (config_dir/torrents/)
-    pub torrents_dir: PathBuf,
-}
-
-impl Default for SessionConfig {
-    fn default() -> Self {
-        let config_dir = ProjectDirs::from("com", "torrent-rs", "torrent-rs")
-            .map(|dirs| dirs.config_dir().to_path_buf())
-            .unwrap_or_else(|| PathBuf::from(".config/torrent-rs"));
-
-        let torrents_dir = config_dir.join("torrents");
-
-        Self {
-            port: 6881,
-            save_path: PathBuf::from("."),
-            enable_dht: true,
-            config_dir,
-            torrents_dir,
-        }
-    }
 }

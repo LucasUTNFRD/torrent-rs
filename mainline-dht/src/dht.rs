@@ -7,6 +7,7 @@
 //! - Announce peer participation (announce_peer)
 //! - Server mode (responding to incoming queries)
 
+use rand::RngExt;
 use std::{
     fs,
     net::{Ipv4Addr, SocketAddr, ToSocketAddrs},
@@ -394,6 +395,7 @@ enum DhtCommand {
 // Internal: Pending request tracking
 // ============================================================================
 
+#[allow(dead_code)]
 struct PendingRequest {
     resp_tx: oneshot::Sender<KrpcMessage>,
 }
@@ -412,6 +414,7 @@ struct DhtActor {
     /// Token generation and validation.
     token_manager: TokenManager,
     /// Path to store the node ID file for persistence.
+    #[allow(dead_code)]
     id_file_path: Option<PathBuf>,
     /// Path to store the DHT state (routing table) for persistence.
     state_file_path: Option<PathBuf>,
@@ -428,10 +431,12 @@ struct GetPeersLookupState {
     /// Nodes with tokens for potential announce
     nodes_with_tokens: Vec<(CompactNodeInfo, Vec<u8>)>,
     /// Nodes we've queried
+    #[allow(dead_code)]
     queried_nodes: std::collections::HashSet<SocketAddr>,
     /// Channel to stream discovered peers to caller
     peer_tx: mpsc::Sender<Vec<SocketAddr>>,
     /// When the lookup started
+    #[allow(dead_code)]
     started_at: std::time::Instant,
 }
 
@@ -457,7 +462,10 @@ impl DhtActor {
         }
     }
 
-    async fn run(mut self, shared_node_id: Arc<std::sync::RwLock<NodeId>>) -> Result<(), DhtError> {
+    async fn run(
+        mut self,
+        _shared_node_id: Arc<std::sync::RwLock<NodeId>>,
+    ) -> Result<(), DhtError> {
         let mut buf = [0u8; 4096];
         // Check for transaction timeouts every 500ms
         let mut timeout_interval = interval(Duration::from_millis(500));
@@ -634,7 +642,7 @@ impl DhtActor {
         }
 
         // Add persisted nodes to routing table
-        if let Some((saved_id, ref saved_nodes)) = persisted_nodes {
+        if let Some((_saved_id, ref saved_nodes)) = persisted_nodes {
             tracing::info!(
                 "Adding {} persisted nodes to routing table",
                 saved_nodes.len()
@@ -1143,7 +1151,7 @@ impl DhtActor {
                                         let peer_vec: Vec<SocketAddr> = peers
                                             .iter()
                                             .filter(|p| state.peers.insert(**p))
-                                            .map(|p| *p)
+                                            .copied()
                                             .collect();
 
                                         if !peer_vec.is_empty() {
@@ -1456,7 +1464,6 @@ impl DhtActor {
     /// 2. Neighborhood Maintenance: Aggressive for our own bucket
     /// 3. Proactive Recovery: Fill empty buckets, random recovery
     fn perform_maintenance(&mut self) {
-        use rand::Rng;
         let mut rng = rand::rng();
 
         // 1. Bucket Maintenance: Trigger find_node for stale buckets
@@ -1537,18 +1544,18 @@ impl DhtActor {
         }
 
         // - Randomly (1 in 8 chance) to recover from buckets full of broken nodes
-        if rng.random_range(0..8) == 0 {
-            if let Some(bucket_index) = (0..160).find(|_| true) {
-                let target_id = self.routing_table.random_id_in_bucket_range(bucket_index);
+        if rng.random_range(0..8) == 0
+            && let Some(bucket_index) = (0..160).find(|_| true)
+        {
+            let target_id = self.routing_table.random_id_in_bucket_range(bucket_index);
 
-                if let Some(node) = self.routing_table.get_random_node() {
-                    tracing::debug!(
-                        "Random proactive recovery: find_node to {} for target {:?}",
-                        node.addr,
-                        target_id
-                    );
-                    let _ = self.send_find_node(node.addr, target_id);
-                }
+            if let Some(node) = self.routing_table.get_random_node() {
+                tracing::debug!(
+                    "Random proactive recovery: find_node to {} for target {:?}",
+                    node.addr,
+                    target_id
+                );
+                let _ = self.send_find_node(node.addr, target_id);
             }
         }
     }

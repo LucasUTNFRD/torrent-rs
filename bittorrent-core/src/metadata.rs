@@ -206,6 +206,7 @@ impl Metadata {
         }
     }
 
+    #[allow(dead_code)]
     pub fn is_valid(&self) -> bool {
         match self {
             Metadata::TorrentFile(_) => true, // Torrent files are always valid
@@ -356,6 +357,7 @@ impl Metadata {
         }
     }
 
+    #[allow(dead_code)]
     pub fn info_hash(&self) -> InfoHash {
         match &self {
             Self::TorrentFile(info) => info.as_ref().info_hash,
@@ -374,6 +376,7 @@ impl Metadata {
     }
 
     /// Check if this torrent needs metadata fetching
+    #[allow(dead_code)]
     pub fn needs_metadata(&self) -> bool {
         match &self {
             Metadata::TorrentFile(_) => false,

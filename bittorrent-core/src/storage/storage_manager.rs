@@ -20,7 +20,7 @@ use tokio::sync::mpsc;
 
 pub struct StorageManager {
     storage: Arc<StorageState>,
-    pub rx: tokio::sync::mpsc::Receiver<StorageMessage>,
+    pub rx: mpsc::Receiver<StorageMessage>,
 }
 
 pub(crate) struct StorageState {
@@ -30,6 +30,7 @@ pub(crate) struct StorageState {
 
 pub struct TorrentCache {
     pub metainfo: Arc<Info>,
+    #[allow(dead_code)]
     pub name: String,
     pub files: Arc<[FileInfo]>,
     pub content_dir: PathBuf,

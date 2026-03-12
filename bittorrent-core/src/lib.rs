@@ -40,15 +40,19 @@
 mod bitfield;
 mod choker;
 mod metadata;
+mod net;
 mod peer;
 mod piece_picker;
 mod session;
-mod storage;
+pub mod session_config;
+pub mod storage;
 mod torrent;
 pub mod types;
+pub mod utils;
 mod verify_torrent_file;
 
-pub use session::{Session, SessionError};
-pub use storage::Storage;
+pub use session::{Session, SessionBuilder, SessionError};
+pub use session_config::SessionConfig;
+pub use storage::StorageBackend;
 pub use torrent::{TorrentState as InternalTorrentState, TorrentStats};
-pub use types::{SessionConfig, SessionStats, TorrentId, TorrentState, TorrentSummary};
+pub use types::{TorrentId, TorrentState, TorrentSummary};

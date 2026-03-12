@@ -9,6 +9,7 @@ use crate::bitfield::Bitfield;
 const BLOCK_SIZE: u32 = 16384;
 
 type PieceIndex = usize;
+#[allow(dead_code)]
 type BlockOffset = u32;
 
 /// Represents a unique block request
@@ -40,6 +41,7 @@ impl From<BlockRequest> for BlockInfo {
 }
 
 #[derive(Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[allow(dead_code)]
 struct PieceAvailability {
     npeers: usize,
     piece_index: PieceIndex,
@@ -72,6 +74,7 @@ pub struct PieceManager {
 }
 
 struct PieceMetadata {
+    #[allow(dead_code)]
     index: PieceIndex,
     /// Number of peers that have this piece
     num_peer: usize,
@@ -151,7 +154,7 @@ impl PieceManager {
         self.pieces.iter().all(|p| p.state == PieceState::Have)
     }
 
-    fn create_blocks_for_piece(piece_index: usize, piece_len: u32) -> Vec<BlockMetadata> {
+    fn create_blocks_for_piece(_piece_index: usize, piece_len: u32) -> Vec<BlockMetadata> {
         let mut blocks = Vec::new();
         let mut offset = 0;
 
@@ -169,7 +172,7 @@ impl PieceManager {
     }
 
     fn create_blocks_for_piece_downloaded(
-        piece_index: usize,
+        _piece_index: usize,
         piece_len: u32,
     ) -> Vec<BlockMetadata> {
         let mut blocks = Vec::new();
@@ -295,6 +298,7 @@ impl PieceManager {
         false
     }
 
+    #[allow(dead_code)]
     pub fn info_progress(&self) {
         let have = self
             .pieces
@@ -338,7 +342,7 @@ impl PieceManager {
 
             // Find pieces that overlap with this file
             let start_piece = (current_offset / piece_length) as usize;
-            let end_piece = ((file_end + piece_length - 1) / piece_length) as usize;
+            let end_piece = file_end.div_ceil(piece_length) as usize;
 
             for i in start_piece..end_piece {
                 if i >= self.pieces.len() {
@@ -507,6 +511,7 @@ impl PieceManager {
     }
 
     /// Get all pending blocks for a piece (for debugging/monitoring)
+    #[allow(dead_code)]
     pub fn get_pending_blocks(&self, piece_index: u32) -> Vec<BlockInfo> {
         self.pieces
             .get(piece_index as usize)
@@ -555,6 +560,7 @@ impl PieceManager {
     }
 
     /// Check if all blocks in a piece have been downloaded
+    #[allow(dead_code)]
     pub fn is_piece_complete(&self, piece_index: u32) -> bool {
         self.pieces
             .get(piece_index as usize)
@@ -568,6 +574,7 @@ impl PieceManager {
     }
 
     /// Get statistics about pending bytes per piece (for prioritization)
+    #[allow(dead_code)]
     pub fn pieces_by_pending_bytes(&self) -> Vec<(PieceIndex, usize)> {
         let mut pieces_with_pending: Vec<_> = self
             .pieces
@@ -595,113 +602,6 @@ impl PieceManager {
         for request in requests {
             self.delete_request(*request);
         }
-    }
-    /// Print detailed debug information about all pieces and their blocks
-    pub fn debug_print_state(&self) {
-        println!("\n========== PIECE PICKER STATE DEBUG ==========");
-        println!("Total Pieces: {}", self.pieces.len());
-        println!("Total Heat Entries: {}", self.heat.len());
-
-        // Summary statistics
-        let mut total_blocks = 0;
-        let mut not_requested_blocks = 0;
-        let mut requested_blocks = 0;
-        let mut downloaded_blocks = 0;
-
-        let mut not_requested_pieces = 0;
-        let mut in_progress_pieces = 0;
-        let mut downloaded_pieces = 0;
-        let mut have_pieces = 0;
-
-        for piece in &self.pieces {
-            match piece.state {
-                PieceState::NotRequested => not_requested_pieces += 1,
-                PieceState::InProgress => in_progress_pieces += 1,
-                PieceState::Downloaded => downloaded_pieces += 1,
-                PieceState::Have => have_pieces += 1,
-            }
-
-            for block in &piece.blocks {
-                total_blocks += 1;
-                match block.state {
-                    BlockState::NotRequested => not_requested_blocks += 1,
-                    BlockState::Requested { .. } => requested_blocks += 1,
-                    BlockState::Downloaded => downloaded_blocks += 1,
-                }
-            }
-        }
-
-        println!("\n--- Piece Summary ---");
-        println!("  NotRequested: {}", not_requested_pieces);
-        println!("  InProgress:   {}", in_progress_pieces);
-        println!("  Downloaded:   {}", downloaded_pieces);
-        println!("  Have:         {}", have_pieces);
-
-        println!("\n--- Block Summary ---");
-        println!("  Total:        {}", total_blocks);
-        println!("  NotRequested: {}", not_requested_blocks);
-        println!("  Requested:    {}", requested_blocks);
-        println!("  Downloaded:   {}", downloaded_blocks);
-
-        let progress_pct = if total_blocks > 0 {
-            (downloaded_blocks as f64 / total_blocks as f64) * 100.0
-        } else {
-            0.0
-        };
-        println!("  Progress:     {:.2}%", progress_pct);
-
-        println!("\n--- Heat Map (Top 20) ---");
-        let mut heat_entries: Vec<_> = self.heat.iter().collect();
-        heat_entries.sort_by_key(|(_, heat)| std::cmp::Reverse(**heat));
-
-        for (request, heat) in heat_entries.iter().take(20) {
-            println!(
-                "  Piece {} Block @{:6} ({:5} bytes): heat={}",
-                request.piece_index, request.begin, request.length, heat
-            );
-        }
-
-        if heat_entries.len() > 20 {
-            println!("  ... and {} more entries", heat_entries.len() - 20);
-        }
-
-        println!("\n--- Detailed Piece State ---");
-        for piece in &self.pieces {
-            // Only print pieces that have activity
-            if piece.state == PieceState::NotRequested {
-                continue;
-            }
-
-            println!(
-                "Piece {:4} | State: {:12?} | Peers: {:3} | Blocks: {}/{}",
-                piece.index,
-                piece.state,
-                piece.num_peer,
-                piece
-                    .blocks
-                    .iter()
-                    .filter(|b| matches!(b.state, BlockState::Downloaded))
-                    .count(),
-                piece.blocks.len()
-            );
-
-            // Print block details for in-progress pieces
-            if piece.state == PieceState::InProgress {
-                for (i, block) in piece.blocks.iter().enumerate() {
-                    let state_str = match block.state {
-                        BlockState::NotRequested => "NotRequested".to_string(),
-                        BlockState::Requested { heat } => format!("Requested(heat={})", heat),
-                        BlockState::Downloaded => "Downloaded".to_string(),
-                    };
-                    println!(
-                        "  Block {:2} | Offset: {:6} | Length: {:5} | State: {}",
-                        i, block.offset, block.length, state_str
-                    );
-                }
-            }
-        }
-
-        println!("==============================================\n");
     }
 }
 
@@ -752,6 +652,8 @@ impl PieceBuffer {
     }
 
     /// Get missing byte ranges that haven't been received yet
+    #[allow(dead_code)]
+    #[allow(clippy::single_range_in_vec_init)]
     pub fn get_missing_ranges(&self) -> Vec<std::ops::Range<u32>> {
         if self.completed_ranges.is_empty() {
             return vec![0..self.expected_length];

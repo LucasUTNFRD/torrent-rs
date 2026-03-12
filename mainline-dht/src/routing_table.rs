@@ -1,6 +1,6 @@
-use std::time::{Duration, Instant};
-
 use crate::{node::Node, node_id::NodeId};
+use rand::RngExt;
+use std::time::{Duration, Instant};
 
 /// K is the maximum number of nodes per bucket (per BEP 0005).
 pub const K: usize = 8;
@@ -27,6 +27,7 @@ pub struct Bucket {
     /// When this bucket last split or grew (for neighborhood maintenance).
     pub last_grow_time: Instant,
     /// Index of this bucket (0 = closest to our ID, 159 = furthest).
+    #[allow(dead_code)]
     pub index: usize,
     /// Maximum number of nodes this bucket can hold.
     pub max_count: usize,
@@ -54,7 +55,8 @@ impl Bucket {
 
     /// Check if this bucket is the one containing our own node ID
     /// (bucket 0 contains IDs closest to ours).
-    pub fn is_own_bucket(&self, local_id: &NodeId) -> bool {
+    #[allow(dead_code)]
+    pub fn is_own_bucket(&self, _local_id: &NodeId) -> bool {
         self.index == 0
     }
 
@@ -82,7 +84,7 @@ impl Bucket {
 impl RoutingTable {
     /// Create a new routing table for the given local node ID.
     pub fn new(local_node_id: NodeId) -> Self {
-        let buckets = (0..NUM_BUCKETS).map(|i| Bucket::new(i)).collect();
+        let buckets = (0..NUM_BUCKETS).map(Bucket::new).collect();
         Self {
             local_node_id,
             buckets,
@@ -139,6 +141,7 @@ impl RoutingTable {
     }
 
     /// Update an existing node's status to Good.
+    #[allow(dead_code)]
     pub fn mark_node_good(&mut self, node_id: &NodeId) {
         let Some(index) = self.bucket_index(node_id) else {
             return;
@@ -220,6 +223,7 @@ impl RoutingTable {
     }
 
     /// Get all buckets that need maintenance (haven't been updated in timeout).
+    #[allow(dead_code)]
     pub fn get_buckets_needing_maintenance(&self) -> Vec<&Bucket> {
         self.buckets
             .iter()
@@ -233,6 +237,7 @@ impl RoutingTable {
     }
 
     /// Get a mutable reference to the bucket containing our own node ID.
+    #[allow(dead_code)]
     pub fn get_own_bucket_mut(&mut self) -> &mut Bucket {
         &mut self.buckets[0]
     }
@@ -243,7 +248,6 @@ impl RoutingTable {
             if b.nodes.is_empty() {
                 None
             } else {
-                use rand::Rng;
                 let idx = rand::rng().random_range(0..b.nodes.len());
                 b.nodes.get(idx)
             }
@@ -263,7 +267,6 @@ impl RoutingTable {
             return None;
         }
 
-        use rand::Rng;
         let bucket_idx = rand::rng().random_range(0..non_empty_buckets.len());
         let (_, bucket) = &non_empty_buckets[bucket_idx];
 
@@ -278,12 +281,11 @@ impl RoutingTable {
     /// Get a random ID within a bucket's range.
     /// Bucket i covers IDs with XOR distance having bit length (i+1).
     pub fn random_id_in_bucket_range(&self, bucket_index: usize) -> NodeId {
-        use rand::Rng;
         let mut rng = rand::rng();
 
         // For bucket i, we want IDs with bitlen(distance) == i + 1
         // This means the (i)th bit of the distance should be set
-        let mut id_bytes = self.local_node_id.as_bytes();
+        let id_bytes = self.local_node_id.as_bytes();
         let mut result = [0u8; 20];
         result.copy_from_slice(&id_bytes);
 
@@ -296,8 +298,8 @@ impl RoutingTable {
         result[byte_idx] ^= 1 << bit_in_byte;
 
         // Randomize remaining lower bits
-        for i in (byte_idx + 1)..20 {
-            result[i] = rng.random();
+        for byte in result.iter_mut().skip(byte_idx + 1) {
+            *byte = rng.random();
         }
 
         // Randomize the lower bits in the same byte
@@ -310,7 +312,6 @@ impl RoutingTable {
     /// Generate a random ID in our own bucket with randomized last byte.
     /// Used for aggressive neighborhood maintenance.
     pub fn random_id_in_own_bucket(&self) -> NodeId {
-        use rand::Rng;
         let mut rng = rand::rng();
 
         let mut result = self.local_node_id.as_bytes();
@@ -320,17 +321,19 @@ impl RoutingTable {
     }
 
     /// Get all buckets that are empty and could potentially be filled.
+    #[allow(dead_code)]
     pub fn get_empty_buckets(&self) -> Vec<&Bucket> {
         self.buckets.iter().filter(|b| b.nodes.is_empty()).collect()
     }
 
     /// Get a random empty bucket (for proactive recovery).
+    #[allow(dead_code)]
     pub fn get_random_empty_bucket(&self) -> Option<&Bucket> {
         let empty: Vec<_> = self.get_empty_buckets();
         if empty.is_empty() {
             return None;
         }
-        use rand::Rng;
+
         let idx = rand::rng().random_range(0..empty.len());
         empty.get(idx).copied()
     }

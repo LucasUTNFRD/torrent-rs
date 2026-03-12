@@ -14,7 +14,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use rand::RngCore;
+use rand::TryRng;
 
 /// Token rotation interval (5 minutes per BEP 5).
 const ROTATION_INTERVAL: Duration = Duration::from_secs(5 * 60);
@@ -43,8 +43,8 @@ impl TokenManager {
     pub fn new() -> Self {
         let mut current = [0u8; SECRET_SIZE];
         let mut previous = [0u8; SECRET_SIZE];
-        rand::rng().fill_bytes(&mut current);
-        rand::rng().fill_bytes(&mut previous);
+        let _ = rand::rng().try_fill_bytes(&mut current);
+        let _ = rand::rng().try_fill_bytes(&mut previous);
 
         Self {
             current_secret: current,
@@ -77,7 +77,7 @@ impl TokenManager {
     fn maybe_rotate(&mut self) {
         if self.last_rotation.elapsed() >= ROTATION_INTERVAL {
             self.previous_secret = self.current_secret;
-            rand::rng().fill_bytes(&mut self.current_secret);
+            let _ = rand::rng().try_fill_bytes(&mut self.current_secret);
             self.last_rotation = Instant::now();
             tracing::debug!("Token secret rotated");
         }
