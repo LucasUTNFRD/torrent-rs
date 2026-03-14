@@ -260,15 +260,6 @@ pub enum TorrentState {
     Leeching,
 }
 
-struct InternalPeerState {
-    addr: SocketAddr,
-    peer_id: Option<PeerID>,
-    client_name: Option<String>,
-    tx: mpsc::Sender<PeerMessage>,
-    metrics: Arc<PeerMetrics>,
-    pending_requests: Vec<BlockInfo>,
-}
-
 impl Torrent {
     /// Create a new Torrent from a .torrent file (with complete metadata)
     pub fn from_torrent_info(
@@ -532,8 +523,8 @@ impl Torrent {
         let mut choker_ticker = tokio::time::interval(Duration::from_secs(30));
         choker_ticker.tick().await;
 
-        // Periodic metrics update (every 1 second)
-        let mut metrics_ticker = tokio::time::interval(Duration::from_secs(1));
+        // // Periodic metrics update (every 1 second)
+        // let mut metrics_ticker = tokio::time::interval(Duration::from_secs(1));
 
         loop {
             tokio::select! {
@@ -556,9 +547,9 @@ impl Torrent {
                 _ = choker_ticker.tick() => {
                     self.run_choker().await;
                 }
-                _ = metrics_ticker.tick() => {
-                    self.update_metrics();
-                }
+                // _ = metrics_ticker.tick() => {
+                //     self.update_metrics();
+                // }
             }
         }
 
@@ -649,7 +640,6 @@ impl Torrent {
         self.piece_mananger = Some(PieceManager::new_all_have(info));
     }
 
-    // TODO: implement a retry mechanism for failed peer
     pub fn add_peer(&mut self, peer: PeerSource) {
         // check if we already are connected to this peer?
         let already_connected = self.peers.values().any(|p| p.addr == *peer.get_addr());
@@ -707,11 +697,6 @@ impl Torrent {
             ),
         };
 
-        // // Send the shared metrics to the peer connection
-        // let _ = peer_tx.try_send(PeerMessage::Connected {
-        //     metrics: metrics_clone,
-        // });
-
         // Send our bitfield if we have any pieces
         if self.bitfield.size() > 0 && self.bitfield.iter_set().next().is_some() {
             let _ = peer_handle.send(PeerMessage::SendBitfield {
@@ -719,14 +704,14 @@ impl Torrent {
             });
         }
 
-        let peer = InternalPeerState {
-            addr: peer_addr,
-            peer_id: None,
-            client_name: None,
-            tx: peer_tx,
-            metrics: shared_metrics,
-            pending_requests: Vec::new(),
-        };
+        // let peer = InternalPeerState {
+        //     addr: peer_addr,
+        //     peer_id: None,
+        //     client_name: None,
+        //     tx: peer_tx,
+        //     metrics: shared_metrics,
+        //     pending_requests: Vec::new(),
+        // };
 
         self.peers.insert(pid, peer);
     }
@@ -1166,58 +1151,58 @@ impl Torrent {
         }
     }
 
-    fn update_metrics(&mut self) {
-        let mut download_rate = 0;
-        let mut upload_rate = 0;
-
-        for peer in self.peers.values() {
-            download_rate += peer.metrics.get_download_rate();
-            upload_rate += peer.metrics.get_upload_rate();
-        }
-
-        let progress = if let Some(mananger) = &self.piece_mananger {
-            mananger.get_progress()
-        } else {
-            0.0
-        };
-
-        let state = match self.state {
-            TorrentState::FetchingMetadata => crate::types::TorrentState::FetchingMetadata,
-            TorrentState::Seeding => crate::types::TorrentState::Seeding,
-            TorrentState::Paused => crate::types::TorrentState::Paused,
-            TorrentState::Leeching => {
-                if progress >= 1.0 {
-                    crate::types::TorrentState::Seeding
-                } else {
-                    crate::types::TorrentState::Downloading
-                }
-            }
-        };
-
-        let metrics = TorrentMetrics {
-            id: self.info_hash,
-            name: self
-                .metadata
-                .display_name()
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| self.info_hash.to_string()),
-            state,
-            progress,
-            download_rate,
-            upload_rate,
-            peers_connected: self.peers.len(),
-            peers_discovered: self.metrics.peers_discovered.load(Ordering::Relaxed),
-            size_bytes: self
-                .metadata
-                .info()
-                .map(|i| i.total_size() as u64)
-                .unwrap_or(0),
-            downloaded_bytes: self.metrics.downloaded_bytes.load(Ordering::Relaxed),
-            uploaded_bytes: self.metrics.uploaded_bytes.load(Ordering::Relaxed),
-        };
-
-        let _ = self.metrics_tx.send(metrics);
-    }
+    // fn update_metrics(&mut self) {
+    //     let mut download_rate = 0;
+    //     let mut upload_rate = 0;
+    //
+    //     for peer in self.peers.values() {
+    //         download_rate += peer.metrics.get_download_rate();
+    //         upload_rate += peer.metrics.get_upload_rate();
+    //     }
+    //
+    //     let progress = if let Some(mananger) = &self.piece_mananger {
+    //         mananger.get_progress()
+    //     } else {
+    //         0.0
+    //     };
+    //
+    //     let state = match self.state {
+    //         TorrentState::FetchingMetadata => crate::types::TorrentState::FetchingMetadata,
+    //         TorrentState::Seeding => crate::types::TorrentState::Seeding,
+    //         TorrentState::Paused => crate::types::TorrentState::Paused,
+    //         TorrentState::Leeching => {
+    //             if progress >= 1.0 {
+    //                 crate::types::TorrentState::Seeding
+    //             } else {
+    //                 crate::types::TorrentState::Downloading
+    //             }
+    //         }
+    //     };
+    //
+    //     let metrics = TorrentMetrics {
+    //         id: self.info_hash,
+    //         name: self
+    //             .metadata
+    //             .display_name()
+    //             .map(|s| s.to_string())
+    //             .unwrap_or_else(|| self.info_hash.to_string()),
+    //         state,
+    //         progress,
+    //         download_rate,
+    //         upload_rate,
+    //         peers_connected: self.peers.len(),
+    //         peers_discovered: self.metrics.peers_discovered.load(Ordering::Relaxed),
+    //         size_bytes: self
+    //             .metadata
+    //             .info()
+    //             .map(|i| i.total_size() as u64)
+    //             .unwrap_or(0),
+    //         downloaded_bytes: self.metrics.downloaded_bytes.load(Ordering::Relaxed),
+    //         uploaded_bytes: self.metrics.uploaded_bytes.load(Ordering::Relaxed),
+    //     };
+    //
+    //     let _ = self.metrics_tx.send(metrics);
+    // }
 
     /// Send a message to a specific peer
     async fn send_to_peer(&self, pid: Pid, message: PeerMessage) {

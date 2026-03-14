@@ -23,7 +23,4 @@ pub enum PeerMessage {
     Disconnect,
     SendMessage(Message),
     HaveMetadata(Arc<Info>),
-    Connected {
-        metrics: Arc<PeerMetrics>,
-    },
 }

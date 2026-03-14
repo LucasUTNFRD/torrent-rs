@@ -32,6 +32,7 @@ use crate::{
     bitfield::{Bitfield, BitfieldError},
     net::{ConnectTimeout, TcpStream},
     peer::{PeerMessage, metrics::PeerMetrics},
+    session::CLIENT_ID,
     torrent::{Pid, TorrentMessage},
 };
 
@@ -136,7 +137,7 @@ pub struct PeerInfo {
 
     // Exposed to choker for rate-based unchoke decisions.
     // Arc so the choker can clone it once and poll without holding the lock.
-    pub metrics: PeerMetrics,
+    pub metrics: RwLock<PeerMetrics>,
 }
 
 impl PeerInfo {
@@ -149,7 +150,7 @@ impl PeerInfo {
             am_choking: true,
             am_interested: false,
             snubbed: false,
-            metrics: PeerMetrics::new(),
+            metrics: RwLock::new(PeerMetrics::new()),
         }
     }
 }
@@ -339,7 +340,7 @@ impl PeerConnection {
     // ── Metric update (1Hz) ───────────────────────────────────────────────────
 
     fn metric_update(&mut self) {
-        let metrics = self.metrics();
+        let mut metrics = self.metrics();
         metrics.update_rates();
 
         let current_rate = metrics.get_download_rate();
@@ -424,11 +425,6 @@ impl PeerConnection {
                 self.metadata = Some(metadata);
                 self.bitfield.validate(num_pieces)?;
                 self.update_interest().await?;
-            }
-            PeerMessage::Connected { metrics } => {
-                metrics.reset_timing();
-                todo!()
-                // self.peer_info.write().unwrap().metrics = metrics;
             }
             PeerMessage::SendMessage(msg) => {
                 self.sink.send(msg).await?;
@@ -891,7 +887,7 @@ pub fn spawn_outbound(
     let (tx, rx) = mpsc::channel(256);
     // PeerInfo initialised with a placeholder peer_id; updated after handshake
     let info = Arc::new(RwLock::new(PeerInfo::new(
-        PeerID::generate(),
+        *CLIENT_ID, // BUG: This should use global peer_id
         PeerSource::Outbound,
     )));
 

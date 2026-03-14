@@ -1,7 +1,4 @@
-use std::{
-    sync::atomic::{AtomicU64, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Exponential Moving Average (EMA) smoothing factor
 /// Higher values = more responsive to changes, lower values = smoother
@@ -12,39 +9,37 @@ const EMA_ALPHA_COMPLEMENT: f64 = 0.7; // 1.0 - 0.3
 #[derive(Debug)]
 pub struct PeerMetrics {
     // Download tracking
-    total_downloaded: AtomicU64,
-    window_downloaded: AtomicU64,
-    ema_download: AtomicU64, // f64 bits stored as u64
-    last_update: AtomicU64,  // timestamp in milliseconds
+    total_downloaded: u64,
+    window_downloaded: u64,
+    ema_download: f64,
+    last_update: u64, // timestamp in milliseconds
 
     // Upload tracking
-    total_uploaded: AtomicU64,
-    window_uploaded: AtomicU64,
-    ema_upload: AtomicU64, // f64 bits stored as u64
+    total_uploaded: u64,
+    window_uploaded: u64,
+    ema_upload: f64,
 
     // Choking algorithm specific tracking
     #[allow(dead_code)]
-    uploaded_in_last_round: AtomicU64,
-    uploaded_since_unchoked: AtomicU64,
+    uploaded_in_last_round: u64,
+    uploaded_since_unchoked: u64,
 }
 
 impl Default for PeerMetrics {
     fn default() -> Self {
         Self {
-            total_downloaded: AtomicU64::new(0),
-            window_downloaded: AtomicU64::new(0),
-            last_update: AtomicU64::new(
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis() as u64,
-            ),
-            ema_download: AtomicU64::new(0.0f64.to_bits()),
-            total_uploaded: AtomicU64::new(0),
-            window_uploaded: AtomicU64::new(0),
-            ema_upload: AtomicU64::new(0.0f64.to_bits()),
-            uploaded_in_last_round: AtomicU64::new(0),
-            uploaded_since_unchoked: AtomicU64::new(0),
+            total_downloaded: 0,
+            window_downloaded: 0,
+            last_update: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64,
+            ema_download: 0.0,
+            total_uploaded: 0,
+            window_uploaded: 0,
+            ema_upload: 0.0,
+            uploaded_in_last_round: 0,
+            uploaded_since_unchoked: 0,
         }
     }
 }
@@ -55,36 +50,35 @@ impl PeerMetrics {
     }
 
     /// Reset the timing window - call when metrics are first used by a peer
-    pub fn reset_timing(&self) {
+    pub fn reset_timing(&mut self) {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis() as u64;
-        self.last_update.store(now, Ordering::Release);
-        self.window_downloaded.store(0, Ordering::Relaxed);
-        self.window_uploaded.store(0, Ordering::Relaxed);
+        self.last_update = now;
+        self.window_downloaded = 0;
+        self.window_uploaded = 0;
     }
 
     /// Record downloaded bytes
-    pub fn record_download(&self, bytes: u64) {
-        self.total_downloaded.fetch_add(bytes, Ordering::Relaxed);
-        self.window_downloaded.fetch_add(bytes, Ordering::Relaxed);
+    pub fn record_download(&mut self, bytes: u64) {
+        self.total_downloaded += bytes;
+        self.window_downloaded += bytes;
     }
 
     /// Get download rate as f64 (bytes per second)
     pub fn download_rate_f64(&self) -> f64 {
-        let bits = self.ema_download.load(Ordering::Relaxed);
-        f64::from_bits(bits)
+        self.ema_download
     }
 
     /// Get download rate as u64 (bytes per second, truncated)
     pub fn get_download_rate(&self) -> u64 {
-        self.download_rate_f64() as u64
+        self.ema_download as u64
     }
 
     /// Get total bytes downloaded
     pub fn get_bytes_downloaded(&self) -> u64 {
-        self.total_downloaded.load(Ordering::Relaxed)
+        self.total_downloaded
     }
 
     /// Get download rate in human-readable format
@@ -102,87 +96,73 @@ impl PeerMetrics {
     /// Get window downloaded bytes (since last update)
     #[allow(dead_code)]
     pub fn window_downloaded(&self) -> u64 {
-        self.window_downloaded.load(Ordering::Relaxed)
+        self.window_downloaded
     }
 
     /// Update download rate with EMA smoothing
     /// This should be called periodically (e.g., every second)
-    pub fn update_rates(&self) {
+    pub fn update_rates(&mut self) {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis() as u64;
 
-        let last = self.last_update.load(Ordering::Acquire);
-        let elapsed_ms = now - last;
+        let elapsed_ms = now.saturating_sub(self.last_update);
 
         if elapsed_ms < 500 {
             return;
         }
 
         let elapsed = elapsed_ms as f64 / 1000.0;
-        self.last_update.store(now, Ordering::Release);
+        self.last_update = now;
 
         // Update download EMA
-        let downloaded = self.window_downloaded.swap(0, Ordering::Relaxed);
+        let downloaded = self.window_downloaded;
+        self.window_downloaded = 0;
         let dl_rate = downloaded as f64 / elapsed;
 
-        let ema_dl_bits = self.ema_download.load(Ordering::Relaxed);
-        let current_ema_dl = f64::from_bits(ema_dl_bits);
-
-        let new_ema_dl = if current_ema_dl == 0.0 {
-            dl_rate
+        if self.ema_download == 0.0 {
+            self.ema_download = dl_rate;
         } else {
-            EMA_ALPHA * dl_rate + EMA_ALPHA_COMPLEMENT * current_ema_dl
-        };
-
-        self.ema_download
-            .store(new_ema_dl.to_bits(), Ordering::Release);
+            self.ema_download = EMA_ALPHA * dl_rate + EMA_ALPHA_COMPLEMENT * self.ema_download;
+        }
 
         // Update upload EMA
-        let uploaded = self.window_uploaded.swap(0, Ordering::Relaxed);
+        let uploaded = self.window_uploaded;
+        self.window_uploaded = 0;
         let ul_rate = uploaded as f64 / elapsed;
 
-        let ema_ul_bits = self.ema_upload.load(Ordering::Relaxed);
-        let current_ema_ul = f64::from_bits(ema_ul_bits);
-
-        let new_ema_ul = if current_ema_ul == 0.0 {
-            ul_rate
+        if self.ema_upload == 0.0 {
+            self.ema_upload = ul_rate;
         } else {
-            EMA_ALPHA * ul_rate + EMA_ALPHA_COMPLEMENT * current_ema_ul
-        };
-
-        self.ema_upload
-            .store(new_ema_ul.to_bits(), Ordering::Release);
+            self.ema_upload = EMA_ALPHA * ul_rate + EMA_ALPHA_COMPLEMENT * self.ema_upload;
+        }
     }
 
     // ==================== UPLOAD TRACKING ====================
 
     /// Record uploaded bytes
     #[allow(dead_code)]
-    pub fn record_upload(&self, bytes: u64) {
-        self.total_uploaded.fetch_add(bytes, Ordering::Relaxed);
-        self.window_uploaded.fetch_add(bytes, Ordering::Relaxed);
-        self.uploaded_in_last_round
-            .fetch_add(bytes, Ordering::Relaxed);
-        self.uploaded_since_unchoked
-            .fetch_add(bytes, Ordering::Relaxed);
+    pub fn record_upload(&mut self, bytes: u64) {
+        self.total_uploaded += bytes;
+        self.window_uploaded += bytes;
+        self.uploaded_in_last_round += bytes;
+        self.uploaded_since_unchoked += bytes;
     }
 
     /// Get upload rate as f64 (bytes per second)
     pub fn upload_rate_f64(&self) -> f64 {
-        let bits = self.ema_upload.load(Ordering::Relaxed);
-        f64::from_bits(bits)
+        self.ema_upload
     }
 
     /// Get upload rate as u64 (bytes per second, truncated)
     pub fn get_upload_rate(&self) -> u64 {
-        self.upload_rate_f64() as u64
+        self.ema_upload as u64
     }
 
     /// Get total bytes uploaded
     pub fn get_bytes_uploaded(&self) -> u64 {
-        self.total_uploaded.load(Ordering::Relaxed)
+        self.total_uploaded
     }
 
     /// Get upload rate in human-readable format
@@ -200,29 +180,29 @@ impl PeerMetrics {
     /// Get window uploaded bytes (since last update)
     #[allow(dead_code)]
     pub fn window_uploaded(&self) -> u64 {
-        self.window_uploaded.load(Ordering::Relaxed)
+        self.window_uploaded
     }
 
     // ==================== CHOKING ALGORITHM TRACKING ====================
 
     /// Get bytes uploaded in the last unchoke round
     pub fn uploaded_in_last_round(&self) -> u64 {
-        self.uploaded_in_last_round.load(Ordering::Relaxed)
+        self.uploaded_in_last_round
     }
 
     /// Get bytes uploaded since this peer was last unchoked
     pub fn uploaded_since_unchoked(&self) -> u64 {
-        self.uploaded_since_unchoked.load(Ordering::Relaxed)
+        self.uploaded_since_unchoked
     }
 
     /// Reset the "last round" counter. Called at each unchoke interval.
-    pub fn reset_round_counters(&self) {
-        self.uploaded_in_last_round.store(0, Ordering::Relaxed);
+    pub fn reset_round_counters(&mut self) {
+        self.uploaded_in_last_round = 0;
     }
 
     /// Reset the "since unchoked" counter. Called when peer is choked.
-    pub fn reset_since_unchoked(&self) {
-        self.uploaded_since_unchoked.store(0, Ordering::Relaxed);
+    pub fn reset_since_unchoked(&mut self) {
+        self.uploaded_since_unchoked = 0;
     }
 }
 
@@ -268,7 +248,7 @@ mod tests {
 
     #[test]
     fn test_record_download() {
-        let metrics = PeerMetrics::new();
+        let mut metrics = PeerMetrics::new();
         metrics.record_download(1024);
         assert_eq!(metrics.get_bytes_downloaded(), 1024);
         assert_eq!(metrics.window_downloaded(), 1024);
@@ -285,7 +265,7 @@ mod tests {
 
     #[test]
     fn test_rate_calculation() {
-        let metrics = PeerMetrics::new();
+        let mut metrics = PeerMetrics::new();
 
         // Record some downloads
         metrics.record_download(1024);
@@ -301,7 +281,7 @@ mod tests {
 
     #[test]
     fn test_rate_accuracy() {
-        let metrics = PeerMetrics::new();
+        let mut metrics = PeerMetrics::new();
 
         // Simulate 1 second of downloads at 1MB/s
         for _ in 0..10 {
@@ -315,38 +295,12 @@ mod tests {
         // Allow 10% tolerance for timing variance
         assert!((rate as i64 - 1_048_576).abs() < 104_857);
     }
-    #[test]
-    fn test_concurrent_recording_during_update() {
-        use std::sync::Arc;
-        let metrics = Arc::new(PeerMetrics::new());
-        let m = metrics.clone();
-
-        // Record 1KB
-        metrics.record_download(1024);
-
-        // Spawn thread that records during update window
-        let handle = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(50));
-            m.record_download(1024); // Should go to NEXT window
-        });
-
-        thread::sleep(Duration::from_millis(100));
-        metrics.update_rates();
-
-        handle.join().unwrap();
-
-        thread::sleep(Duration::from_millis(100));
-        metrics.update_rates();
-
-        // Second window should capture the concurrent write
-        assert_eq!(metrics.get_bytes_downloaded(), 2048);
-    }
 
     // ==================== UPLOAD TRACKING TESTS ====================
 
     #[test]
     fn test_record_upload() {
-        let metrics = PeerMetrics::new();
+        let mut metrics = PeerMetrics::new();
         metrics.record_upload(1024);
         assert_eq!(metrics.get_bytes_uploaded(), 1024);
         assert_eq!(metrics.window_uploaded(), 1024);
@@ -356,7 +310,7 @@ mod tests {
 
     #[test]
     fn test_upload_rate_calculation() {
-        let metrics = PeerMetrics::new();
+        let mut metrics = PeerMetrics::new();
 
         // Record some uploads
         metrics.record_upload(2048);
@@ -372,7 +326,7 @@ mod tests {
 
     #[test]
     fn test_reset_round_counters() {
-        let metrics = PeerMetrics::new();
+        let mut metrics = PeerMetrics::new();
 
         metrics.record_upload(1024);
         assert_eq!(metrics.uploaded_in_last_round(), 1024);
@@ -390,7 +344,7 @@ mod tests {
 
     #[test]
     fn test_reset_since_unchoked() {
-        let metrics = PeerMetrics::new();
+        let mut metrics = PeerMetrics::new();
 
         metrics.record_upload(1024);
         assert_eq!(metrics.uploaded_since_unchoked(), 1024);
@@ -402,7 +356,7 @@ mod tests {
 
     #[test]
     fn test_upload_tracking_persists_across_rounds() {
-        let metrics = PeerMetrics::new();
+        let mut metrics = PeerMetrics::new();
 
         // Simulate uploads across multiple rounds
         metrics.record_upload(1000);
@@ -427,7 +381,7 @@ mod tests {
 
     #[test]
     fn test_upload_download_independent() {
-        let metrics = PeerMetrics::new();
+        let mut metrics = PeerMetrics::new();
 
         metrics.record_download(1000);
         metrics.record_upload(500);

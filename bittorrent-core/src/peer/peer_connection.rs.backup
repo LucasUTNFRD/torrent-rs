@@ -42,26 +42,7 @@ use tracing::{debug, instrument};
 const UT_METADATA_ID: u8 = 1;
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
 
-#[derive(Debug, Error)]
-pub enum ConnectionError {
-    #[error("Network error: {0}")]
-    Network(#[from] tokio::io::Error),
 
-    #[error("Protocol error: {0}")]
-    Protocol(String),
-
-    #[error("Connection timeout")]
-    Timeout,
-
-    #[error("Invalid handshake")]
-    InvalidHandshake,
-
-    #[error("Bitfield error")]
-    BitfieldError(#[from] BitfieldError),
-
-    #[error("Self connection detected")]
-    SelfConnection,
-}
 
 pub trait ConnectionState {}
 pub struct Peer<S: ConnectionState> {
@@ -205,62 +186,6 @@ pub struct Connected {
     bitfield: BitfieldState,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) enum BitfieldState {
-    NotReceived,
-    Received(Bitfield),
-    Validated(Bitfield),
-}
-
-impl BitfieldState {
-    const fn new() -> Self {
-        Self::NotReceived
-    }
-
-    pub const fn is_received(&self) -> bool {
-        !matches!(self, Self::NotReceived)
-    }
-
-    pub const fn get_bitfield_mut(&mut self) -> Option<&mut Bitfield> {
-        match self {
-            Self::NotReceived => None,
-            Self::Received(bf) | Self::Validated(bf) => Some(bf),
-        }
-    }
-
-    pub fn set_received(&mut self, bitfield: Bitfield) {
-        *self = Self::Received(bitfield);
-    }
-
-    pub fn validate(&mut self, num_pieces: usize) -> Result<(), BitfieldError> {
-        match self {
-            Self::NotReceived => {
-                // Initialize with empty validated bitfield
-                *self = Self::Validated(Bitfield::with_size(num_pieces));
-                Ok(())
-            }
-            Self::Received(bitfield) => {
-                bitfield.validate(num_pieces)?;
-                *self = Self::Validated(bitfield.clone());
-                Ok(())
-            }
-            Self::Validated(_) => Ok(()), // Already validated
-        }
-    }
-
-    pub fn ensure_capacity(&mut self, required_pieces: usize) {
-        match self {
-            Self::NotReceived => {
-                *self = Self::Received(Bitfield::with_size(required_pieces));
-            }
-            Self::Received(bitfield) | Self::Validated(bitfield) => {
-                if required_pieces > bitfield.size() {
-                    bitfield.resize(required_pieces);
-                }
-            }
-        }
-    }
-}
 
 impl ConnectionState for Connected {}
 impl Connected {
