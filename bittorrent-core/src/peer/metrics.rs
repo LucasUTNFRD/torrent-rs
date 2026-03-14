@@ -206,25 +206,21 @@ impl PeerMetrics {
     // ==================== CHOKING ALGORITHM TRACKING ====================
 
     /// Get bytes uploaded in the last unchoke round
-    #[allow(dead_code)]
     pub fn uploaded_in_last_round(&self) -> u64 {
         self.uploaded_in_last_round.load(Ordering::Relaxed)
     }
 
     /// Get bytes uploaded since this peer was last unchoked
-    #[allow(dead_code)]
     pub fn uploaded_since_unchoked(&self) -> u64 {
         self.uploaded_since_unchoked.load(Ordering::Relaxed)
     }
 
     /// Reset the "last round" counter. Called at each unchoke interval.
-    #[allow(dead_code)]
     pub fn reset_round_counters(&self) {
         self.uploaded_in_last_round.store(0, Ordering::Relaxed);
     }
 
     /// Reset the "since unchoked" counter. Called when peer is choked.
-    #[allow(dead_code)]
     pub fn reset_since_unchoked(&self) {
         self.uploaded_since_unchoked.store(0, Ordering::Relaxed);
     }

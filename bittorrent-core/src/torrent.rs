@@ -36,7 +36,7 @@ use crate::{
     peer::{
         PeerMessage,
         metrics::PeerMetrics,
-        peer_connection::{ConnectionError, spawn_inbound_peer, spawn_outgoing_peer},
+        peer_connection_refactor::{ConnectionError, PeerHandle, spawn_outbound},
     },
     piece_picker::{AvailabilityUpdate, BlockRequest, PieceManager, PieceState},
     types::{FileInfo, PeerInfo, SessionEvent, TorrentMetrics, TrackerInfo},
@@ -226,7 +226,7 @@ pub struct Torrent {
     storage: Arc<dyn StorageBackend>,
 
     metrics: Arc<Metrics>,
-    peers: HashMap<Pid, InternalPeerState>,
+    peers: HashMap<Pid, PeerHandle>,
 
     // channels
     tx: mpsc::Sender<TorrentMessage>,
@@ -666,8 +666,6 @@ impl Torrent {
         let peer_id_counter = PEER_COUNTER.fetch_add(1, Ordering::Relaxed);
         let pid = Pid(peer_id_counter);
 
-        let (peer_tx, peer_rx) = mpsc::channel(64);
-
         let peer_addr = *peer.get_addr();
 
         self.metrics
@@ -678,46 +676,45 @@ impl Torrent {
         let shared_metrics = Arc::new(PeerMetrics::new());
         let metrics_clone = shared_metrics.clone();
 
-        match peer {
+        let peer_handle = match peer {
             PeerSource::Inbound {
                 peer_id: remote_peer_id,
                 stream,
                 supports_ext,
                 remote_addr,
             } => {
-                spawn_inbound_peer(
-                    pid,
-                    remote_addr,
-                    stream,
-                    supports_ext,
-                    self.info_hash,
-                    self.peer_id,
-                    remote_peer_id,
-                    self.tx.clone(),
-                    peer_rx,
-                );
+                todo!("Call spawn_outbound")
+                // spawn_outbound(
+                //     pid,
+                //     remote_addr,
+                //     stream,
+                //     supports_ext,
+                //     self.info_hash,
+                //     self.peer_id,
+                //     remote_peer_id,
+                //     self.tx.clone(),
+                //     peer_rx,
+                // )
             }
 
-            PeerSource::Outbound(remote_addr) => {
-                spawn_outgoing_peer(
-                    pid,
-                    remote_addr,
-                    self.info_hash,
-                    self.peer_id,
-                    self.tx.clone(),
-                    peer_rx,
-                )
-            }
-        }
+            PeerSource::Outbound(remote_addr) => spawn_outbound(
+                pid,
+                remote_addr,
+                self.info_hash,
+                self.peer_id,
+                self.tx.clone(),
+                // peer_rx,
+            ),
+        };
 
-        // Send the shared metrics to the peer connection
-        let _ = peer_tx.try_send(PeerMessage::Connected {
-            metrics: metrics_clone,
-        });
+        // // Send the shared metrics to the peer connection
+        // let _ = peer_tx.try_send(PeerMessage::Connected {
+        //     metrics: metrics_clone,
+        // });
 
         // Send our bitfield if we have any pieces
         if self.bitfield.size() > 0 && self.bitfield.iter_set().next().is_some() {
-            let _ = peer_tx.try_send(PeerMessage::SendBitfield {
+            let _ = peer_handle.send(PeerMessage::SendBitfield {
                 bitfield: self.bitfield.clone(),
             });
         }
@@ -1225,7 +1222,7 @@ impl Torrent {
     /// Send a message to a specific peer
     async fn send_to_peer(&self, pid: Pid, message: PeerMessage) {
         if let Some(p) = self.peers.get(&pid) {
-            let _ = p.tx.send_timeout(message, Duration::from_millis(50)).await;
+            let _ = p.send_async(message).await;
         }
     }
 

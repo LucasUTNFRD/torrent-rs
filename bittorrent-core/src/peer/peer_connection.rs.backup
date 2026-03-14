@@ -206,7 +206,7 @@ pub struct Connected {
 }
 
 #[derive(Debug, Clone)]
-enum BitfieldState {
+pub(crate) enum BitfieldState {
     NotReceived,
     Received(Bitfield),
     Validated(Bitfield),
@@ -217,22 +217,22 @@ impl BitfieldState {
         Self::NotReceived
     }
 
-    const fn is_received(&self) -> bool {
+    pub const fn is_received(&self) -> bool {
         !matches!(self, Self::NotReceived)
     }
 
-    const fn get_bitfield_mut(&mut self) -> Option<&mut Bitfield> {
+    pub const fn get_bitfield_mut(&mut self) -> Option<&mut Bitfield> {
         match self {
             Self::NotReceived => None,
             Self::Received(bf) | Self::Validated(bf) => Some(bf),
         }
     }
 
-    fn set_received(&mut self, bitfield: Bitfield) {
+    pub fn set_received(&mut self, bitfield: Bitfield) {
         *self = Self::Received(bitfield);
     }
 
-    fn validate(&mut self, num_pieces: usize) -> Result<(), BitfieldError> {
+    pub fn validate(&mut self, num_pieces: usize) -> Result<(), BitfieldError> {
         match self {
             Self::NotReceived => {
                 // Initialize with empty validated bitfield
@@ -248,7 +248,7 @@ impl BitfieldState {
         }
     }
 
-    fn ensure_capacity(&mut self, required_pieces: usize) {
+    pub fn ensure_capacity(&mut self, required_pieces: usize) {
         match self {
             Self::NotReceived => {
                 *self = Self::Received(Bitfield::with_size(required_pieces));
