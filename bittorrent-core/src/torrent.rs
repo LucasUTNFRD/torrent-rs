@@ -36,7 +36,7 @@ use crate::{
     peer::{
         PeerMessage,
         metrics::PeerMetrics,
-        peer_connection_refactor::{ConnectionError, PeerHandle, spawn_outbound},
+        peer_connection::{ConnectionError, PeerHandle, spawn_outbound},
     },
     piece_picker::{AvailabilityUpdate, BlockRequest, PieceManager, PieceState},
     types::{FileInfo, PeerInfo, SessionEvent, TorrentMetrics, TrackerInfo},

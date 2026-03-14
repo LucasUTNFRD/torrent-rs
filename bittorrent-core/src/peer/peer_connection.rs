@@ -886,10 +886,7 @@ pub fn spawn_outbound(
 ) -> PeerHandle {
     let (tx, rx) = mpsc::channel(256);
     // PeerInfo initialised with a placeholder peer_id; updated after handshake
-    let info = Arc::new(RwLock::new(PeerInfo::new(
-        *CLIENT_ID, // BUG: This should use global peer_id
-        PeerSource::Outbound,
-    )));
+    let info = Arc::new(RwLock::new(PeerInfo::new(*CLIENT_ID, PeerSource::Outbound)));
 
     let handle = PeerHandle {
         pid,

@@ -3,9 +3,9 @@ use std::sync::Arc;
 use bittorrent_common::metainfo::Info;
 use peer_protocol::protocol::Message;
 
-use crate::{bitfield::Bitfield, peer::metrics::PeerMetrics};
+use crate::bitfield::Bitfield;
 
-pub mod peer_connection_refactor;
+pub mod peer_connection;
 
 pub mod metrics;
 
