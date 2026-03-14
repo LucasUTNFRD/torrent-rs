@@ -782,10 +782,7 @@ impl SessionManager {
                     }
 
                     if remote_handshake.peer_id == peer_id {
-                        tracing::debug!(
-                            "Rejecting self-connection from {:?}",
-                            remote_addr
-                        );
+                        tracing::debug!("Rejecting self-connection from {:?}", remote_addr);
                         return;
                     }
 

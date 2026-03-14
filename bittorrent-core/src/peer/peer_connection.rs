@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     net::SocketAddr,
-    sync::{Arc, RwLock},
+    sync::{Arc, Mutex, RwLock},
     time::Duration,
 };
 
@@ -192,6 +192,7 @@ struct PeerConnection {
     max_outgoing_request: usize,
 
     // Congestion control
+    metrics: Arc<Mutex<PeerMetrics>>,
     slow_start: bool,
     prev_download_rate: u64,
 
@@ -209,6 +210,7 @@ impl PeerConnection {
         torrent_tx: mpsc::Sender<TorrentMessage>,
         cmd_rx: mpsc::Receiver<PeerMessage>,
         supports_extended: bool,
+        metrics: Arc<Mutex<PeerMetrics>>,
     ) -> Self {
         let framed = Framed::new(stream, MessageCodec {});
         let (sink, stream) = framed.split();
@@ -234,6 +236,7 @@ impl PeerConnection {
             prev_download_rate: 0,
             last_recv_msg: Instant::now(),
             last_block_request: Instant::now(),
+            metrics,
         }
     }
     async fn handshake(
@@ -332,18 +335,20 @@ impl PeerConnection {
         self.peer_info.write().unwrap().am_interested = val;
     }
 
-    fn metrics(&self) -> PeerMetrics {
-        todo!()
-        // self.peer_info.read().unwrap().metrics.clone()
+    // After — returns the guard directly, caller drops it immediately:
+    fn metrics(&self) -> std::sync::MutexGuard<'_, PeerMetrics> {
+        self.metrics.lock().unwrap()
     }
 
     // ── Metric update (1Hz) ───────────────────────────────────────────────────
 
     fn metric_update(&mut self) {
-        let mut metrics = self.metrics();
-        metrics.update_rates();
-
-        let current_rate = metrics.get_download_rate();
+        // Lock once, do all reads/writes, then drop
+        let current_rate = {
+            let mut m = self.metrics();
+            m.update_rates();
+            m.get_download_rate()
+        };
 
         if self.slow_start {
             let increase = current_rate.saturating_sub(self.prev_download_rate);
@@ -709,15 +714,9 @@ impl PeerConnection {
         if let Some(reqq) = hs.reqq.filter(|&r| r > 0) {
             self.max_outgoing_request = self.max_outgoing_request.max(reqq as usize);
         }
-        if let Some(v) = hs.v {
-            let _ = self
-                .torrent_tx
-                .send(TorrentMessage::PeerExtendedHandshake {
-                    pid: self.pid,
-                    client_version: v,
-                })
-                .await;
-        }
+        // if let Some(v) = hs.v {
+        // TODO: v from extendd is consider source of truth for getting client name
+        // }
         Ok(())
     }
 
@@ -857,6 +856,7 @@ pub struct PeerHandle {
     pub pid: Pid,
     pub peer_addr: SocketAddr,
     pub info: Arc<RwLock<PeerInfo>>,
+    pub metrics: Arc<Mutex<PeerMetrics>>,
     tx: mpsc::Sender<PeerMessage>,
 }
 
@@ -887,12 +887,14 @@ pub fn spawn_outbound(
     let (tx, rx) = mpsc::channel(256);
     // PeerInfo initialised with a placeholder peer_id; updated after handshake
     let info = Arc::new(RwLock::new(PeerInfo::new(*CLIENT_ID, PeerSource::Outbound)));
+    let metrics = Arc::new(Mutex::new(PeerMetrics::new()));
 
     let handle = PeerHandle {
         pid,
         peer_addr: addr,
         info: Arc::clone(&info),
         tx,
+        metrics: Arc::clone(&metrics),
     };
 
     let tx_err = torrent_tx.clone();
@@ -905,13 +907,6 @@ pub fn spawn_outbound(
             // Update real peer_id now that handshake is done
             info.write().unwrap().peer_id = remote_peer_id;
 
-            let _ = torrent_tx
-                .send(TorrentMessage::PeerHandshake {
-                    pid,
-                    peer_id: remote_peer_id,
-                })
-                .await;
-
             PeerConnection::new(
                 pid,
                 stream,
@@ -921,6 +916,7 @@ pub fn spawn_outbound(
                 torrent_tx,
                 rx,
                 supports_extended,
+                metrics,
             )
             .run()
             .await
@@ -948,13 +944,15 @@ pub fn spawn_inbound(
     torrent_tx: mpsc::Sender<TorrentMessage>,
 ) -> PeerHandle {
     let (tx, rx) = mpsc::channel(256);
-    let info = Arc::new(RwLock::new(PeerInfo::new(todo!(), PeerSource::Inbound)));
+    let info = Arc::new(RwLock::new(PeerInfo::new(*CLIENT_ID, PeerSource::Inbound)));
+    let metrics = Arc::new(Mutex::new(PeerMetrics::new()));
 
     let handle = PeerHandle {
         pid,
         peer_addr: addr,
         info: Arc::clone(&info),
         tx,
+        metrics: Arc::clone(&metrics),
     };
 
     let tx_err = torrent_tx.clone();
@@ -965,13 +963,6 @@ pub fn spawn_inbound(
 
             info.write().unwrap().peer_id = remote_peer_id;
 
-            let _ = torrent_tx
-                .send(TorrentMessage::PeerHandshake {
-                    pid,
-                    peer_id: remote_peer_id,
-                })
-                .await;
-
             PeerConnection::new(
                 pid,
                 stream,
@@ -981,6 +972,7 @@ pub fn spawn_inbound(
                 torrent_tx,
                 rx,
                 supports_extended,
+                metrics,
             )
             .run()
             .await
