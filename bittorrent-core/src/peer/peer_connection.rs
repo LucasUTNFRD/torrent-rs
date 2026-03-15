@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     net::SocketAddr,
-    sync::{Arc, Mutex, RwLock},
+    sync::{Arc, RwLock},
     time::Duration,
 };
 
@@ -16,7 +16,10 @@ use futures::{
 };
 use peer_protocol::{
     MessageCodec,
-    peer::extension::{ExtendedHandshake, ExtendedMessage, MetadataMessage, RawExtendedMessage},
+    peer::extension::{
+        DATA_ID, ExtendedHandshake, ExtendedMessage, MetadataMessage, REJECT_ID, REQUEST_ID,
+        RawExtendedMessage,
+    },
     protocol::{Block, BlockInfo, Handshake, Message},
 };
 use thiserror::Error;
@@ -134,10 +137,6 @@ pub struct PeerInfo {
     pub am_interested: bool, // we are interested in them
 
     pub snubbed: bool, // no piece in >60s
-
-    // Exposed to choker for rate-based unchoke decisions.
-    // Arc so the choker can clone it once and poll without holding the lock.
-    pub metrics: RwLock<PeerMetrics>,
 }
 
 impl PeerInfo {
@@ -150,7 +149,6 @@ impl PeerInfo {
             am_choking: true,
             am_interested: false,
             snubbed: false,
-            metrics: RwLock::new(PeerMetrics::new()),
         }
     }
 }
@@ -192,7 +190,7 @@ struct PeerConnection {
     max_outgoing_request: usize,
 
     // Congestion control
-    metrics: Arc<Mutex<PeerMetrics>>,
+    metrics: PeerMetrics,
     slow_start: bool,
     prev_download_rate: u64,
 
@@ -210,7 +208,6 @@ impl PeerConnection {
         torrent_tx: mpsc::Sender<TorrentMessage>,
         cmd_rx: mpsc::Receiver<PeerMessage>,
         supports_extended: bool,
-        metrics: Arc<Mutex<PeerMetrics>>,
     ) -> Self {
         let framed = Framed::new(stream, MessageCodec {});
         let (sink, stream) = framed.split();
@@ -225,7 +222,7 @@ impl PeerConnection {
             stream,
             supports_extended,
             remote_extensions: HashMap::new(),
-            bitfield: BitfieldState::NotReceived,
+            bitfield: BitfieldState::new(),
             metadata: None,
             metadata_size: 0,
             request_queue: Vec::new(),
@@ -236,7 +233,7 @@ impl PeerConnection {
             prev_download_rate: 0,
             last_recv_msg: Instant::now(),
             last_block_request: Instant::now(),
-            metrics,
+            metrics: PeerMetrics::new(),
         }
     }
     async fn handshake(
@@ -335,20 +332,12 @@ impl PeerConnection {
         self.peer_info.write().unwrap().am_interested = val;
     }
 
-    // After — returns the guard directly, caller drops it immediately:
-    fn metrics(&self) -> std::sync::MutexGuard<'_, PeerMetrics> {
-        self.metrics.lock().unwrap()
-    }
-
     // ── Metric update (1Hz) ───────────────────────────────────────────────────
 
     fn metric_update(&mut self) {
-        // Lock once, do all reads/writes, then drop
-        let current_rate = {
-            let mut m = self.metrics();
-            m.update_rates();
-            m.get_download_rate()
-        };
+        tracing::debug!("running updating metrics periodically ");
+        self.metrics.update_rates();
+        let current_rate = self.metrics.get_download_rate();
 
         if self.slow_start {
             let increase = current_rate.saturating_sub(self.prev_download_rate);
@@ -417,7 +406,7 @@ impl PeerConnection {
                 }
             }
             PeerMessage::SendChoke => {
-                self.metrics().reset_since_unchoked();
+                self.metrics.reset_since_unchoked();
                 self.set_am_choking(true);
                 self.sink.send(Message::Choke).await?;
             }
@@ -550,7 +539,7 @@ impl PeerConnection {
     }
 
     async fn on_piece(&mut self, block: Block) -> Result<(), ConnectionError> {
-        self.metrics().record_download(block.data.len() as u64);
+        self.metrics.record_download(block.data.len() as u64);
 
         let block_info = BlockInfo {
             index: block.index,
@@ -576,7 +565,7 @@ impl PeerConnection {
 
     fn adjust_pipeline_on_piece(&mut self) {
         let pending_bytes = self.outgoing_requests.len() as u64 * 16384;
-        let rate = self.metrics().get_download_rate().max(1);
+        let rate = self.metrics.get_download_rate().max(1);
         let queue_secs = pending_bytes / rate;
 
         if self.slow_start {
@@ -856,18 +845,7 @@ pub struct PeerHandle {
     pub pid: Pid,
     pub peer_addr: SocketAddr,
     pub info: Arc<RwLock<PeerInfo>>,
-    pub metrics: Arc<Mutex<PeerMetrics>>,
-    tx: mpsc::Sender<PeerMessage>,
-}
-
-impl PeerHandle {
-    pub fn send(&self, msg: PeerMessage) -> Result<(), mpsc::error::TrySendError<PeerMessage>> {
-        self.tx.try_send(msg)
-    }
-
-    pub async fn send_async(&self, msg: PeerMessage) {
-        let _ = self.tx.send(msg).await;
-    }
+    pub tx: mpsc::Sender<PeerMessage>,
 }
 
 // ── Public spawn API ──────────────────────────────────────────────────────────
@@ -887,14 +865,12 @@ pub fn spawn_outbound(
     let (tx, rx) = mpsc::channel(256);
     // PeerInfo initialised with a placeholder peer_id; updated after handshake
     let info = Arc::new(RwLock::new(PeerInfo::new(*CLIENT_ID, PeerSource::Outbound)));
-    let metrics = Arc::new(Mutex::new(PeerMetrics::new()));
 
     let handle = PeerHandle {
         pid,
         peer_addr: addr,
         info: Arc::clone(&info),
         tx,
-        metrics: Arc::clone(&metrics),
     };
 
     let tx_err = torrent_tx.clone();
@@ -916,7 +892,6 @@ pub fn spawn_outbound(
                 torrent_tx,
                 rx,
                 supports_extended,
-                metrics,
             )
             .run()
             .await
@@ -945,14 +920,12 @@ pub fn spawn_inbound(
 ) -> PeerHandle {
     let (tx, rx) = mpsc::channel(256);
     let info = Arc::new(RwLock::new(PeerInfo::new(*CLIENT_ID, PeerSource::Inbound)));
-    let metrics = Arc::new(Mutex::new(PeerMetrics::new()));
 
     let handle = PeerHandle {
         pid,
         peer_addr: addr,
         info: Arc::clone(&info),
         tx,
-        metrics: Arc::clone(&metrics),
     };
 
     let tx_err = torrent_tx.clone();
@@ -972,7 +945,6 @@ pub fn spawn_inbound(
                 torrent_tx,
                 rx,
                 supports_extended,
-                metrics,
             )
             .run()
             .await

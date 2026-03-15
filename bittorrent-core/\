@@ -691,12 +691,10 @@ impl Torrent {
         // Send our bitfield if we have any pieces
         if self.bitfield.size() > 0 && self.bitfield.iter_set().next().is_some() {
             peer_handle
-                .tx
-                .send(PeerMessage::SendBitfield {
+                .send_async(PeerMessage::SendBitfield {
                     bitfield: self.bitfield.clone(),
                 })
                 .await
-                .unwrap();
         }
 
         self.pending_requests.insert(pid, Vec::new());
@@ -714,11 +712,7 @@ impl Torrent {
                 match self.storage.read_block(self.info_hash, block_info).await {
                     Ok(block) => {
                         // Send piece to peer (upload tracking happens in peer_connection)
-                        if let Err(e) = peer
-                            .tx
-                            .send(PeerMessage::SendMessage(Message::Piece(block)))
-                            .await
-                        {
+                        if let Err(e) = peer.send(PeerMessage::SendMessage(Message::Piece(block))) {
                             tracing::warn!("Failed to send piece to peer {}: {}", pid, e);
                         }
                     }
@@ -754,7 +748,7 @@ impl Torrent {
                 tracing::debug!("Peer {pid:?} is interested in our pieces");
                 let should_unchoke = self.choker.on_peer_interested(pid);
                 if should_unchoke {
-                    self.send_to_peer(pid, PeerMessage::SendUnchoke);
+                    self.send_to_peer(pid, PeerMessage::SendUnchoke).await;
                     tracing::debug!("Unchoked peer {pid:?}");
                 }
             }
@@ -762,7 +756,7 @@ impl Torrent {
                 tracing::debug!("Peer {pid:?} is no longer interested in our pieces");
                 let was_unchoked = self.choker.on_peer_not_interested(pid);
                 if was_unchoked {
-                    self.send_to_peer(pid, PeerMessage::SendChoke);
+                    self.send_to_peer(pid, PeerMessage::SendChoke).await;
                     tracing::debug!("Choked peer {pid:?}");
                 }
             }
@@ -940,6 +934,7 @@ impl Torrent {
                 cancel_pid,
                 PeerMessage::SendMessage(Message::Cancel(BlockInfo::from(request))),
             )
+            .await;
         }
         info!("END OF SEND CANCELS");
 
@@ -957,7 +952,7 @@ impl Torrent {
 
     async fn on_complete_piece(&mut self, piece_index: u32, piece: Box<[u8]>) {
         // Mark piece as downloaded first
-        debug!("MARKING PIECE AS DOWNLOADED");
+        devbug!("MARKING PIECE");
         self.piece_mananger
             .as_mut()
             .expect("initialized")
@@ -966,7 +961,6 @@ impl Torrent {
         let torrent_id = self.info_hash;
         let piece: Arc<[u8]> = piece.into();
 
-        debug!("STARTING VERIFICATION");
         // Verify piece hash
         let valid = match self
             .storage
@@ -988,8 +982,6 @@ impl Torrent {
             }
         };
 
-        debug!("FINISHED VERIFICATION");
-
         if !valid {
             tracing::warn!(
                 "Piece {} failed hash verification - resetting for re-download",
@@ -1008,14 +1000,11 @@ impl Torrent {
             .expect("initialized")
             .set_piece_as(piece_index as usize, PieceState::Have);
         self.bitfield.set(piece_index as usize);
-
-        debug!("MARKED AS HAVE");
-        tracing::debug!("BROADCASTING PIECE TO PEERS");
-        self.broadcast_to_peers(PeerMessage::SendHave { piece_index });
-        tracing::debug!("RETURNING FROM BROADCASTING PIECE TO PEERS");
+        // tracing::debug!("BROADCASTING PIECE TO PEERS");
+        self.broadcast_to_peers(PeerMessage::SendHave { piece_index })
+            .await;
 
         // Write piece to disk
-        tracing::debug!("GOING TO WRITE PIECE");
         if let Err(e) = self
             .storage
             .write_piece(torrent_id, piece_index, piece)
@@ -1032,8 +1021,6 @@ impl Torrent {
                 .expect("initialized")
                 .reset_piece(piece_index as usize);
         }
-
-        tracing::debug!("RETURNED FROM TO WRITE PIECE");
 
         if self
             .piece_mananger
@@ -1070,7 +1057,8 @@ impl Torrent {
 
             // tracing::info!("Metadata Info: {:#?}", info);
 
-            self.broadcast_to_peers(PeerMessage::HaveMetadata(info));
+            self.broadcast_to_peers(PeerMessage::HaveMetadata(info))
+                .await;
             let _ = self
                 .event_tx
                 .send(SessionEvent::MetadataFetched(self.info_hash));
@@ -1081,7 +1069,8 @@ impl Torrent {
 
     async fn clean_up_peer(&mut self, pid: Pid, bitfield: Option<Bitfield>) {
         if let Some(unchoked_pid) = self.choker.on_peer_disconnected(pid) {
-            self.send_to_peer(unchoked_pid, PeerMessage::SendUnchoke);
+            self.send_to_peer(unchoked_pid, PeerMessage::SendUnchoke)
+                .await;
         }
 
         self.peers.remove(&pid);
@@ -1108,13 +1097,13 @@ impl Torrent {
 
         // Apply choke decisions
         for pid in to_choke {
-            self.send_to_peer(pid, PeerMessage::SendChoke);
+            self.send_to_peer(pid, PeerMessage::SendChoke).await;
             tracing::debug!("Periodic choker: choked peer {pid:?}");
         }
 
         // Apply unchoke decisions
         for pid in to_unchoke {
-            self.send_to_peer(pid, PeerMessage::SendUnchoke);
+            self.send_to_peer(pid, PeerMessage::SendUnchoke).await;
             tracing::debug!("Periodic choker: unchoked peer {pid:?}");
         }
     }
@@ -1167,37 +1156,25 @@ impl Torrent {
         let _ = self.metrics_tx.send(metrics);
     }
 
-    // /// Send a message to a specific peer
-    // async fn send_to_peer(&self, pid: Pid, message: PeerMessage) {
-    //     if let Some(p) = self.peers.get(&pid) {
-    //         p.send_async(message).await;
-    //     }
-    // }
-    fn send_to_peer(&self, pid: Pid, message: PeerMessage) {
+    /// Send a message to a specific peer
+    async fn send_to_peer(&self, pid: Pid, message: PeerMessage) {
         if let Some(p) = self.peers.get(&pid) {
-            match p.tx.try_send(message) {
-                Ok(()) => {}
-                Err(mpsc::error::TrySendError::Full(_)) => {
-                    tracing::warn!(%pid, "peer channel full, dropping message");
-                }
-                Err(mpsc::error::TrySendError::Closed(_)) => {
-                    // Task already exited, PeerDisconnected is in flight
-                }
-            }
+            p.send_async(message).await;
         }
     }
 
     /// Send a message to a specific peer
-    fn broadcast_to_peers(&self, message: PeerMessage) {
+    async fn broadcast_to_peers(&self, message: PeerMessage) {
         for pid in self.peers.keys() {
-            self.send_to_peer(*pid, message.clone());
+            self.send_to_peer(*pid, message.clone()).await;
         }
     }
 
     /// Send a protocol message to a specific peer
     #[allow(dead_code)]
-    fn send_message_to_peer(&self, pid: Pid, message: Message) {
+    async fn send_message_to_peer(&self, pid: Pid, message: Message) {
         self.send_to_peer(pid, PeerMessage::SendMessage(message))
+            .await;
     }
 
     // If we are seeding a file we are not interest in receiving peers
