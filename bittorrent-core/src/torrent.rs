@@ -532,20 +532,10 @@ impl Torrent {
                     break;
                 }
                 maybe_msg = self.rx.recv() => {
-                    // match maybe_msg{
-                    //     Some(msg) => self.handle_message(msg).await?,
-                    //     None => break,
-                    // }
-                    let start = std::time::Instant::now();
-                        match maybe_msg {
-                            Some(msg) => self.handle_message(msg).await?,
-                            None => break,
-                        }
-                        let elapsed = start.elapsed();
-                        if elapsed > Duration::from_millis(50) {
-                            tracing::warn!(elapsed_ms = elapsed.as_millis(), "slow message handler");
+                    match maybe_msg{
+                        Some(msg) => self.handle_message(msg).await?,
+                        None => break,
                     }
-
                 }
                 Some(discovered_peers) = discovered_peers_rx.recv() => {
                     for peer in &discovered_peers {
@@ -1167,12 +1157,16 @@ impl Torrent {
         let _ = self.metrics_tx.send(metrics);
     }
 
-    // /// Send a message to a specific peer
-    // async fn send_to_peer(&self, pid: Pid, message: PeerMessage) {
-    //     if let Some(p) = self.peers.get(&pid) {
-    //         p.send_async(message).await;
-    //     }
-    // }
+    // TODO: Message delivery strategy — not all messages warrant blocking send.
+    // try_send (non-blocking, drop on full):
+    //   - SendHave, SendChoke, SendUnchoke: peer will learn state eventually or disconnect
+    //   - SendBitfield, HaveMetadata: one-time setup, stale if peer is lagging anyway
+    //   - Disconnect: if channel is full the peer is stalled and will be cleaned up by heartbeat
+    // send_async (blocking) or try_send with timeout:
+    //   - SendMessage(Piece): actual upload data, worth waiting briefly for delivery
+    // A peer with a persistently full channel will naturally disconnect via the
+    // heartbeat timeout in PeerConnection — try_send drops accelerate that cleanup
+    // rather than holding up the torrent loop waiting on a dead peer.
     fn send_to_peer(&self, pid: Pid, message: PeerMessage) {
         if let Some(p) = self.peers.get(&pid) {
             match p.tx.try_send(message) {
