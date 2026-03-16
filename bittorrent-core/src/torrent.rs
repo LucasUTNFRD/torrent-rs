@@ -690,8 +690,6 @@ impl Torrent {
 
                 match self.storage.read_block(self.info_hash, block_info).await {
                     Ok(block) => {
-                        // Send piece to peer (upload tracking happens in peer_connection)
-
                         let block_len = block.data.len() as u64;
                         if let Err(e) = peer
                             .tx
@@ -1163,27 +1161,14 @@ impl Torrent {
     }
 
     fn update_progress(&mut self) {
-        let download_rate = self.dl_rate.update();
-        let upload_rate = self.ul_rate.update();
+        self.dl_rate.update();
+        self.ul_rate.update();
 
         let progress = if let Some(mananger) = &self.piece_mananger {
             mananger.get_progress()
         } else {
             0.0
         };
-
-        // let state = match self.state {
-        //     TorrentState::FetchingMetadata => TorrentState::FetchingMetadata,
-        //     TorrentState::Seeding => TorrentState::Seeding,
-        //     TorrentState::Paused => TorrentState::Paused,
-        //     TorrentState::Leeching => {
-        //         if progress >= 1.0 {
-        //             TorrentState::Seeding
-        //         } else {
-        //             TorrentState::Downloading,
-        //         }
-        //     }
-        // };
 
         let metrics = TorrentProgress {
             name: self
