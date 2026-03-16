@@ -1,6 +1,9 @@
 #[cfg(feature = "sim")]
 mod mock;
 
+// todo: test scenarios:
+// ensure sending bitfield to new connections
+
 #[cfg(feature = "sim")]
 mod sim_tests {
     use bittorrent_common::metainfo::{FileMode, Info, TorrentInfo};
@@ -223,7 +226,7 @@ mod sim_tests {
                 // Wait until we observe the peer count dropping to 0 (self-connection rejected)
                 let mut metrics_rx = session.subscribe_torrent(id).await.unwrap();
                 loop {
-                    if metrics_rx.borrow().peers_connected == 0 {
+                    if metrics_rx.borrow().connected_peers == 0 {
                         break;
                     }
                     metrics_rx.changed().await.unwrap();
@@ -232,7 +235,7 @@ mod sim_tests {
                 // Check metrics: should have 0 connected peers
                 let metrics = metrics_rx.borrow();
                 assert_eq!(
-                    metrics.peers_connected, 0,
+                    metrics.connected_peers, 0,
                     "Self-connection should have been rejected"
                 );
 

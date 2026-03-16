@@ -20,7 +20,6 @@ pub struct PeerMetrics {
     ema_upload: f64,
 
     // Choking algorithm specific tracking
-    #[allow(dead_code)]
     uploaded_in_last_round: u64,
     uploaded_since_unchoked: u64,
 }

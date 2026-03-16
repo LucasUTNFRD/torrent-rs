@@ -33,6 +33,7 @@ use tracing::debug;
 
 use crate::{
     bitfield::{Bitfield, BitfieldError},
+    events::peer::Direction,
     net::{ConnectTimeout, TcpStream},
     peer::{PeerMessage, metrics::PeerMetrics},
     session::CLIENT_ID,
@@ -126,7 +127,7 @@ const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
 #[derive(Debug)]
 pub struct PeerInfo {
     pub peer_id: PeerID,
-    pub source: PeerSource,
+    pub source: Direction,
 
     // Remote state (what the remote peer told us)
     pub remote_choking: bool,    // they are choking us
@@ -140,7 +141,7 @@ pub struct PeerInfo {
 }
 
 impl PeerInfo {
-    fn new(peer_id: PeerID, source: PeerSource) -> Self {
+    fn new(peer_id: PeerID, source: Direction) -> Self {
         Self {
             peer_id,
             source,
@@ -153,16 +154,9 @@ impl PeerInfo {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum PeerSource {
-    Inbound,
-    Outbound,
-}
-
 struct PeerConnection {
     pid: Pid,
     peer_addr: SocketAddr,
-    info_hash: InfoHash,
 
     // Shared with the handle held by the Torrent/Choker
     peer_info: Arc<RwLock<PeerInfo>>,
@@ -203,7 +197,6 @@ impl PeerConnection {
         pid: Pid,
         stream: TcpStream,
         peer_addr: SocketAddr,
-        info_hash: InfoHash,
         peer_info: Arc<RwLock<PeerInfo>>,
         torrent_tx: mpsc::Sender<TorrentMessage>,
         cmd_rx: mpsc::Receiver<PeerMessage>,
@@ -214,7 +207,6 @@ impl PeerConnection {
         Self {
             pid,
             peer_addr,
-            info_hash,
             peer_info,
             torrent_tx,
             cmd_rx,
@@ -865,7 +857,7 @@ pub fn spawn_outbound(
 ) -> PeerHandle {
     let (tx, rx) = mpsc::channel(256);
     // PeerInfo initialised with a placeholder peer_id; updated after handshake
-    let info = Arc::new(RwLock::new(PeerInfo::new(*CLIENT_ID, PeerSource::Outbound)));
+    let info = Arc::new(RwLock::new(PeerInfo::new(*CLIENT_ID, Direction::Outbound)));
 
     let handle = PeerHandle {
         pid,
@@ -888,7 +880,6 @@ pub fn spawn_outbound(
                 pid,
                 stream,
                 addr,
-                info_hash,
                 Arc::clone(&info),
                 torrent_tx,
                 rx,
@@ -921,7 +912,7 @@ pub fn spawn_inbound(
     supports_ext: bool,
 ) -> PeerHandle {
     let (tx, rx) = mpsc::channel(256);
-    let info = Arc::new(RwLock::new(PeerInfo::new(*CLIENT_ID, PeerSource::Inbound)));
+    let info = Arc::new(RwLock::new(PeerInfo::new(*CLIENT_ID, Direction::Inbound)));
 
     let handle = PeerHandle {
         pid,
@@ -942,7 +933,6 @@ pub fn spawn_inbound(
                 pid,
                 stream,
                 addr,
-                info_hash,
                 Arc::clone(&info),
                 torrent_tx,
                 rx,

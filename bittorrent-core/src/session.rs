@@ -29,11 +29,12 @@ use mainline_dht::{DhtConfig, DhtHandler};
 use tracker_client::TrackerHandler;
 
 use crate::{
-    SessionConfig,
+    SessionConfig, TorrentProgress,
+    events::SessionEvent,
     net::TcpListener,
     storage::{DiskStorage, StorageBackend},
     torrent::{Torrent, TorrentError, TorrentMessage},
-    types::{SessionEvent, TorrentId, TorrentMetrics},
+    types::TorrentId,
     verify_torrent_file::verify_content,
 };
 
@@ -47,7 +48,7 @@ pub static CLIENT_ID: LazyLock<PeerID> = LazyLock::new(PeerID::generate);
 pub struct Session {
     /// Handle to the background ``SessionManager`` task
     pub handle: JoinHandle<()>,
-    event_rx: broadcast::Receiver<SessionEvent>,
+    pub event_bus: crate::events::EventBus,
     /// Channel for sending commands to the ``SessionManager``
     tx: UnboundedSender<SessionCommand>,
 }
@@ -72,17 +73,17 @@ impl SessionBuilder {
 
     pub fn build(self) -> Session {
         let (tx, rx) = mpsc::unbounded_channel();
-        let (event_tx, event_rx) = broadcast::channel(1024);
+        let event_bus = crate::events::EventBus::new();
 
         let storage = self.storage.unwrap_or_else(|| Arc::new(DiskStorage::new()));
 
-        let manager = SessionManager::new(self.config, rx, storage, event_tx);
+        let manager = SessionManager::new(self.config, rx, storage, event_bus.clone());
 
         let handle = tokio::task::spawn(async move { manager.start().await });
 
         Session {
             handle,
-            event_rx,
+            event_bus,
             tx,
         }
     }
@@ -115,7 +116,7 @@ pub enum SessionCommand {
     },
     GetMetrics {
         id: TorrentId,
-        resp: oneshot::Sender<Result<watch::Receiver<TorrentMetrics>, SessionError>>,
+        resp: oneshot::Sender<Result<watch::Receiver<TorrentProgress>, SessionError>>,
     },
     Shutdown {
         resp: oneshot::Sender<Result<(), SessionError>>,
@@ -258,16 +259,23 @@ impl Session {
         rx.await.map_err(|_| SessionError::SessionClosed)?
     }
 
-    /// Subscribe to global session events.
     pub fn subscribe(&self) -> broadcast::Receiver<SessionEvent> {
-        self.event_rx.resubscribe()
+        self.event_bus.subscribe_session()
+    }
+
+    pub fn subscribe_torrent_events(&self) -> broadcast::Receiver<crate::events::TorrentEvent> {
+        self.event_bus.subscribe_torrent()
+    }
+
+    pub fn subscribe_peer_events(&self) -> broadcast::Receiver<crate::events::PeerEvent> {
+        self.event_bus.subscribe_peer()
     }
 
     /// Subscribe to metrics for a specific torrent.
     pub async fn subscribe_torrent(
         &self,
         id: TorrentId,
-    ) -> Result<watch::Receiver<TorrentMetrics>, SessionError> {
+    ) -> Result<watch::Receiver<TorrentProgress>, SessionError> {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(SessionCommand::GetMetrics { id, resp: tx })
@@ -317,7 +325,7 @@ struct TorrentEntry {
     /// Handle to the torrent task
     handle: JoinHandle<Result<(), TorrentError>>,
     /// Metrics receiver for the torrent
-    metrics_rx: watch::Receiver<TorrentMetrics>,
+    progress_rx: watch::Receiver<TorrentProgress>,
     /// Display name of the torrent
     name: String,
     /// Total size in bytes (0 if metadata not yet fetched)
@@ -328,7 +336,7 @@ struct TorrentEntry {
 struct SessionManager {
     config: SessionConfig,
     peer_id: PeerID,
-    event_tx: broadcast::Sender<SessionEvent>,
+    event_bus: crate::events::EventBus,
     rx: mpsc::UnboundedReceiver<SessionCommand>,
     sessions: Arc<RwLock<HashMap<InfoHash, TorrentEntry>>>,
     storage: Arc<dyn StorageBackend>,
@@ -339,13 +347,13 @@ impl SessionManager {
         config: SessionConfig,
         rx: mpsc::UnboundedReceiver<SessionCommand>,
         storage: Arc<dyn StorageBackend>,
-        event_tx: broadcast::Sender<SessionEvent>,
+        event_bus: crate::events::EventBus,
     ) -> Self {
         let peer_id = config.peer_id.unwrap_or(*CLIENT_ID);
         Self {
             config,
             peer_id,
-            event_tx,
+            event_bus,
             rx,
             sessions: Arc::new(RwLock::new(HashMap::new())),
             storage,
@@ -361,9 +369,6 @@ impl SessionManager {
         #[cfg(feature = "sim")]
         let tracker = Arc::new(TrackerHandler::new_noop());
 
-        // TODO: FOr now im ignoring the config builder of the DHT
-        // but some ke feature we will need is to give a list of nodes as boostrap source
-        // also move dht to core
         let dht: Option<Arc<DhtHandler>> = if self.config.enable_dht {
             let config_dir = &self.config.config_dir;
             let dht_config = DhtConfig {
@@ -470,7 +475,7 @@ impl SessionManager {
                         let sessions = self.sessions.read().unwrap();
                         sessions
                             .get(&id)
-                            .map(|entry| entry.metrics_rx.clone())
+                            .map(|entry| entry.progress_rx.clone())
                             .ok_or(SessionError::TorrentNotFound(id))
                     };
                     let _ = resp.send(result);
@@ -521,7 +526,7 @@ impl SessionManager {
         let name = metainfo.info.mode.name().to_string();
         let size_bytes = u64::try_from(metainfo.info.total_size()).expect("size is non-negative");
 
-        let (torrent, tx, metrics_rx) = Torrent::as_seed(
+        let (torrent, tx, progress_rx) = Torrent::as_seed(
             self.peer_id,
             content_dir,
             metainfo,
@@ -530,7 +535,7 @@ impl SessionManager {
             self.storage.clone(),
             shutdown_rx.clone(),
             self.config.torrents_dir.clone(),
-            self.event_tx.clone(),
+            self.event_bus.clone(),
             self.config.unchoke_slots_limit as usize,
         );
 
@@ -539,7 +544,7 @@ impl SessionManager {
         let entry = TorrentEntry {
             tx,
             handle,
-            metrics_rx,
+            progress_rx,
             name,
             size_bytes,
         };
@@ -549,7 +554,10 @@ impl SessionManager {
             sessions.insert(info_hash, entry);
         }
 
-        let _ = self.event_tx.send(SessionEvent::TorrentAdded(info_hash));
+        let _ = self
+            .event_bus
+            .session_tx
+            .send(SessionEvent::TorrentAdded(info_hash));
 
         Ok(info_hash)
     }
@@ -576,7 +584,7 @@ impl SessionManager {
         let name = metainfo.info.mode.name().to_string();
         let size_bytes = u64::try_from(metainfo.info.total_size()).expect("size is non-negative");
 
-        let (torrent, tx, metrics_rx) = Torrent::from_torrent_info(
+        let (torrent, tx, progress_rx) = Torrent::from_torrent_info(
             self.peer_id,
             metainfo,
             tracker.clone(),
@@ -584,7 +592,7 @@ impl SessionManager {
             self.storage.clone(),
             shutdown_rx.clone(),
             self.config.torrents_dir.clone(),
-            self.event_tx.clone(),
+            self.event_bus.clone(),
             self.config.unchoke_slots_limit as usize,
         );
 
@@ -593,7 +601,7 @@ impl SessionManager {
         let entry = TorrentEntry {
             tx,
             handle,
-            metrics_rx,
+            progress_rx,
             name,
             size_bytes,
         };
@@ -603,7 +611,10 @@ impl SessionManager {
             sessions.insert(info_hash, entry);
         }
 
-        let _ = self.event_tx.send(SessionEvent::TorrentAdded(info_hash));
+        let _ = self
+            .event_bus
+            .session_tx
+            .send(SessionEvent::TorrentAdded(info_hash));
 
         Ok(info_hash)
     }
@@ -641,7 +652,7 @@ impl SessionManager {
             .clone()
             .unwrap_or_else(|| info_hash.to_string());
 
-        let (torrent, tx, metrics_rx) = Torrent::from_magnet(
+        let (torrent, tx, progress_rx) = Torrent::from_magnet(
             self.peer_id,
             magnet,
             tracker.clone(),
@@ -649,7 +660,7 @@ impl SessionManager {
             self.storage.clone(),
             shutdown_rx.clone(),
             self.config.torrents_dir.clone(),
-            self.event_tx.clone(),
+            self.event_bus.clone(),
             self.config.unchoke_slots_limit as usize,
         );
 
@@ -658,7 +669,7 @@ impl SessionManager {
         let entry = TorrentEntry {
             tx,
             handle,
-            metrics_rx,
+            progress_rx,
             name,
             size_bytes: 0, // Unknown until metadata is fetched
         };
@@ -668,7 +679,10 @@ impl SessionManager {
             sessions.insert(info_hash, entry);
         }
 
-        let _ = self.event_tx.send(SessionEvent::TorrentAdded(info_hash));
+        let _ = self
+            .event_bus
+            .session_tx
+            .send(SessionEvent::TorrentAdded(info_hash));
 
         Ok(info_hash)
     }
@@ -689,7 +703,10 @@ impl SessionManager {
                     Ok(Err(e)) => tracing::warn!("Torrent {} error on removal: {:?}", id, e),
                     Err(e) => tracing::warn!("Torrent {} join error: {:?}", id, e),
                 }
-                let _ = self.event_tx.send(SessionEvent::TorrentRemoved(id));
+                let _ = self
+                    .event_bus
+                    .session_tx
+                    .send(SessionEvent::TorrentRemoved(id));
                 Ok(())
             }
             None => Err(SessionError::TorrentNotFound(id)),
