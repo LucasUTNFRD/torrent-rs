@@ -236,6 +236,7 @@ impl PeerConnection {
             metrics: PeerMetrics::new(),
         }
     }
+
     async fn handshake(
         stream: &mut TcpStream,
         local_peer_id: PeerID,
@@ -913,10 +914,11 @@ pub fn spawn_outbound(
 pub fn spawn_inbound(
     pid: Pid,
     addr: SocketAddr,
-    mut stream: TcpStream,
+    stream: TcpStream,
     info_hash: InfoHash,
-    local_peer_id: PeerID,
     torrent_tx: mpsc::Sender<TorrentMessage>,
+    remote_peer_id: PeerID,
+    supports_ext: bool,
 ) -> PeerHandle {
     let (tx, rx) = mpsc::channel(256);
     let info = Arc::new(RwLock::new(PeerInfo::new(*CLIENT_ID, PeerSource::Inbound)));
@@ -931,8 +933,8 @@ pub fn spawn_inbound(
     let tx_err = torrent_tx.clone();
     tokio::spawn(async move {
         let result: Result<(), ConnectionError> = async {
-            let (remote_peer_id, supports_extended) =
-                PeerConnection::handshake(&mut stream, local_peer_id, info_hash).await?;
+            // let (remote_peer_id, supports_extended) =
+            //     PeerConnection::handshake(&mut stream, local_peer_id, info_hash).await?;
 
             info.write().unwrap().peer_id = remote_peer_id;
 
@@ -944,7 +946,7 @@ pub fn spawn_inbound(
                 Arc::clone(&info),
                 torrent_tx,
                 rx,
-                supports_extended,
+                supports_ext,
             )
             .run()
             .await

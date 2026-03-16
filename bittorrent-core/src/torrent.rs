@@ -666,8 +666,9 @@ impl Torrent {
                 remote_addr,
                 stream,
                 self.info_hash,
-                *CLIENT_ID,
                 self.tx.clone(),
+                remote_peer_id,
+                supports_ext,
             ),
             PeerOrigin::Outbound(remote_addr) => spawn_outbound(
                 pid,
