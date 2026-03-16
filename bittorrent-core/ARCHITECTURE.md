@@ -40,7 +40,6 @@ Session (Root)
 - **Role**: BitTorrent Wire Protocol (BEP 3) implementation.
 - **Responsibilities**:
     - Handles handshaking, bitfield exchange, and block transfers.
-    - Implements a **Type-State Pattern** (`New` -> `Handshaking` -> `Connected`) to ensure protocol safety.
 - **Communication**:
     - Talks to the `Torrent` brain via `mpsc::Sender<TorrentMessage>`.
     - Receives commands (e.g., `SendHave`, `Disconnect`) via `mpsc::Receiver<PeerMessage>`.

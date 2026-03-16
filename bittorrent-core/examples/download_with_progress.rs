@@ -1,4 +1,4 @@
-use bittorrent_core::{Session, SessionConfig, types::SessionEvent, utils::format_speed};
+use bittorrent_core::{Session, SessionConfig, events::SessionEvent, utils::format_speed};
 use std::{env, time::Duration};
 use tokio::time::interval;
 
@@ -48,12 +48,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             _ = metrics_rx.changed() => {
                 let m = metrics_rx.borrow().clone();
                 // We use \r to overwrite the line for a simple CLI progress bar
+                let progress = if m.total_pieces > 0 {
+                    m.verified_pieces as f64 / m.total_pieces as f64
+                } else {
+                    0.0
+                };
                 print!("\r{:<20} | {:>8.2}% | {:>10} | {:>10} | {:>5}",
                     truncate(&m.name, 20),
-                    m.progress * 100.0,
-                    format_speed(m.download_rate),
-                    format_speed(m.upload_rate),
-                    m.peers_connected
+                    progress * 100.0,
+                    format_speed(m.download_rate as u64),
+                    format_speed(m.upload_rate as u64),
+                    m.connected_peers
                 );
                 use std::io::{self, Write};
                 io::stdout().flush().unwrap();
