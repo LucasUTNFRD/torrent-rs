@@ -157,7 +157,6 @@ impl PeerInfo {
 struct PeerConnection {
     pid: Pid,
     peer_addr: SocketAddr,
-    info_hash: InfoHash,
 
     // Shared with the handle held by the Torrent/Choker
     peer_info: Arc<RwLock<PeerInfo>>,
@@ -198,7 +197,6 @@ impl PeerConnection {
         pid: Pid,
         stream: TcpStream,
         peer_addr: SocketAddr,
-        info_hash: InfoHash,
         peer_info: Arc<RwLock<PeerInfo>>,
         torrent_tx: mpsc::Sender<TorrentMessage>,
         cmd_rx: mpsc::Receiver<PeerMessage>,
@@ -209,7 +207,6 @@ impl PeerConnection {
         Self {
             pid,
             peer_addr,
-            info_hash,
             peer_info,
             torrent_tx,
             cmd_rx,
@@ -883,7 +880,6 @@ pub fn spawn_outbound(
                 pid,
                 stream,
                 addr,
-                info_hash,
                 Arc::clone(&info),
                 torrent_tx,
                 rx,
@@ -937,7 +933,6 @@ pub fn spawn_inbound(
                 pid,
                 stream,
                 addr,
-                info_hash,
                 Arc::clone(&info),
                 torrent_tx,
                 rx,
