@@ -261,7 +261,7 @@ impl PeerConnection {
         }
 
         let mut heartbeat = interval(Duration::from_secs(60));
-        let mut metric_tick = interval(Duration::from_secs(1));
+        let mut metric_tick = interval(Duration::from_millis(500));
         heartbeat.tick().await;
         metric_tick.tick().await;
 
