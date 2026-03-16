@@ -1,7 +1,8 @@
 use crate::{
-    StorageBackend,
+    StorageBackend, TorrentProgress, TorrentState,
     bitfield::Bitfield,
     choker::Choker,
+    events::SessionEvent,
     metadata::{Metadata, MetadataState},
     net::TcpStream,
     peer::{
@@ -9,8 +10,6 @@ use crate::{
         peer_connection::{ConnectionError, PeerHandle, spawn_inbound, spawn_outbound},
     },
     piece_picker::{AvailabilityUpdate, BlockRequest, PieceManager, PieceState},
-    types::{FileInfo, PeerInfo, TorrentProgress, TrackerInfo},
-    events::SessionEvent,
 };
 use bittorrent_common::{
     metainfo::{Info, TorrentInfo},
@@ -32,7 +31,7 @@ use std::{
 };
 use thiserror::Error;
 use tokio::{
-    sync::{broadcast, mpsc, oneshot, watch},
+    sync::{mpsc, oneshot, watch},
     time::sleep,
 };
 use tracing::{debug, info, instrument, warn};
@@ -163,22 +162,22 @@ pub enum TorrentMessage {
         addr: SocketAddr,
     },
 }
-
-/// Statistics for a torrent
-#[derive(Debug, Clone)]
-pub struct TorrentStats {
-    pub state: TorrentState,
-    pub progress: f64,
-    pub download_rate: u64,
-    pub upload_rate: u64,
-    pub peers_connected: usize,
-    pub peers_discovered: usize,
-    pub downloaded_bytes: u64,
-    pub uploaded_bytes: u64,
-    pub peers: Vec<PeerInfo>,
-    pub trackers: Vec<TrackerInfo>,
-    pub files: Vec<FileInfo>,
-}
+//
+// /// Statistics for a torrent
+// #[derive(Debug, Clone)]
+// pub struct TorrentStats {
+//     pub state: TorrentState,
+//     pub progress: f64,
+//     pub download_rate: u64,
+//     pub upload_rate: u64,
+//     pub peers_connected: usize,
+//     pub peers_discovered: usize,
+//     pub downloaded_bytes: u64,
+//     pub uploaded_bytes: u64,
+//     pub peers: Vec<PeerInfo>,
+//     pub trackers: Vec<TrackerInfo>,
+//     pub files: Vec<FileInfo>,
+// }
 
 //
 // Metrics Control Structure
@@ -245,14 +244,6 @@ pub struct Torrent {
     event_bus: crate::events::EventBus,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum TorrentState {
-    FetchingMetadata,
-    Seeding,
-    Paused,
-    Leeching,
-}
-
 impl Torrent {
     /// Create a new Torrent from a .torrent file (with complete metadata)
     pub fn from_torrent_info(
@@ -311,7 +302,7 @@ impl Torrent {
                 info_hash,
                 peer_id,
                 metadata,
-                state: TorrentState::Leeching,
+                state: TorrentState::Downloading,
                 trackers,
                 tracker_client,
                 dht_client,
@@ -391,7 +382,7 @@ impl Torrent {
                 info_hash,
                 peer_id,
                 metadata,
-                state: TorrentState::Leeching,
+                state: TorrentState::Downloading,
                 trackers,
                 tracker_client,
                 dht_client,
@@ -503,9 +494,11 @@ impl Torrent {
     ))]
     pub async fn start_session(mut self) -> Result<(), TorrentError> {
         match self.state {
-            TorrentState::Leeching | TorrentState::FetchingMetadata => self.init_interal().await,
+            TorrentState::Downloading | TorrentState::Checking | TorrentState::FetchingMetadata => {
+                self.init_interal().await
+            }
             TorrentState::Seeding => self.init_seed().await,
-            TorrentState::Paused => {}
+            TorrentState::Paused | TorrentState::Error(_) | TorrentState::Finished => {}
         }
         // Star announcing to Trackers/DHT
         let (discovered_peers_tx, mut discovered_peers_rx) = mpsc::channel(64);
@@ -689,10 +682,13 @@ impl Torrent {
 
         self.pending_requests.insert(pid, Vec::new());
         self.peers.insert(pid, peer_handle.clone());
-        let _ = self.event_bus.peer_tx.send(crate::events::peer::PeerEvent::Connected {
-            addr: peer_handle.peer_addr,
-            direction,
-        });
+        let _ = self
+            .event_bus
+            .peer_tx
+            .send(crate::events::peer::PeerEvent::Connected {
+                addr: peer_handle.peer_addr,
+                direction,
+            });
     }
 
     async fn handle_message(&mut self, msg: TorrentMessage) -> Result<(), TorrentError> {
@@ -972,7 +968,10 @@ impl Torrent {
                     piece_index,
                     e
                 );
-                let _ = self.event_bus.torrent_tx.send(crate::events::torrent::TorrentEvent::HashFailed { piece_index });
+                let _ = self
+                    .event_bus
+                    .torrent_tx
+                    .send(crate::events::torrent::TorrentEvent::HashFailed { piece_index });
                 self.piece_mananger
                     .as_mut()
                     .expect("initialized")
@@ -988,7 +987,10 @@ impl Torrent {
                 "Piece {} failed hash verification - resetting for re-download",
                 piece_index
             );
-            let _ = self.event_bus.torrent_tx.send(crate::events::torrent::TorrentEvent::HashFailed { piece_index });
+            let _ = self
+                .event_bus
+                .torrent_tx
+                .send(crate::events::torrent::TorrentEvent::HashFailed { piece_index });
             self.piece_mananger
                 .as_mut()
                 .expect("initialized")
@@ -1039,16 +1041,24 @@ impl Torrent {
             self.state = TorrentState::Seeding;
 
             let prev_metric = match prev {
-                TorrentState::FetchingMetadata => crate::metrics::progress::TorrentState::FetchingMetadata,
+                TorrentState::FetchingMetadata => {
+                    crate::metrics::progress::TorrentState::FetchingMetadata
+                }
                 TorrentState::Seeding => crate::metrics::progress::TorrentState::Seeding,
                 TorrentState::Paused => crate::metrics::progress::TorrentState::Paused,
-                TorrentState::Leeching => crate::metrics::progress::TorrentState::Downloading,
+                TorrentState::Downloading => crate::metrics::progress::TorrentState::Downloading,
+                _ => prev.clone(),
             };
-            let _ = self.event_bus.torrent_tx.send(crate::events::torrent::TorrentEvent::StateChanged {
-                prev: prev_metric,
-                next: crate::metrics::progress::TorrentState::Seeding,
-            });
-            let _ = self.event_bus.torrent_tx.send(crate::events::torrent::TorrentEvent::TorrentFinished);
+            let _ = self.event_bus.torrent_tx.send(
+                crate::events::torrent::TorrentEvent::StateChanged {
+                    prev: prev_metric,
+                    next: crate::metrics::progress::TorrentState::Seeding,
+                },
+            );
+            let _ = self
+                .event_bus
+                .torrent_tx
+                .send(crate::events::torrent::TorrentEvent::TorrentFinished);
 
             if let Some(name) = self.metadata.display_name() {
                 info!("Torrent-{} Download Completed", name);
@@ -1056,7 +1066,8 @@ impl Torrent {
                 info!("Torrent Download Completed");
             }
             let _ = self
-                .event_bus.session_tx
+                .event_bus
+                .session_tx
                 .send(SessionEvent::TorrentCompleted(self.info_hash));
         }
     }
@@ -1080,7 +1091,8 @@ impl Torrent {
 
             self.broadcast_to_peers(PeerMessage::HaveMetadata(info));
             let _ = self
-                .event_bus.session_tx
+                .event_bus
+                .session_tx
                 .send(SessionEvent::MetadataFetched(self.info_hash));
         }
 
@@ -1093,10 +1105,13 @@ impl Torrent {
         }
 
         if let Some(peer_handle) = self.peers.remove(&pid) {
-            let _ = self.event_bus.peer_tx.send(crate::events::peer::PeerEvent::Disconnected {
-                addr: peer_handle.peer_addr,
-                reason: crate::events::peer::DisconnectReason::Other("Clean up".to_string()),
-            });
+            let _ = self
+                .event_bus
+                .peer_tx
+                .send(crate::events::peer::PeerEvent::Disconnected {
+                    addr: peer_handle.peer_addr,
+                    reason: crate::events::peer::DisconnectReason::Other("Clean up".to_string()),
+                });
         }
 
         let requests: Vec<_> = self
@@ -1123,9 +1138,12 @@ impl Torrent {
         for pid in to_choke {
             self.send_to_peer(pid, PeerMessage::SendChoke);
             if let Some(peer) = self.peers.get(&pid) {
-                let _ = self.event_bus.peer_tx.send(crate::events::peer::PeerEvent::Choked { 
-                    addr: peer.peer_addr 
-                });
+                let _ = self
+                    .event_bus
+                    .peer_tx
+                    .send(crate::events::peer::PeerEvent::Choked {
+                        addr: peer.peer_addr,
+                    });
             }
             tracing::debug!("Periodic choker: choked peer {pid:?}");
         }
@@ -1134,16 +1152,18 @@ impl Torrent {
         for pid in to_unchoke {
             self.send_to_peer(pid, PeerMessage::SendUnchoke);
             if let Some(peer) = self.peers.get(&pid) {
-                let _ = self.event_bus.peer_tx.send(crate::events::peer::PeerEvent::Unchoked { 
-                    addr: peer.peer_addr 
-                });
+                let _ = self
+                    .event_bus
+                    .peer_tx
+                    .send(crate::events::peer::PeerEvent::Unchoked {
+                        addr: peer.peer_addr,
+                    });
             }
             tracing::debug!("Periodic choker: unchoked peer {pid:?}");
         }
     }
 
     fn update_progress(&mut self) {
-        tracing::debug!("HEALTHCHECK");
         let (download_rate, upload_rate) = (0, 0);
 
         let progress = if let Some(mananger) = &self.piece_mananger {
@@ -1152,18 +1172,18 @@ impl Torrent {
             0.0
         };
 
-        let state = match self.state {
-            TorrentState::FetchingMetadata => crate::metrics::progress::TorrentState::FetchingMetadata,
-            TorrentState::Seeding => crate::metrics::progress::TorrentState::Seeding,
-            TorrentState::Paused => crate::metrics::progress::TorrentState::Paused,
-            TorrentState::Leeching => {
-                if progress >= 1.0 {
-                    crate::metrics::progress::TorrentState::Seeding
-                } else {
-                    crate::metrics::progress::TorrentState::Downloading
-                }
-            }
-        };
+        // let state = match self.state {
+        //     TorrentState::FetchingMetadata => TorrentState::FetchingMetadata,
+        //     TorrentState::Seeding => TorrentState::Seeding,
+        //     TorrentState::Paused => TorrentState::Paused,
+        //     TorrentState::Leeching => {
+        //         if progress >= 1.0 {
+        //             TorrentState::Seeding
+        //         } else {
+        //             TorrentState::Downloading,
+        //         }
+        //     }
+        // };
 
         let metrics = TorrentProgress {
             name: self
@@ -1171,9 +1191,17 @@ impl Torrent {
                 .display_name()
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| self.info_hash.to_string()),
-            total_pieces: self.metadata.info().map(|i| i.num_pieces() as u32).unwrap_or(0),
+            total_pieces: self
+                .metadata
+                .info()
+                .map(|i| i.num_pieces() as u32)
+                .unwrap_or(0),
             verified_pieces: {
-                let total = self.metadata.info().map(|i| i.num_pieces() as f64).unwrap_or(0.0);
+                let total = self
+                    .metadata
+                    .info()
+                    .map(|i| i.num_pieces() as f64)
+                    .unwrap_or(0.0);
                 (progress * total) as u32
             },
             failed_pieces: 0,
@@ -1187,7 +1215,7 @@ impl Torrent {
             connected_peers: self.peers.len() as u32,
             download_rate: download_rate as f64,
             upload_rate: upload_rate as f64,
-            state,
+            state: self.state.clone(),
             eta_seconds: None,
         };
 
@@ -1238,7 +1266,7 @@ impl Torrent {
             |info| {
                 let event = match self.state {
                     TorrentState::Seeding => Events::Completed,
-                    TorrentState::Leeching => Events::Started,
+                    TorrentState::Downloading => Events::Started,
                     _ => Events::None,
                 };
                 ClientState::new(
@@ -1270,11 +1298,12 @@ impl Torrent {
 
                     if let Err(e) = response {
                         tracing::warn!("Failed to announce to tracker {}: {}", announce, e);
-                        let _ = event_bus_tx.send(crate::events::torrent::TorrentEvent::TrackerError {
-                            url: announce.clone(),
-                            error: format!("{:?}", e),
-                            times_in_row: 1,
-                        });
+                        let _ =
+                            event_bus_tx.send(crate::events::torrent::TorrentEvent::TrackerError {
+                                url: announce.clone(),
+                                error: format!("{:?}", e),
+                                times_in_row: 1,
+                            });
                         return;
                     }
 
@@ -1283,10 +1312,11 @@ impl Torrent {
                         break;
                     };
 
-                    let _ = event_bus_tx.send(crate::events::torrent::TorrentEvent::TrackerAnnounced {
-                        url: announce.clone(),
-                        peers_received: response.peers.len() as u32,
-                    });
+                    let _ =
+                        event_bus_tx.send(crate::events::torrent::TorrentEvent::TrackerAnnounced {
+                            url: announce.clone(),
+                            peers_received: response.peers.len() as u32,
+                        });
 
                     let sleep_duration = response.interval;
                     if !seed {

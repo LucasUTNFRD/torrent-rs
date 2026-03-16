@@ -29,12 +29,12 @@ use mainline_dht::{DhtConfig, DhtHandler};
 use tracker_client::TrackerHandler;
 
 use crate::{
-    SessionConfig,
+    SessionConfig, TorrentProgress,
+    events::SessionEvent,
     net::TcpListener,
     storage::{DiskStorage, StorageBackend},
     torrent::{Torrent, TorrentError, TorrentMessage},
-    types::{TorrentId, TorrentProgress},
-    events::SessionEvent,
+    types::TorrentId,
     verify_torrent_file::verify_content,
 };
 
@@ -554,7 +554,10 @@ impl SessionManager {
             sessions.insert(info_hash, entry);
         }
 
-        let _ = self.event_bus.session_tx.send(SessionEvent::TorrentAdded(info_hash));
+        let _ = self
+            .event_bus
+            .session_tx
+            .send(SessionEvent::TorrentAdded(info_hash));
 
         Ok(info_hash)
     }
@@ -608,7 +611,10 @@ impl SessionManager {
             sessions.insert(info_hash, entry);
         }
 
-        let _ = self.event_bus.session_tx.send(SessionEvent::TorrentAdded(info_hash));
+        let _ = self
+            .event_bus
+            .session_tx
+            .send(SessionEvent::TorrentAdded(info_hash));
 
         Ok(info_hash)
     }
@@ -673,7 +679,10 @@ impl SessionManager {
             sessions.insert(info_hash, entry);
         }
 
-        let _ = self.event_bus.session_tx.send(SessionEvent::TorrentAdded(info_hash));
+        let _ = self
+            .event_bus
+            .session_tx
+            .send(SessionEvent::TorrentAdded(info_hash));
 
         Ok(info_hash)
     }
@@ -694,7 +703,10 @@ impl SessionManager {
                     Ok(Err(e)) => tracing::warn!("Torrent {} error on removal: {:?}", id, e),
                     Err(e) => tracing::warn!("Torrent {} join error: {:?}", id, e),
                 }
-                let _ = self.event_bus.session_tx.send(SessionEvent::TorrentRemoved(id));
+                let _ = self
+                    .event_bus
+                    .session_tx
+                    .send(SessionEvent::TorrentRemoved(id));
                 Ok(())
             }
             None => Err(SessionError::TorrentNotFound(id)),
