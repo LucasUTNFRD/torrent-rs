@@ -37,6 +37,8 @@
 //!
 //! Both sources feed peers into the same channel for connection attempts.
 
+pub mod events;
+pub mod metrics;
 mod bitfield;
 mod choker;
 mod metadata;
@@ -55,4 +57,6 @@ pub use session::{Session, SessionBuilder, SessionError};
 pub use session_config::SessionConfig;
 pub use storage::StorageBackend;
 pub use torrent::{TorrentState as InternalTorrentState, TorrentStats};
-pub use types::{TorrentId, TorrentState, TorrentSummary};
+pub use types::TorrentId;
+pub use events::SessionEvent;
+pub use metrics::progress::{TorrentProgress, TorrentState};
