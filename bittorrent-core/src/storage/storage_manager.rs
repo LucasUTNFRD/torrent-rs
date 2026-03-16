@@ -7,7 +7,10 @@ use std::{
     sync::{Arc, Mutex, RwLock},
 };
 
-use crate::storage::{StorageError, StorageMessage, open_file};
+use crate::{
+    metrics::{self, counters},
+    storage::{StorageError, StorageMessage, open_file},
+};
 
 use bittorrent_common::{
     metainfo::{FileInfo, Info},
@@ -289,9 +292,11 @@ impl StorageManager {
                     };
                     let storage = self.storage.clone();
                     tokio::task::spawn_blocking(move || {
+                        let start = tokio::time::Instant::now();
                         let result = storage
                             .read(&cache, piece_index, begin, length)
                             .map_err(StorageError::from);
+                        counters::disk_read_time_ms(start.elapsed().as_millis() as u64);
                         let _ = result_tx.send(result);
                     });
                 }
@@ -306,10 +311,16 @@ impl StorageManager {
                         continue;
                     };
                     let storage = self.storage.clone();
+                    let byte_count = data.len() as u64;
                     tokio::task::spawn_blocking(move || {
+                        let start = tokio::time::Instant::now();
                         let result = storage
                             .write(&cache, piece, &data)
                             .map_err(StorageError::from);
+                        if result.is_ok() {
+                            counters::disk_bytes_written(byte_count);
+                        }
+                        counters::disk_write_time_ms(start.elapsed().as_millis() as u64);
                         let _ = result_tx.send(result);
                     });
                 }

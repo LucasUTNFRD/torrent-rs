@@ -1,0 +1,8 @@
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: bittorrent-core
+    static_configs:
+      - targets:
+          - host.docker.internal:9000  # port your Rust binary listens on

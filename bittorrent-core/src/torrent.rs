@@ -5,6 +5,7 @@ use crate::{
     ema::EmaRate,
     events::{EventBus, SessionEvent},
     metadata::{Metadata, MetadataState},
+    metrics::counters,
     net::TcpStream,
     peer::{
         PeerMessage,
@@ -978,6 +979,7 @@ impl Torrent {
                 "Piece {} failed hash verification - resetting for re-download",
                 piece_index
             );
+            counters::piece_failed();
             let _ = self
                 .event_bus
                 .torrent_tx
@@ -989,6 +991,7 @@ impl Torrent {
             return;
         }
 
+        counters::piece_passed();
         // Mark as have and broadcast
         self.piece_mananger
             .as_mut()
