@@ -1,6 +1,9 @@
 #[cfg(feature = "sim")]
 mod mock;
 
+// todo: test scenarios:
+// ensure sending bitfield to new connections
+
 #[cfg(feature = "sim")]
 mod sim_tests {
     use bittorrent_common::metainfo::{FileMode, Info, TorrentInfo};
