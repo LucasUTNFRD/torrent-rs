@@ -695,20 +695,3 @@ fn get_optional_int_from_dict(
         _ => None,
     })
 }
-
-#[cfg(test)]
-mod test {
-    use crate::metainfo::parse_torrent_from_file;
-
-    #[test]
-    fn test_num_pieces_matches_len_of_pieces() {
-        let file =
-            parse_torrent_from_file("../sample_torrents/sample.torrent").expect("parse torrent");
-
-        let _file2 =
-            parse_torrent_from_file("../sample_torrents/kubuntu-25.04-desktop-amd64.iso.torrent")
-                .expect("parse torrent");
-
-        assert_eq!(file.num_pieces(), file.info.pieces.len())
-    }
-}

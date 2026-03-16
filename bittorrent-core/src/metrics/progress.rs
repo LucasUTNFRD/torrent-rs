@@ -1,17 +1,17 @@
 #[derive(Debug, Clone)]
 pub struct TorrentProgress {
-    pub name:             String,
-    pub total_pieces:     u32,
-    pub verified_pieces:  u32,
-    pub failed_pieces:    u32,
-    pub total_bytes:      u64,
+    pub name: String,
+    pub total_pieces: u32,
+    pub verified_pieces: u32,
+    pub failed_pieces: u32,
+    pub total_bytes: u64,
     pub downloaded_bytes: u64,
-    pub uploaded_bytes:   u64,
-    pub connected_peers:  u32,
-    pub download_rate:    f64,   // bytes/sec, computed by session on interval
-    pub upload_rate:      f64,
-    pub state:            TorrentState,
-    pub eta_seconds:      Option<u64>,
+    pub uploaded_bytes: u64,
+    pub connected_peers: u32,
+    pub download_rate: f64, // bytes/sec, computed by session on interval
+    pub upload_rate: f64,
+    pub state: TorrentState,
+    pub eta_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
