@@ -39,6 +39,7 @@
 
 mod bitfield;
 mod choker;
+mod ema;
 pub mod events;
 mod metadata;
 pub mod metrics;

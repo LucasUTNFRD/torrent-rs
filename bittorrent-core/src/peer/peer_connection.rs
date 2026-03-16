@@ -186,7 +186,7 @@ struct PeerConnection {
     // Congestion control
     metrics: PeerMetrics,
     slow_start: bool,
-    prev_download_rate: u64,
+    prev_download_rate: f64,
 
     last_recv_msg: Instant,
     last_block_request: Instant,
@@ -222,7 +222,7 @@ impl PeerConnection {
             target_request_queue: 2,
             max_outgoing_request: 250,
             slow_start: true,
-            prev_download_rate: 0,
+            prev_download_rate: 0.0,
             last_recv_msg: Instant::now(),
             last_block_request: Instant::now(),
             metrics: PeerMetrics::new(),
@@ -261,7 +261,7 @@ impl PeerConnection {
         }
 
         let mut heartbeat = interval(Duration::from_secs(60));
-        let mut metric_tick = interval(Duration::from_secs(1));
+        let mut metric_tick = interval(Duration::from_millis(500));
         heartbeat.tick().await;
         metric_tick.tick().await;
 
@@ -328,20 +328,19 @@ impl PeerConnection {
     // ── Metric update (1Hz) ───────────────────────────────────────────────────
 
     fn metric_update(&mut self) {
-        tracing::debug!("running updating metrics periodically ");
         self.metrics.update_rates();
-        let current_rate = self.metrics.get_download_rate();
+        let current_rate = self.metrics.download_rate_f64();
 
         if self.slow_start {
-            let increase = current_rate.saturating_sub(self.prev_download_rate);
-            let threshold = std::cmp::max(current_rate / 20, 10_240);
-            if current_rate > 0 && increase < threshold {
+            let increase = current_rate - self.prev_download_rate;
+            let threshold = (current_rate / 20.0).max(10_240.0);
+            if current_rate > 0.0 && increase < threshold {
                 self.slow_start = false;
             }
         } else {
             const BLOCK_SIZE: f64 = 16384.0;
             const ASSUMED_LATENCY: f64 = 0.5;
-            let target = (current_rate as f64 * ASSUMED_LATENCY / BLOCK_SIZE) as usize;
+            let target = (current_rate * ASSUMED_LATENCY / BLOCK_SIZE) as usize;
             self.target_request_queue = target.max(2).min(self.max_outgoing_request);
         }
 
@@ -558,17 +557,18 @@ impl PeerConnection {
 
     fn adjust_pipeline_on_piece(&mut self) {
         let pending_bytes = self.outgoing_requests.len() as u64 * 16384;
-        let rate = self.metrics.get_download_rate().max(1);
-        let queue_secs = pending_bytes / rate;
+
+        let rate = self.metrics.download_rate_f64().max(1.0);
+        let queue_secs = pending_bytes as f64 / rate;
 
         if self.slow_start {
-            if queue_secs < 5 {
+            if queue_secs < 5.0 {
                 self.target_request_queue =
                     (self.target_request_queue + 1).min(self.max_outgoing_request);
             } else {
                 self.slow_start = false;
             }
-        } else if queue_secs >= 5 {
+        } else if queue_secs >= 5.0 {
             self.slow_start = false;
         }
     }

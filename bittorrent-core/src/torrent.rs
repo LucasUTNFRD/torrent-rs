@@ -2,7 +2,8 @@ use crate::{
     StorageBackend, TorrentProgress, TorrentState,
     bitfield::Bitfield,
     choker::Choker,
-    events::SessionEvent,
+    ema::EmaRate,
+    events::{EventBus, SessionEvent},
     metadata::{Metadata, MetadataState},
     net::TcpStream,
     peer::{
@@ -162,26 +163,6 @@ pub enum TorrentMessage {
         addr: SocketAddr,
     },
 }
-//
-// /// Statistics for a torrent
-// #[derive(Debug, Clone)]
-// pub struct TorrentStats {
-//     pub state: TorrentState,
-//     pub progress: f64,
-//     pub download_rate: u64,
-//     pub upload_rate: u64,
-//     pub peers_connected: usize,
-//     pub peers_discovered: usize,
-//     pub downloaded_bytes: u64,
-//     pub uploaded_bytes: u64,
-//     pub peers: Vec<PeerInfo>,
-//     pub trackers: Vec<TrackerInfo>,
-//     pub files: Vec<FileInfo>,
-// }
-
-//
-// Metrics Control Structure
-//
 
 #[derive(Debug, Default)]
 pub struct Metrics {
@@ -239,9 +220,11 @@ pub struct Torrent {
     content_dir: Option<PathBuf>,
 
     /// Metrics sender for live updates
+    ul_rate: EmaRate,
+    dl_rate: EmaRate,
     progress_tx: watch::Sender<TorrentProgress>,
     /// Event sender for lifecycle changes
-    event_bus: crate::events::EventBus,
+    event_bus: EventBus,
 }
 
 impl Torrent {
@@ -320,6 +303,8 @@ impl Torrent {
                 progress_tx,
                 event_bus,
                 pending_requests: HashMap::new(),
+                ul_rate: EmaRate::default(),
+                dl_rate: EmaRate::default(),
             },
             tx,
             progress_rx,
@@ -400,6 +385,8 @@ impl Torrent {
                 progress_tx,
                 event_bus,
                 pending_requests: HashMap::new(),
+                ul_rate: EmaRate::default(),
+                dl_rate: EmaRate::default(),
             },
             tx,
             progress_rx,
@@ -483,6 +470,8 @@ impl Torrent {
                 progress_tx,
                 event_bus,
                 pending_requests: HashMap::new(),
+                ul_rate: EmaRate::default(),
+                dl_rate: EmaRate::default(),
             },
             tx,
             progress_rx,
@@ -701,13 +690,15 @@ impl Torrent {
 
                 match self.storage.read_block(self.info_hash, block_info).await {
                     Ok(block) => {
-                        // Send piece to peer (upload tracking happens in peer_connection)
+                        let block_len = block.data.len() as u64;
                         if let Err(e) = peer
                             .tx
                             .send(PeerMessage::SendMessage(Message::Piece(block)))
                             .await
                         {
                             tracing::warn!("Failed to send piece to peer {}: {}", pid, e);
+                        } else {
+                            self.ul_rate.record(block_len);
                         }
                     }
                     Err(e) => {
@@ -1005,6 +996,12 @@ impl Torrent {
             .set_piece_as(piece_index as usize, PieceState::Have);
         self.bitfield.set(piece_index as usize);
 
+        let piece_len = piece.len() as u64;
+        self.metrics
+            .downloaded_bytes
+            .fetch_add(piece_len, Ordering::Relaxed);
+        self.dl_rate.record(piece_len);
+
         debug!("MARKED AS HAVE");
         tracing::debug!("BROADCASTING PIECE TO PEERS");
         self.broadcast_to_peers(PeerMessage::SendHave { piece_index });
@@ -1164,26 +1161,14 @@ impl Torrent {
     }
 
     fn update_progress(&mut self) {
-        let (download_rate, upload_rate) = (0, 0);
+        self.dl_rate.update();
+        self.ul_rate.update();
 
         let progress = if let Some(mananger) = &self.piece_mananger {
             mananger.get_progress()
         } else {
             0.0
         };
-
-        // let state = match self.state {
-        //     TorrentState::FetchingMetadata => TorrentState::FetchingMetadata,
-        //     TorrentState::Seeding => TorrentState::Seeding,
-        //     TorrentState::Paused => TorrentState::Paused,
-        //     TorrentState::Leeching => {
-        //         if progress >= 1.0 {
-        //             TorrentState::Seeding
-        //         } else {
-        //             TorrentState::Downloading,
-        //         }
-        //     }
-        // };
 
         let metrics = TorrentProgress {
             name: self
@@ -1213,8 +1198,8 @@ impl Torrent {
             downloaded_bytes: self.metrics.downloaded_bytes.load(Ordering::Relaxed),
             uploaded_bytes: self.metrics.uploaded_bytes.load(Ordering::Relaxed),
             connected_peers: self.peers.len() as u32,
-            download_rate: download_rate as f64,
-            upload_rate: upload_rate as f64,
+            download_rate: self.dl_rate.rate(),
+            upload_rate: self.ul_rate.rate(),
             state: self.state.clone(),
             eta_seconds: None,
         };
