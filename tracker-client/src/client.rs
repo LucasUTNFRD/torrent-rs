@@ -189,6 +189,12 @@ impl TrackerHandler {
         Self { tracker_tx }
     }
 
+    // this exist to avoid panic on udp binding on simulation testing
+    pub fn new_noop() -> Self {
+        let (tracker_tx, _tracker_rx) = mpsc::channel(100);
+        Self { tracker_tx }
+    }
+
     ///  Single announce (legacy) - returns first successful response
     pub async fn announce(
         &self,

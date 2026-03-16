@@ -1,9 +1,9 @@
-use std::{ sync::Arc };
+use std::sync::Arc;
 
 use bittorrent_common::metainfo::Info;
-use peer_protocol::protocol::{ Message};
+use peer_protocol::protocol::Message;
 
-use crate::{bitfield::Bitfield,  peer::metrics::PeerMetrics};
+use crate::bitfield::Bitfield;
 
 pub mod peer_connection;
 
@@ -23,8 +23,4 @@ pub enum PeerMessage {
     Disconnect,
     SendMessage(Message),
     HaveMetadata(Arc<Info>),
-    Connected {
-        metrics: Arc<PeerMetrics>,
-    },
 }
-
