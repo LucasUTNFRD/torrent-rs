@@ -1,8 +1,8 @@
 global:
-  scrape_interval: 5s
+  scrape_interval: 10s
 
 scrape_configs:
-  - job_name: bittorrent-core
+  - job_name: 'torrent-rs'
     static_configs:
-      - targets:
-          - host.docker.internal:9000  # port your Rust binary listens on
+      # Use host.docker.internal to access the metrics exporter on the host machine
+      - targets: ['host.docker.internal:9000']

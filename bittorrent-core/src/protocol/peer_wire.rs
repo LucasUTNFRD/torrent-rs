@@ -366,6 +366,7 @@ impl Encoder<Message> for MessageCodec {
             }
         };
 
+        counters::on_write_counter();
         counters::inc_sent_total(dst.len() as u64);
 
         Ok(())
