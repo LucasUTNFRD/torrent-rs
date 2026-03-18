@@ -8,16 +8,17 @@ use std::{
 };
 
 use crate::{
-    metrics::{self, counters},
+    metrics::counters,
     storage::{StorageError, StorageMessage, open_file},
 };
 
+use crate::protocol::peer_wire::Block;
 use bittorrent_common::{
     metainfo::{FileInfo, Info},
     types::InfoHash,
 };
 use bytes::BytesMut;
-use peer_protocol::protocol::Block;
+
 use sha1::{Digest, Sha1};
 use tokio::sync::mpsc;
 

@@ -5,6 +5,13 @@ use std::{
     time::Duration,
 };
 
+use crate::protocol::{
+    extension::{
+        DATA_ID, ExtendedHandshake, ExtendedMessage, MetadataMessage, REJECT_ID, REQUEST_ID,
+        RawExtendedMessage,
+    },
+    peer_wire::{Block, BlockInfo, Handshake, Message, MessageCodec},
+};
 use bittorrent_common::{
     metainfo::Info,
     types::{InfoHash, PeerID},
@@ -13,14 +20,6 @@ use bytes::{Bytes, BytesMut};
 use futures::{
     SinkExt, StreamExt,
     stream::{SplitSink, SplitStream},
-};
-use peer_protocol::{
-    MessageCodec,
-    peer::extension::{
-        DATA_ID, ExtendedHandshake, ExtendedMessage, MetadataMessage, REJECT_ID, REQUEST_ID,
-        RawExtendedMessage,
-    },
-    protocol::{Block, BlockInfo, Handshake, Message},
 };
 use thiserror::Error;
 use tokio::{
@@ -34,6 +33,7 @@ use tracing::debug;
 use crate::{
     bitfield::{Bitfield, BitfieldError},
     events::peer::Direction,
+    metrics::counters,
     net::{ConnectTimeout, TcpStream},
     peer::{PeerMessage, metrics::PeerMetrics},
     session::CLIENT_ID,
@@ -270,7 +270,10 @@ impl PeerConnection {
 
             tokio::select! {
                 maybe_msg = self.stream.next() => match maybe_msg {
-                    Some(Ok(msg)) => self.handle_msg(msg).await?,
+                    Some(Ok(msg)) => {
+                        counters::on_read_counter();
+                        self.handle_msg(msg).await?
+                    },
                     _ => break,
                 },
                 maybe_cmd = self.cmd_rx.recv() => match maybe_cmd {

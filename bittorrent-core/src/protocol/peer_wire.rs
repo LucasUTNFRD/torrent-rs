@@ -11,7 +11,7 @@ use tokio_util::codec::{Decoder, Encoder};
 
 use bittorrent_common::types::{InfoHash, PeerID};
 
-use crate::peer::extension::{ExtendedHandshake, ExtendedMessage, RawExtendedMessage};
+use crate::protocol::extension::{ExtendedHandshake, ExtendedMessage, RawExtendedMessage};
 
 // TODO: Implement Extended Handshake Message code/decode
 
@@ -168,7 +168,6 @@ impl From<u8> for MessageId {
 }
 
 #[derive(Debug, Clone)]
-// Rename this PeerCodec
 pub struct MessageCodec {}
 
 impl Decoder for MessageCodec {
@@ -391,7 +390,6 @@ impl Encoder<Message> for MessageCodec {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::peer::extension::ExtendedHandshake;
     use std::collections::BTreeMap;
 
     #[test]

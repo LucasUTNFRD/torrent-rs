@@ -12,6 +12,7 @@ use crate::{
         peer_connection::{ConnectionError, PeerHandle, spawn_inbound, spawn_outbound},
     },
     piece_picker::{AvailabilityUpdate, BlockRequest, PieceManager, PieceState},
+    protocol::peer_wire::{Block, BlockInfo, Message},
 };
 use bittorrent_common::{
     metainfo::{Info, TorrentInfo},
@@ -20,7 +21,7 @@ use bittorrent_common::{
 use bytes::Bytes;
 use magnet_uri::Magnet;
 use mainline_dht::DhtHandler;
-use peer_protocol::protocol::{Block, BlockInfo, Message};
+// use peer_protocol::protocol::{Block, BlockInfo, Message};
 use std::{
     collections::HashMap,
     net::SocketAddr,
@@ -107,7 +108,7 @@ pub enum TorrentMessage {
         pid: Pid,
         piece_idx: u32,
     },
-    ReceiveBlock(Pid, peer_protocol::protocol::Block),
+    ReceiveBlock(Pid, Block),
     // Peer state management
     ShouldBeInterested {
         #[allow(dead_code)]

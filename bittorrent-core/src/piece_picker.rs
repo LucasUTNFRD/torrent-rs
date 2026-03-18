@@ -1,9 +1,9 @@
 use std::{collections::HashMap, sync::Arc};
 
 use bittorrent_common::metainfo::Info;
-use peer_protocol::protocol::{Block, BlockInfo};
 
 use crate::bitfield::Bitfield;
+use crate::protocol::peer_wire::{Block, BlockInfo};
 
 // Standard block size for BitTorrent (16 KiB)
 const BLOCK_SIZE: u32 = 16384;

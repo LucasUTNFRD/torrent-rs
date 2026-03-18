@@ -38,3 +38,29 @@ pub fn peers_connected(n: f64) {
 pub fn connection_attempts() {
     counter!("net.connection_attempts").increment(1);
 }
+
+pub fn incoming_connections() {
+    counter!("net.incoming_connections").increment(1);
+}
+
+pub fn on_read_counter() {
+    counter!("net.on_read_counter").increment(1);
+}
+
+pub fn on_write_counter() {
+    counter!("net.on_write_counter").increment(1);
+}
+
+//traffic
+pub fn inc_sent_payload(bytes: u64) {
+    counter!("traffic.sent_payload_bytes").increment(bytes);
+}
+pub fn inc_recv_payload(bytes: u64) {
+    counter!("traffic.recv_payload_bytes").increment(bytes);
+}
+pub fn inc_sent_total(bytes: u64) {
+    counter!("traffic.sent_bytes").increment(bytes);
+}
+pub fn inc_recv_total(bytes: u64) {
+    counter!("traffic.recv_bytes").increment(bytes);
+}
