@@ -115,6 +115,14 @@ impl PeerStore {
     pub fn torrent_count(&self) -> usize {
         self.store.len()
     }
+
+    /// Get the total number of tracked peers across all torrents.
+    pub fn peer_count(&self) -> usize {
+        self.store
+            .iter()
+            .map(|(_, peer_set)| peer_set.peers.len())
+            .sum()
+    }
 }
 
 impl Default for PeerStore {

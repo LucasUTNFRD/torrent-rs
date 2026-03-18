@@ -5,12 +5,15 @@ use std::{
     time::Duration,
 };
 
-use crate::protocol::{
-    extension::{
-        DATA_ID, ExtendedHandshake, ExtendedMessage, MetadataMessage, REJECT_ID, REQUEST_ID,
-        RawExtendedMessage,
+use crate::{
+    metrics::counters::{dec_connected, inc_connected},
+    protocol::{
+        extension::{
+            DATA_ID, ExtendedHandshake, ExtendedMessage, MetadataMessage, REJECT_ID, REQUEST_ID,
+            RawExtendedMessage,
+        },
+        peer_wire::{Block, BlockInfo, Handshake, Message, MessageCodec},
     },
-    peer_wire::{Block, BlockInfo, Handshake, Message, MessageCodec},
 };
 use bittorrent_common::{
     metainfo::Info,
@@ -875,6 +878,7 @@ pub fn spawn_outbound(
             let mut stream = TcpStream::connect_timeout(&addr, CONNECTION_TIMEOUT).await?;
             let (remote_peer_id, supports_extended) =
                 PeerConnection::handshake(&mut stream, local_peer_id, info_hash).await?;
+            inc_connected();
 
             // Update real peer_id now that handshake is done
             info.write().unwrap().peer_id = remote_peer_id;
@@ -895,6 +899,7 @@ pub fn spawn_outbound(
 
         if let Err(e) = result {
             debug!(peer = %addr, error = %e, "Outbound peer failed");
+            dec_connected();
             let _ = tx_err.send(TorrentMessage::PeerError(pid, e, None)).await;
         }
     });
@@ -909,7 +914,7 @@ pub fn spawn_inbound(
     pid: Pid,
     addr: SocketAddr,
     stream: TcpStream,
-    info_hash: InfoHash,
+    // info_hash: InfoHash,
     torrent_tx: mpsc::Sender<TorrentMessage>,
     remote_peer_id: PeerID,
     supports_ext: bool,
@@ -930,6 +935,7 @@ pub fn spawn_inbound(
             // let (remote_peer_id, supports_extended) =
             //     PeerConnection::handshake(&mut stream, local_peer_id, info_hash).await?;
 
+            inc_connected();
             info.write().unwrap().peer_id = remote_peer_id;
 
             PeerConnection::new(
@@ -947,6 +953,7 @@ pub fn spawn_inbound(
         .await;
 
         if let Err(e) = result {
+            dec_connected();
             debug!(peer = %addr, error = %e, "Inbound peer failed");
             let _ = tx_err.send(TorrentMessage::PeerError(pid, e, None)).await;
         }

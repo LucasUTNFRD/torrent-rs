@@ -27,6 +27,10 @@ use tokio::{
 use crate::{
     error::DhtError,
     message::{CompactNodeInfo, KrpcMessage, MessageBody, Query, Response, TransactionId},
+    metrics::{
+        inc_bytes_in, inc_bytes_out, inc_msg_dropped, inc_msg_in, inc_msg_out, inc_msg_out_dropped,
+        set_nodes, set_peers, set_torrents,
+    },
     node::Node,
     node_id::NodeId,
     peer_store::PeerStore,
@@ -478,6 +482,8 @@ impl DhtActor {
                 result = self.socket.recv_from(&mut buf) => {
                     match result {
                         Ok((size, from)) => {
+                            inc_msg_in();
+                            inc_bytes_in(size);
                             self.handle_incoming(&buf[..size], from).await;
                         }
                         Err(e) => {
@@ -489,6 +495,9 @@ impl DhtActor {
                 // Periodic DHT maintenance
                 _ = maintenance_interval.tick() => {
                     self.perform_maintenance();
+                    set_nodes(self.routing_table.node_count());
+                    set_torrents(self.peer_store.torrent_count());
+                    set_peers(self.peer_store.peer_count());
                 }
 
                 // Handle commands from the public API
@@ -566,7 +575,10 @@ impl DhtActor {
                                     u16::from_be_bytes(tx.tx_id.0),
                                     self.node_id
                                 );
-                                let _ = self.socket.try_send_to(&msg.to_bytes(), tx.addr);
+                                let bytes = msg.to_bytes();
+                                let _ = self.socket.try_send_to(&bytes, tx.addr);
+                                inc_msg_out();
+                                inc_bytes_out(bytes.len());
                             }
                             QueryType::FindNode { target } => {
                                 let msg = KrpcMessage::find_node_query(
@@ -574,7 +586,10 @@ impl DhtActor {
                                     self.node_id,
                                     *target
                                 );
-                                let _ = self.socket.try_send_to(&msg.to_bytes(), tx.addr);
+                                let bytes = msg.to_bytes();
+                                let _ = self.socket.try_send_to(&bytes, tx.addr);
+                                inc_msg_out();
+                                inc_bytes_out(bytes.len());
                             }
                             QueryType::GetPeers { info_hash } => {
                                 let msg = KrpcMessage::get_peers_query(
@@ -582,7 +597,10 @@ impl DhtActor {
                                     self.node_id,
                                     *info_hash
                                 );
-                                let _ = self.socket.try_send_to(&msg.to_bytes(), tx.addr);
+                                let bytes = msg.to_bytes();
+                                let _ = self.socket.try_send_to(&bytes, tx.addr);
+                                inc_msg_out();
+                                inc_bytes_out(bytes.len());
                             }
                             _ => {}
                         }
@@ -950,16 +968,7 @@ impl DhtActor {
 
         // Build and send query
         let msg = KrpcMessage::ping_query(u16::from_be_bytes(tx_id.0), self.node_id);
-        let bytes = msg.to_bytes();
-
-        match self.socket.try_send_to(&bytes, addr) {
-            Ok(_) => Ok(()),
-            Err(e) => {
-                // Remove transaction if send failed
-                self.transaction_manager.finish_by_trans_id(&tx_id);
-                Err(DhtError::Network(e))
-            }
-        }
+        self.send_query(msg, addr, tx_id)
     }
 
     /// Send a find_node query without awaiting response.
@@ -984,15 +993,7 @@ impl DhtActor {
 
         // Build and send query
         let msg = KrpcMessage::find_node_query(u16::from_be_bytes(tx_id.0), self.node_id, target);
-        let bytes = msg.to_bytes();
-
-        match self.socket.try_send_to(&bytes, addr) {
-            Ok(_) => Ok(()),
-            Err(e) => {
-                self.transaction_manager.finish_by_trans_id(&tx_id);
-                Err(DhtError::Network(e))
-            }
-        }
+        self.send_query(msg, addr, tx_id)
     }
 
     /// Send a get_peers query without awaiting response.
@@ -1018,15 +1019,7 @@ impl DhtActor {
         // Build and send query
         let msg =
             KrpcMessage::get_peers_query(u16::from_be_bytes(tx_id.0), self.node_id, info_hash);
-        let bytes = msg.to_bytes();
-
-        match self.socket.try_send_to(&bytes, addr) {
-            Ok(_) => Ok(()),
-            Err(e) => {
-                self.transaction_manager.finish_by_trans_id(&tx_id);
-                Err(DhtError::Network(e))
-            }
-        }
+        self.send_query(msg, addr, tx_id)
     }
 
     /// Send an announce_peer query without awaiting response.
@@ -1064,12 +1057,25 @@ impl DhtActor {
             token,
             implied_port,
         );
-        let bytes = msg.to_bytes();
+        self.send_query(msg, addr, tx_id)
+    }
 
+    fn send_query(
+        &mut self,
+        msg: KrpcMessage,
+        addr: SocketAddr,
+        tx_id: TransactionId,
+    ) -> Result<(), DhtError> {
+        let bytes = msg.to_bytes();
         match self.socket.try_send_to(&bytes, addr) {
-            Ok(_) => Ok(()),
+            Ok(_) => {
+                inc_msg_out();
+                inc_bytes_out(bytes.len());
+                Ok(())
+            }
             Err(e) => {
                 self.transaction_manager.finish_by_trans_id(&tx_id);
+                inc_msg_out_dropped();
                 Err(DhtError::Network(e))
             }
         }
@@ -1084,6 +1090,7 @@ impl DhtActor {
             Ok(m) => m,
             Err(e) => {
                 tracing::debug!("Failed to parse message from {from}: {e}");
+                inc_msg_dropped();
                 return;
             }
         };
@@ -1257,6 +1264,9 @@ impl DhtActor {
         let bytes = response.to_bytes();
         if let Err(e) = self.socket.send_to(&bytes, from).await {
             tracing::warn!("Failed to send response to {from}: {e}");
+        } else {
+            inc_msg_out();
+            inc_bytes_out(bytes.len());
         }
     }
 

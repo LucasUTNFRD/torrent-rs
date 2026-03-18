@@ -1,4 +1,12 @@
 use metrics::{counter, gauge, histogram};
+// torrent
+
+pub fn set_downloading(n: usize) {
+    gauge!("torrent.downloading").set(n as f64);
+}
+pub fn set_seeding(n: usize) {
+    gauge!("torrent.seeding").set(n as f64);
+}
 
 // disk metrics
 pub fn disk_bytes_written(n: u64) {
@@ -31,9 +39,6 @@ pub fn piece_failed() {
 }
 
 // net
-pub fn peers_connected(n: f64) {
-    gauge!("net.peers_connected").set(n);
-}
 
 pub fn connection_attempts() {
     counter!("net.connection_attempts").increment(1);
@@ -41,6 +46,13 @@ pub fn connection_attempts() {
 
 pub fn incoming_connections() {
     counter!("net.incoming_connections").increment(1);
+}
+
+pub fn inc_connected() {
+    gauge!("net.peers_connected").increment(1);
+}
+pub fn dec_connected() {
+    gauge!("net.peers_connected").decrement(1);
 }
 
 pub fn on_read_counter() {

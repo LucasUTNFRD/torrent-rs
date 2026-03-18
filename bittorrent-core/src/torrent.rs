@@ -646,7 +646,7 @@ impl Torrent {
                 pid,
                 remote_addr,
                 stream,
-                self.info_hash,
+                // self.info_hash,
                 self.tx.clone(),
                 remote_peer_id,
                 supports_ext,

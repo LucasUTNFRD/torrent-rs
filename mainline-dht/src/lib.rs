@@ -31,6 +31,7 @@
 pub mod dht;
 pub mod error;
 pub mod message;
+mod metrics;
 mod node;
 pub mod node_id;
 mod peer_store;
