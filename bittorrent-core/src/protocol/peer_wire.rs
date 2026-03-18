@@ -3,17 +3,16 @@ use std::{
     io::{self},
 };
 
-// TODO: Reject packets bigger than 1mb
-
 use bencode::Bencode;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio_util::codec::{Decoder, Encoder};
 
 use bittorrent_common::types::{InfoHash, PeerID};
 
-use crate::protocol::extension::{ExtendedHandshake, ExtendedMessage, RawExtendedMessage};
-
-// TODO: Implement Extended Handshake Message code/decode
+use crate::{
+    metrics::counters::{self, inc_recv_payload},
+    protocol::extension::{ExtendedHandshake, ExtendedMessage, RawExtendedMessage},
+};
 
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
 pub struct BlockInfo {
@@ -285,6 +284,8 @@ impl Decoder for MessageCodec {
             }
         };
 
+        counters::inc_recv_payload(src.len() as u64);
+
         Ok(Some(msg))
     }
 }
@@ -294,44 +295,36 @@ impl Encoder<Message> for MessageCodec {
 
     /// <length prefix><message ID><payload>. The length prefix is a four byte big-endian value. The message ID is a single decimal byte. The payload is message dependent.
     fn encode(&mut self, item: Message, dst: &mut BytesMut) -> Result<(), Self::Error> {
-        // TODO: Avoid magic numbers use const
         match item {
             Message::KeepAlive => {
                 dst.put_u32(0);
-                Ok(())
             }
             Message::Choke => {
                 dst.put_u32(1);
                 dst.put_u8(MessageId::Choke as u8);
-                Ok(())
             }
             Message::Unchoke => {
                 dst.put_u32(1);
                 dst.put_u8(MessageId::Unchoke as u8);
-                Ok(())
             }
             Message::Interested => {
                 dst.put_u32(1);
                 dst.put_u8(MessageId::Interested as u8);
-                Ok(())
             }
             Message::NotInterested => {
                 dst.put_u32(1);
                 dst.put_u8(MessageId::NotInterested as u8);
-                Ok(())
             }
             Message::Have { piece_index } => {
                 dst.put_u32(5);
                 dst.put_u8(MessageId::Have as u8);
                 dst.put_u32(piece_index);
-                Ok(())
             }
             Message::Bitfield(bitfield) => {
                 let length = bitfield.len() + 1;
                 dst.put_u32(length as u32);
                 dst.put_u8(MessageId::Bitfield as u8);
                 dst.put_slice(&bitfield);
-                Ok(())
             }
             Message::Request(block) => {
                 dst.put_u32(13);
@@ -339,7 +332,6 @@ impl Encoder<Message> for MessageCodec {
                 dst.put_u32(block.index);
                 dst.put_u32(block.begin);
                 dst.put_u32(block.length);
-                Ok(())
             }
             Message::Piece(block) => {
                 let length = block.data.len() + 9;
@@ -348,7 +340,6 @@ impl Encoder<Message> for MessageCodec {
                 dst.put_u32(block.index);
                 dst.put_u32(block.begin);
                 dst.put_slice(&block.data);
-                Ok(())
             }
             Message::Cancel(block) => {
                 dst.put_u32(13);
@@ -356,7 +347,6 @@ impl Encoder<Message> for MessageCodec {
                 dst.put_u32(block.index);
                 dst.put_u32(block.begin);
                 dst.put_u32(block.length);
-                Ok(())
             }
             Message::Extended(extended) => match extended {
                 ExtendedMessage::Handshake(handshake) => {
@@ -366,7 +356,6 @@ impl Encoder<Message> for MessageCodec {
                     dst.put_u8(MessageId::Extended as u8);
                     dst.put_u8(0); // msg_id for handshake
                     dst.put_slice(&extended_payload);
-                    Ok(())
                 }
                 ExtendedMessage::ExtensionMessage(raw_extended_msg) => {
                     let length = raw_extended_msg.payload.len() + 1 /*msg_id*/ + 1 /*extended msg_id*/;
@@ -374,16 +363,18 @@ impl Encoder<Message> for MessageCodec {
                     dst.put_u8(MessageId::Extended as u8);
                     dst.put_u8(raw_extended_msg.id);
                     dst.put_slice(&raw_extended_msg.payload);
-                    Ok(())
                 }
             },
             Message::Port { port } => {
                 dst.put_u32(3u32);
                 dst.put_u8(MessageId::Port as u8);
                 dst.put_u16(port);
-                Ok(())
             }
-        }
+        };
+
+        counters::inc_sent_total(dst.len() as u64);
+
+        Ok(())
     }
 }
 
