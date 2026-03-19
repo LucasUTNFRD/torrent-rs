@@ -1,13 +1,9 @@
+use crate::{bitfield::Bitfield, protocol::peer_wire::Message};
+use bittorrent_common::metainfo::Info;
 use std::sync::Arc;
 
-use bittorrent_common::metainfo::Info;
-use peer_protocol::protocol::Message;
-
-use crate::bitfield::Bitfield;
-
-pub mod peer_connection;
-
 pub mod metrics;
+pub mod peer_connection;
 
 #[derive(Debug, Clone)]
 pub enum PeerMessage {

@@ -3,9 +3,9 @@ members = [
   "bencode",
   "bittorrent-common",
   "bittorrent-core",
+  "cmd",
   "magnet-uri",
   "mainline-dht",
-  "peer-protocol",
   "tracker-client",
 ]
 
@@ -31,6 +31,8 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 console-subscriber = "0.5.0"
 rand = "0.10.0"
+metrics = "0.24.3"
+
 
 [workspace.lints.clippy]
 pedantic = "warn"

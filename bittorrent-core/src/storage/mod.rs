@@ -1,3 +1,9 @@
+use crate::{
+    protocol::peer_wire::{Block, BlockInfo},
+    storage::storage_manager::StorageManager,
+};
+use async_trait::async_trait;
+use bittorrent_common::{metainfo::Info, types::InfoHash};
 use std::{
     env,
     fs::{File, OpenOptions},
@@ -5,13 +11,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-
-use async_trait::async_trait;
-use bittorrent_common::{metainfo::Info, types::InfoHash};
-use peer_protocol::protocol::{Block, BlockInfo};
 use tokio::sync::{mpsc, oneshot};
-
-use crate::storage::storage_manager::StorageManager;
 
 mod storage_manager;
 

@@ -14,7 +14,6 @@ use bittorrent_common::{
 };
 use bytes::BytesMut;
 use magnet_uri::{Magnet, MagnetError};
-use peer_protocol::protocol::Handshake;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     sync::{
@@ -31,7 +30,9 @@ use tracker_client::TrackerHandler;
 use crate::{
     SessionConfig, TorrentProgress,
     events::SessionEvent,
+    metrics::counters::{self, incoming_connections},
     net::TcpListener,
+    protocol::peer_wire::Handshake,
     storage::{DiskStorage, StorageBackend},
     torrent::{Torrent, TorrentError, TorrentMessage},
     types::TorrentId,
@@ -763,6 +764,7 @@ impl SessionManager {
 
             while let Ok((mut stream, remote_addr)) = listener.accept().await {
                 tracing::debug!("Accepted connection from {:?}", remote_addr);
+                counters::incoming_connections();
                 let sessions = sessions.clone();
                 let peer_id = peer_id;
 

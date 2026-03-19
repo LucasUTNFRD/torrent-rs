@@ -5,6 +5,16 @@ use std::{
     time::Duration,
 };
 
+use crate::{
+    metrics::counters::{dec_connected, inc_connected},
+    protocol::{
+        extension::{
+            DATA_ID, ExtendedHandshake, ExtendedMessage, MetadataMessage, REJECT_ID, REQUEST_ID,
+            RawExtendedMessage,
+        },
+        peer_wire::{Block, BlockInfo, Handshake, Message, MessageCodec},
+    },
+};
 use bittorrent_common::{
     metainfo::Info,
     types::{InfoHash, PeerID},
@@ -13,14 +23,6 @@ use bytes::{Bytes, BytesMut};
 use futures::{
     SinkExt, StreamExt,
     stream::{SplitSink, SplitStream},
-};
-use peer_protocol::{
-    MessageCodec,
-    peer::extension::{
-        DATA_ID, ExtendedHandshake, ExtendedMessage, MetadataMessage, REJECT_ID, REQUEST_ID,
-        RawExtendedMessage,
-    },
-    protocol::{Block, BlockInfo, Handshake, Message},
 };
 use thiserror::Error;
 use tokio::{
@@ -34,6 +36,7 @@ use tracing::debug;
 use crate::{
     bitfield::{Bitfield, BitfieldError},
     events::peer::Direction,
+    metrics::counters,
     net::{ConnectTimeout, TcpStream},
     peer::{PeerMessage, metrics::PeerMetrics},
     session::CLIENT_ID,
@@ -270,7 +273,10 @@ impl PeerConnection {
 
             tokio::select! {
                 maybe_msg = self.stream.next() => match maybe_msg {
-                    Some(Ok(msg)) => self.handle_msg(msg).await?,
+                    Some(Ok(msg)) => {
+                        counters::on_read_counter();
+                        self.handle_msg(msg).await?
+                    },
                     _ => break,
                 },
                 maybe_cmd = self.cmd_rx.recv() => match maybe_cmd {
@@ -872,6 +878,7 @@ pub fn spawn_outbound(
             let mut stream = TcpStream::connect_timeout(&addr, CONNECTION_TIMEOUT).await?;
             let (remote_peer_id, supports_extended) =
                 PeerConnection::handshake(&mut stream, local_peer_id, info_hash).await?;
+            inc_connected();
 
             // Update real peer_id now that handshake is done
             info.write().unwrap().peer_id = remote_peer_id;
@@ -906,7 +913,7 @@ pub fn spawn_inbound(
     pid: Pid,
     addr: SocketAddr,
     stream: TcpStream,
-    info_hash: InfoHash,
+    // info_hash: InfoHash,
     torrent_tx: mpsc::Sender<TorrentMessage>,
     remote_peer_id: PeerID,
     supports_ext: bool,
@@ -927,6 +934,7 @@ pub fn spawn_inbound(
             // let (remote_peer_id, supports_extended) =
             //     PeerConnection::handshake(&mut stream, local_peer_id, info_hash).await?;
 
+            inc_connected();
             info.write().unwrap().peer_id = remote_peer_id;
 
             PeerConnection::new(

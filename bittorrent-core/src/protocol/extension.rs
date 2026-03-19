@@ -270,7 +270,7 @@ mod test {
 
     use bencode::Bencode;
 
-    use crate::peer::extension::ExtendedHandshake;
+    use crate::protocol::extension::ExtendedHandshake;
 
     ///     An example of what the payload of a handshake message could look like:
     ///

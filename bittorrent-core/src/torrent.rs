@@ -5,12 +5,14 @@ use crate::{
     ema::EmaRate,
     events::{EventBus, SessionEvent},
     metadata::{Metadata, MetadataState},
+    metrics::counters::{self, dec_connected},
     net::TcpStream,
     peer::{
         PeerMessage,
         peer_connection::{ConnectionError, PeerHandle, spawn_inbound, spawn_outbound},
     },
     piece_picker::{AvailabilityUpdate, BlockRequest, PieceManager, PieceState},
+    protocol::peer_wire::{Block, BlockInfo, Message},
 };
 use bittorrent_common::{
     metainfo::{Info, TorrentInfo},
@@ -19,7 +21,7 @@ use bittorrent_common::{
 use bytes::Bytes;
 use magnet_uri::Magnet;
 use mainline_dht::DhtHandler;
-use peer_protocol::protocol::{Block, BlockInfo, Message};
+// use peer_protocol::protocol::{Block, BlockInfo, Message};
 use std::{
     collections::HashMap,
     net::SocketAddr,
@@ -106,7 +108,7 @@ pub enum TorrentMessage {
         pid: Pid,
         piece_idx: u32,
     },
-    ReceiveBlock(Pid, peer_protocol::protocol::Block),
+    ReceiveBlock(Pid, Block),
     // Peer state management
     ShouldBeInterested {
         #[allow(dead_code)]
@@ -644,7 +646,7 @@ impl Torrent {
                 pid,
                 remote_addr,
                 stream,
-                self.info_hash,
+                // self.info_hash,
                 self.tx.clone(),
                 remote_peer_id,
                 supports_ext,
@@ -978,6 +980,7 @@ impl Torrent {
                 "Piece {} failed hash verification - resetting for re-download",
                 piece_index
             );
+            counters::piece_failed();
             let _ = self
                 .event_bus
                 .torrent_tx
@@ -989,6 +992,7 @@ impl Torrent {
             return;
         }
 
+        counters::piece_passed();
         // Mark as have and broadcast
         self.piece_mananger
             .as_mut()
@@ -1125,6 +1129,8 @@ impl Torrent {
             manager.decrement_availability(&AvailabilityUpdate::Bitfield(&bitfield));
             manager.cancel_peer_requests(&requests);
         }
+
+        dec_connected();
     }
 
     /// Run the choker algorithm periodically to rotate upload slots

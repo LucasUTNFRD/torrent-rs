@@ -21,7 +21,6 @@ tracker-client = { path = "../tracker-client/" }
 sha1 = "0.10"
 bytes = "1.10.1"
 tokio-util = { version = "0.7.15", features = ["codec"] }
-peer-protocol = { path = "../peer-protocol/" }
 futures = "0.3.31"
 console-subscriber.workspace = true
 once_cell = "1.21.3"
@@ -31,17 +30,13 @@ directories.workspace = true
 chrono = { version = "0.4", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
 turmoil = { version = "0.7.1", optional = true }
-
-[[bench]]
-name = "storage_contention"
-harness = false
+metrics.workspace = true
 
 [dev-dependencies]
 async-trait = "0.1"
 bittorrent-common = { path = "../bittorrent-common/" }
 criterion = { version = "0.8", features = ["async_tokio"] }
 futures = "0.3.31"
-peer-protocol = { path = "../peer-protocol/" }
 sha1 = "0.10"
 bytes = "1.10.1"
 tempfile = "3"
