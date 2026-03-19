@@ -6,7 +6,7 @@ use std::{
 };
 
 use crate::{
-    metrics::counters::{dec_connected, inc_connected},
+    metrics::counters::inc_connected,
     protocol::{
         extension::{
             DATA_ID, ExtendedHandshake, ExtendedMessage, MetadataMessage, REJECT_ID, REQUEST_ID,
@@ -342,12 +342,39 @@ impl PeerConnection {
             let threshold = (current_rate / 20.0).max(10_240.0);
             if current_rate > 0.0 && increase < threshold {
                 self.slow_start = false;
+                tracing::info!(
+                    peer = %self.peer_addr,
+                    current_rate,
+                    increase,
+                    threshold,
+                    target_queue = self.target_request_queue,
+                    "slow_start exit via metric_update (rate converged)"
+                );
+            } else {
+                tracing::debug!(
+                    peer = %self.peer_addr,
+                    current_rate,
+                    increase,
+                    threshold,
+                    in_slow_start = true,
+                    target_queue = self.target_request_queue,
+                    "metric_update: still in slow_start"
+                );
             }
         } else {
             const BLOCK_SIZE: f64 = 16384.0;
             const ASSUMED_LATENCY: f64 = 0.5;
-            let target = (current_rate * ASSUMED_LATENCY / BLOCK_SIZE) as usize;
-            self.target_request_queue = target.max(2).min(self.max_outgoing_request);
+            let raw_target = (current_rate * ASSUMED_LATENCY / BLOCK_SIZE) as usize;
+            let new_target = raw_target.max(2).min(self.max_outgoing_request);
+            self.target_request_queue = new_target;
+            tracing::debug!(
+                peer = %self.peer_addr,
+                current_rate,
+                raw_target,
+                new_target,
+                in_flight = self.outgoing_requests.len(),
+                "metric_update: steady-state target recalculated"
+            );
         }
 
         self.prev_download_rate = current_rate;
@@ -562,10 +589,20 @@ impl PeerConnection {
     }
 
     fn adjust_pipeline_on_piece(&mut self) {
-        let pending_bytes = self.outgoing_requests.len() as u64 * 16384;
+        let raw_rate = self.metrics.download_rate_f64();
 
-        let rate = self.metrics.download_rate_f64().max(1.0);
-        let queue_secs = pending_bytes as f64 / rate;
+        // EMA not yet seeded — don't make slow_start decisions based on a zero rate.
+        // Just increment the queue and wait for metric_update to take over.
+        if raw_rate == 0.0 {
+            if self.slow_start {
+                self.target_request_queue =
+                    (self.target_request_queue + 1).min(self.max_outgoing_request);
+            }
+            return;
+        }
+
+        let pending_bytes = self.outgoing_requests.len() as u64 * 16384;
+        let queue_secs = pending_bytes as f64 / raw_rate;
 
         if self.slow_start {
             if queue_secs < 5.0 {
@@ -574,8 +611,6 @@ impl PeerConnection {
             } else {
                 self.slow_start = false;
             }
-        } else if queue_secs >= 5.0 {
-            self.slow_start = false;
         }
     }
 
@@ -586,15 +621,36 @@ impl PeerConnection {
             return Ok(());
         }
         if !self.request_queue.is_empty() {
+            tracing::trace!(
+                peer = %self.peer_addr,
+                pending_in_queue = self.request_queue.len(),
+                "request_block: request_queue non-empty, skipping refill"
+            );
             return Ok(());
         }
 
         let in_flight = self.outgoing_requests.len();
         if in_flight >= self.target_request_queue {
+            tracing::debug!(
+                peer = %self.peer_addr,
+                in_flight,
+                target_queue = self.target_request_queue,
+                slow_start = self.slow_start,
+                "request_block: pipeline full, not requesting more"
+            );
             return Ok(());
         }
 
         let slots = self.target_request_queue - in_flight;
+        tracing::debug!(
+            peer = %self.peer_addr,
+            in_flight,
+            target_queue = self.target_request_queue,
+            slots,
+            slow_start = self.slow_start,
+            "request_block: fetching blocks from session"
+        );
+
         let BitfieldState::Validated(bitfield) = self.bitfield.clone() else {
             return Ok(());
         };
@@ -611,11 +667,19 @@ impl PeerConnection {
             .await;
 
         let blocks = rx.await.expect("TorrentSession dropped oneshot sender");
+        let received = blocks.len();
         self.request_queue.extend(blocks);
+        tracing::debug!(
+            peer = %self.peer_addr,
+            slots_requested = slots,
+            blocks_received = received,
+            "request_block: session returned blocks"
+        );
         Ok(())
     }
 
     async fn send_block_requests(&mut self) -> Result<(), ConnectionError> {
+        let before = self.outgoing_requests.len();
         while let Some(block) = self.request_queue.pop() {
             if self.outgoing_requests.len() > self.max_outgoing_request {
                 break;
@@ -625,6 +689,17 @@ impl PeerConnection {
             self.sink.feed(Message::Request(block)).await?;
         }
         self.sink.flush().await?;
+        let after = self.outgoing_requests.len();
+        if after != before {
+            tracing::debug!(
+                peer = %self.peer_addr,
+                sent = after - before,
+                in_flight = after,
+                target_queue = self.target_request_queue,
+                remaining_in_local_queue = self.request_queue.len(),
+                "send_block_requests: sent wire requests"
+            );
+        }
         Ok(())
     }
 
