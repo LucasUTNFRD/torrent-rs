@@ -21,7 +21,7 @@ use tokio::{
         mpsc::{self, UnboundedSender},
         oneshot, watch,
     },
-    task::JoinHandle,
+    task::{self, JoinHandle},
 };
 
 use mainline_dht::{DhtConfig, DhtHandler};
@@ -436,7 +436,14 @@ impl SessionManager {
                     resp,
                 } => {
                     // 1. Validate metadate from .torrent with  content_dir
-                    let is_valid = verify_content(&content_dir, &info).expect("Failed to verify");
+                    let dir = content_dir.clone();
+                    let info_clone = info.clone();
+
+                    let is_valid = task::spawn_blocking(move || {
+                        verify_content(&dir, &info_clone).expect("Failed to verify")
+                    })
+                    .await
+                    .unwrap_or(false);
 
                     let result = if is_valid {
                         self.handle_seed_torrent(

@@ -42,7 +42,8 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt::init();
+    // tracing_subscriber::fmt::init();
+    console_subscriber::init();
 
     let cli = Cli::parse();
 
