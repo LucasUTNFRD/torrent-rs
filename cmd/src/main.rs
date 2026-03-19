@@ -10,7 +10,12 @@ struct Cli {
     #[command(subcommand)]
     command: Commands,
 
-    #[arg(global = true, long, default_value = "0.0.0.0:9000", help = "Prometheus metrics listen address")]
+    #[arg(
+        global = true,
+        long,
+        default_value = "0.0.0.0:9000",
+        help = "Prometheus metrics listen address"
+    )]
     metrics_addr: String,
 }
 
