@@ -7,6 +7,7 @@
 //! - Announce peer participation (announce_peer)
 //! - Server mode (responding to incoming queries)
 
+use rand::RngExt;
 use std::{
     fs,
     net::{Ipv4Addr, SocketAddr, ToSocketAddrs},
@@ -26,6 +27,10 @@ use tokio::{
 use crate::{
     error::DhtError,
     message::{CompactNodeInfo, KrpcMessage, MessageBody, Query, Response, TransactionId},
+    metrics::{
+        inc_bytes_in, inc_bytes_out, inc_msg_dropped, inc_msg_in, inc_msg_out, inc_msg_out_dropped,
+        set_nodes, set_peers, set_torrents,
+    },
     node::Node,
     node_id::NodeId,
     peer_store::PeerStore,
@@ -394,6 +399,7 @@ enum DhtCommand {
 // Internal: Pending request tracking
 // ============================================================================
 
+#[allow(dead_code)]
 struct PendingRequest {
     resp_tx: oneshot::Sender<KrpcMessage>,
 }
@@ -412,6 +418,7 @@ struct DhtActor {
     /// Token generation and validation.
     token_manager: TokenManager,
     /// Path to store the node ID file for persistence.
+    #[allow(dead_code)]
     id_file_path: Option<PathBuf>,
     /// Path to store the DHT state (routing table) for persistence.
     state_file_path: Option<PathBuf>,
@@ -428,10 +435,12 @@ struct GetPeersLookupState {
     /// Nodes with tokens for potential announce
     nodes_with_tokens: Vec<(CompactNodeInfo, Vec<u8>)>,
     /// Nodes we've queried
+    #[allow(dead_code)]
     queried_nodes: std::collections::HashSet<SocketAddr>,
     /// Channel to stream discovered peers to caller
     peer_tx: mpsc::Sender<Vec<SocketAddr>>,
     /// When the lookup started
+    #[allow(dead_code)]
     started_at: std::time::Instant,
 }
 
@@ -457,7 +466,10 @@ impl DhtActor {
         }
     }
 
-    async fn run(mut self, shared_node_id: Arc<std::sync::RwLock<NodeId>>) -> Result<(), DhtError> {
+    async fn run(
+        mut self,
+        _shared_node_id: Arc<std::sync::RwLock<NodeId>>,
+    ) -> Result<(), DhtError> {
         let mut buf = [0u8; 4096];
         // Check for transaction timeouts every 500ms
         let mut timeout_interval = interval(Duration::from_millis(500));
@@ -470,6 +482,8 @@ impl DhtActor {
                 result = self.socket.recv_from(&mut buf) => {
                     match result {
                         Ok((size, from)) => {
+                            inc_msg_in();
+                            inc_bytes_in(size);
                             self.handle_incoming(&buf[..size], from).await;
                         }
                         Err(e) => {
@@ -481,6 +495,9 @@ impl DhtActor {
                 // Periodic DHT maintenance
                 _ = maintenance_interval.tick() => {
                     self.perform_maintenance();
+                    set_nodes(self.routing_table.node_count());
+                    set_torrents(self.peer_store.torrent_count());
+                    set_peers(self.peer_store.peer_count());
                 }
 
                 // Handle commands from the public API
@@ -558,7 +575,10 @@ impl DhtActor {
                                     u16::from_be_bytes(tx.tx_id.0),
                                     self.node_id
                                 );
-                                let _ = self.socket.try_send_to(&msg.to_bytes(), tx.addr);
+                                let bytes = msg.to_bytes();
+                                let _ = self.socket.try_send_to(&bytes, tx.addr);
+                                inc_msg_out();
+                                inc_bytes_out(bytes.len());
                             }
                             QueryType::FindNode { target } => {
                                 let msg = KrpcMessage::find_node_query(
@@ -566,7 +586,10 @@ impl DhtActor {
                                     self.node_id,
                                     *target
                                 );
-                                let _ = self.socket.try_send_to(&msg.to_bytes(), tx.addr);
+                                let bytes = msg.to_bytes();
+                                let _ = self.socket.try_send_to(&bytes, tx.addr);
+                                inc_msg_out();
+                                inc_bytes_out(bytes.len());
                             }
                             QueryType::GetPeers { info_hash } => {
                                 let msg = KrpcMessage::get_peers_query(
@@ -574,7 +597,10 @@ impl DhtActor {
                                     self.node_id,
                                     *info_hash
                                 );
-                                let _ = self.socket.try_send_to(&msg.to_bytes(), tx.addr);
+                                let bytes = msg.to_bytes();
+                                let _ = self.socket.try_send_to(&bytes, tx.addr);
+                                inc_msg_out();
+                                inc_bytes_out(bytes.len());
                             }
                             _ => {}
                         }
@@ -634,7 +660,7 @@ impl DhtActor {
         }
 
         // Add persisted nodes to routing table
-        if let Some((saved_id, ref saved_nodes)) = persisted_nodes {
+        if let Some((_saved_id, ref saved_nodes)) = persisted_nodes {
             tracing::info!(
                 "Adding {} persisted nodes to routing table",
                 saved_nodes.len()
@@ -942,16 +968,7 @@ impl DhtActor {
 
         // Build and send query
         let msg = KrpcMessage::ping_query(u16::from_be_bytes(tx_id.0), self.node_id);
-        let bytes = msg.to_bytes();
-
-        match self.socket.try_send_to(&bytes, addr) {
-            Ok(_) => Ok(()),
-            Err(e) => {
-                // Remove transaction if send failed
-                self.transaction_manager.finish_by_trans_id(&tx_id);
-                Err(DhtError::Network(e))
-            }
-        }
+        self.send_query(msg, addr, tx_id)
     }
 
     /// Send a find_node query without awaiting response.
@@ -976,15 +993,7 @@ impl DhtActor {
 
         // Build and send query
         let msg = KrpcMessage::find_node_query(u16::from_be_bytes(tx_id.0), self.node_id, target);
-        let bytes = msg.to_bytes();
-
-        match self.socket.try_send_to(&bytes, addr) {
-            Ok(_) => Ok(()),
-            Err(e) => {
-                self.transaction_manager.finish_by_trans_id(&tx_id);
-                Err(DhtError::Network(e))
-            }
-        }
+        self.send_query(msg, addr, tx_id)
     }
 
     /// Send a get_peers query without awaiting response.
@@ -1010,15 +1019,7 @@ impl DhtActor {
         // Build and send query
         let msg =
             KrpcMessage::get_peers_query(u16::from_be_bytes(tx_id.0), self.node_id, info_hash);
-        let bytes = msg.to_bytes();
-
-        match self.socket.try_send_to(&bytes, addr) {
-            Ok(_) => Ok(()),
-            Err(e) => {
-                self.transaction_manager.finish_by_trans_id(&tx_id);
-                Err(DhtError::Network(e))
-            }
-        }
+        self.send_query(msg, addr, tx_id)
     }
 
     /// Send an announce_peer query without awaiting response.
@@ -1056,12 +1057,25 @@ impl DhtActor {
             token,
             implied_port,
         );
-        let bytes = msg.to_bytes();
+        self.send_query(msg, addr, tx_id)
+    }
 
+    fn send_query(
+        &mut self,
+        msg: KrpcMessage,
+        addr: SocketAddr,
+        tx_id: TransactionId,
+    ) -> Result<(), DhtError> {
+        let bytes = msg.to_bytes();
         match self.socket.try_send_to(&bytes, addr) {
-            Ok(_) => Ok(()),
+            Ok(_) => {
+                inc_msg_out();
+                inc_bytes_out(bytes.len());
+                Ok(())
+            }
             Err(e) => {
                 self.transaction_manager.finish_by_trans_id(&tx_id);
+                inc_msg_out_dropped();
                 Err(DhtError::Network(e))
             }
         }
@@ -1076,6 +1090,7 @@ impl DhtActor {
             Ok(m) => m,
             Err(e) => {
                 tracing::debug!("Failed to parse message from {from}: {e}");
+                inc_msg_dropped();
                 return;
             }
         };
@@ -1143,7 +1158,7 @@ impl DhtActor {
                                         let peer_vec: Vec<SocketAddr> = peers
                                             .iter()
                                             .filter(|p| state.peers.insert(**p))
-                                            .map(|p| *p)
+                                            .copied()
                                             .collect();
 
                                         if !peer_vec.is_empty() {
@@ -1249,6 +1264,9 @@ impl DhtActor {
         let bytes = response.to_bytes();
         if let Err(e) = self.socket.send_to(&bytes, from).await {
             tracing::warn!("Failed to send response to {from}: {e}");
+        } else {
+            inc_msg_out();
+            inc_bytes_out(bytes.len());
         }
     }
 
@@ -1456,7 +1474,6 @@ impl DhtActor {
     /// 2. Neighborhood Maintenance: Aggressive for our own bucket
     /// 3. Proactive Recovery: Fill empty buckets, random recovery
     fn perform_maintenance(&mut self) {
-        use rand::Rng;
         let mut rng = rand::rng();
 
         // 1. Bucket Maintenance: Trigger find_node for stale buckets
@@ -1537,18 +1554,18 @@ impl DhtActor {
         }
 
         // - Randomly (1 in 8 chance) to recover from buckets full of broken nodes
-        if rng.random_range(0..8) == 0 {
-            if let Some(bucket_index) = (0..160).find(|_| true) {
-                let target_id = self.routing_table.random_id_in_bucket_range(bucket_index);
+        if rng.random_range(0..8) == 0
+            && let Some(bucket_index) = (0..160).find(|_| true)
+        {
+            let target_id = self.routing_table.random_id_in_bucket_range(bucket_index);
 
-                if let Some(node) = self.routing_table.get_random_node() {
-                    tracing::debug!(
-                        "Random proactive recovery: find_node to {} for target {:?}",
-                        node.addr,
-                        target_id
-                    );
-                    let _ = self.send_find_node(node.addr, target_id);
-                }
+            if let Some(node) = self.routing_table.get_random_node() {
+                tracing::debug!(
+                    "Random proactive recovery: find_node to {} for target {:?}",
+                    node.addr,
+                    target_id
+                );
+                let _ = self.send_find_node(node.addr, target_id);
             }
         }
     }

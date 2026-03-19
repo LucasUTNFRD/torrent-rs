@@ -1,3 +1,9 @@
+use crate::{
+    protocol::peer_wire::{Block, BlockInfo},
+    storage::storage_manager::StorageManager,
+};
+use async_trait::async_trait;
+use bittorrent_common::{metainfo::Info, types::InfoHash};
 use std::{
     env,
     fs::{File, OpenOptions},
@@ -5,12 +11,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-
-use bittorrent_common::{metainfo::Info, types::InfoHash};
-use peer_protocol::protocol::{Block, BlockInfo};
 use tokio::sync::{mpsc, oneshot};
-
-use crate::storage::storage_manager::StorageManager;
 
 mod storage_manager;
 
@@ -70,7 +71,40 @@ pub enum StorageMessage {
     },
 }
 
-pub struct Storage {
+#[async_trait]
+pub trait StorageBackend: Send + Sync {
+    async fn add_torrent(
+        &self,
+        info_hash: InfoHash,
+        torrent: Arc<Info>,
+    ) -> Result<(), StorageError>;
+    async fn add_seed(
+        &self,
+        info_hash: InfoHash,
+        torrent: Arc<Info>,
+        content_dir: PathBuf,
+    ) -> Result<(), StorageError>;
+    async fn remove_torrent(&self, torrent_id: InfoHash) -> Result<(), StorageError>;
+    async fn verify_piece(
+        &self,
+        info_hash: InfoHash,
+        piece_index: u32,
+        piece_data: Arc<[u8]>,
+    ) -> Result<bool, StorageError>;
+    async fn write_piece(
+        &self,
+        info_hash: InfoHash,
+        piece_index: u32,
+        piece_data: Arc<[u8]>,
+    ) -> Result<(), StorageError>;
+    async fn read_block(
+        &self,
+        torrent_id: InfoHash,
+        block_info: BlockInfo,
+    ) -> Result<Block, StorageError>;
+}
+
+pub struct DiskStorage {
     tx: mpsc::Sender<StorageMessage>,
 }
 
@@ -86,13 +120,13 @@ fn get_download_dir() -> PathBuf {
     )
 }
 
-impl Default for Storage {
+impl Default for DiskStorage {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Storage {
+impl DiskStorage {
     #[must_use]
     pub fn new() -> Self {
         Self::with_download_dir(get_download_dir())
@@ -106,12 +140,15 @@ impl Storage {
 
         Self { tx }
     }
+}
 
+#[async_trait]
+impl StorageBackend for DiskStorage {
     /// Register a torrent with the storage system.
     ///
     /// # Errors
     /// Returns `StorageError::ChannelClosed` if the storage actor has shut down.
-    pub async fn add_torrent(
+    async fn add_torrent(
         &self,
         info_hash: InfoHash,
         torrent: Arc<Info>,
@@ -131,7 +168,7 @@ impl Storage {
     ///
     /// # Errors
     /// Returns `StorageError::ChannelClosed` if the storage actor has shut down.
-    pub async fn add_seed(
+    async fn add_seed(
         &self,
         info_hash: InfoHash,
         torrent: Arc<Info>,
@@ -153,8 +190,7 @@ impl Storage {
     ///
     /// # Errors
     /// Returns `StorageError::ChannelClosed` if the storage actor has shut down.
-    #[allow(dead_code)]
-    pub async fn remove_torrent(&self, torrent_id: InfoHash) -> Result<(), StorageError> {
+    async fn remove_torrent(&self, torrent_id: InfoHash) -> Result<(), StorageError> {
         let (result_tx, result_rx) = oneshot::channel();
         self.tx
             .send(StorageMessage::RemoveTorrent {
@@ -173,7 +209,7 @@ impl Storage {
     /// - `StorageError::ChannelClosed` if storage actor shut down
     ///
     /// Returns `Ok(true)` if piece is valid, `Ok(false)` if hash mismatch.
-    pub async fn verify_piece(
+    async fn verify_piece(
         &self,
         info_hash: InfoHash,
         piece_index: u32,
@@ -197,7 +233,7 @@ impl Storage {
     /// - `StorageError::TorrentNotFound` if torrent not registered
     /// - `StorageError::Io` if disk write fails
     /// - `StorageError::ChannelClosed` if storage actor shut down
-    pub async fn write_piece(
+    async fn write_piece(
         &self,
         info_hash: InfoHash,
         piece_index: u32,
@@ -221,7 +257,7 @@ impl Storage {
     /// - `StorageError::TorrentNotFound` if torrent not registered
     /// - `StorageError::Io` if disk read fails
     /// - `StorageError::ChannelClosed` if storage actor shut down
-    pub async fn read_block(
+    async fn read_block(
         &self,
         torrent_id: InfoHash,
         block_info: BlockInfo,

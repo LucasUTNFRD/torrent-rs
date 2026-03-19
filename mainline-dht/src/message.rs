@@ -35,6 +35,7 @@ pub struct KrpcMessage {
     /// Transaction ID for request/response correlation.
     pub transaction_id: TransactionId,
     /// Client version string (optional, 4 bytes: 2-char client ID + 2-char version).
+    // TODO: use [u8;VERSION_STRING_LEN]
     pub version: Option<Vec<u8>>,
     /// Sender's external IP as seen by responder (BEP 42).
     pub sender_ip: Option<SocketAddr>,
@@ -745,6 +746,7 @@ pub fn encode_compact_peer(addr: &SocketAddr) -> Vec<u8> {
 }
 
 /// Encode a single peer to compact format (6 bytes).
+#[allow(dead_code)]
 fn encode_compact_peer_v4(addr: &SocketAddrV4) -> Vec<u8> {
     let mut result = Vec::with_capacity(6);
     result.extend_from_slice(&addr.ip().octets());

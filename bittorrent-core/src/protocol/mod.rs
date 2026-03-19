@@ -1,2 +1,2 @@
 pub mod extension;
-pub mod protocol;
+pub mod peer_wire;

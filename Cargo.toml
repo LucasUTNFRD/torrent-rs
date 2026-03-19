@@ -1,15 +1,11 @@
 [workspace]
 members = [
   "bencode",
-  "bittorrent-cli",
   "bittorrent-common",
   "bittorrent-core",
-  "bittorrent-daemon",
-  "bittorrent-remote",
-  "bittorrent-tui",
+  "cmd",
   "magnet-uri",
   "mainline-dht",
-  "peer-protocol",
   "tracker-client",
 ]
 
@@ -29,12 +25,14 @@ repository = "https://github.com/LucasUTNFRD/torrent-rs"
 [workspace.dependencies]
 sha1 = "0.10"
 thiserror = "2.0"
-directories = "5.0"
+directories = "6.0"
 tokio = { version = "1", features = ["full", "tracing"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 console-subscriber = "0.5.0"
-rand = "0.9.1"
+rand = "0.10.0"
+metrics = "0.24.3"
+
 
 [workspace.lints.clippy]
 pedantic = "warn"
