@@ -172,6 +172,7 @@ struct PeerConnection {
 
     remote_extensions: HashMap<String, i64>,
     supports_extended: bool,
+    dht_enabled: bool,
 
     // remote peer bitfield
     bitfield: BitfieldState,
@@ -204,6 +205,7 @@ impl PeerConnection {
         torrent_tx: mpsc::Sender<TorrentMessage>,
         cmd_rx: mpsc::Receiver<PeerMessage>,
         supports_extended: bool,
+        dht_enabled: bool,
     ) -> Self {
         let framed = Framed::new(stream, MessageCodec {});
         let (sink, stream) = framed.split();
@@ -229,6 +231,7 @@ impl PeerConnection {
             last_recv_msg: Instant::now(),
             last_block_request: Instant::now(),
             metrics: PeerMetrics::new(),
+            dht_enabled,
         }
     }
 
@@ -236,7 +239,7 @@ impl PeerConnection {
         stream: &mut TcpStream,
         local_peer_id: PeerID,
         info_hash: InfoHash,
-    ) -> Result<(PeerID, bool), ConnectionError> {
+    ) -> Result<(PeerID, bool, bool), ConnectionError> /* (peer_id, ext, dht)*/ {
         let handshake = Handshake::new(local_peer_id, info_hash);
         stream.write_all(&handshake.to_bytes()).await?;
 
@@ -252,7 +255,11 @@ impl PeerConnection {
             return Err(ConnectionError::SelfConnection);
         }
 
-        Ok((remote.peer_id, remote.support_extended_message()))
+        Ok((
+            remote.peer_id,
+            remote.support_extended_message(),
+            remote.support_dht(),
+        ))
     }
 
     // ── Event loop ────────────────────────────────────────────────────────────
@@ -261,6 +268,10 @@ impl PeerConnection {
 
         if self.supports_extended {
             self.send_extended_handshake().await?;
+        }
+        if self.dht_enabled {
+            // TODO: send real port
+            self.sink.send(Message::Port { port: 6881 }).await?;
         }
 
         let mut heartbeat = interval(Duration::from_secs(60));
@@ -923,7 +934,7 @@ pub fn spawn_outbound(
     tokio::spawn(async move {
         let result: Result<(), ConnectionError> = async {
             let mut stream = TcpStream::connect_timeout(&addr, CONNECTION_TIMEOUT).await?;
-            let (remote_peer_id, supports_extended) =
+            let (remote_peer_id, supports_extended, dht_enabled) =
                 PeerConnection::handshake(&mut stream, local_peer_id, info_hash).await?;
             inc_connected();
 
@@ -938,6 +949,7 @@ pub fn spawn_outbound(
                 torrent_tx,
                 rx,
                 supports_extended,
+                dht_enabled,
             )
             .run()
             .await
@@ -964,6 +976,7 @@ pub fn spawn_inbound(
     torrent_tx: mpsc::Sender<TorrentMessage>,
     remote_peer_id: PeerID,
     supports_ext: bool,
+    dht_enabled: bool,
 ) -> PeerHandle {
     let (tx, rx) = mpsc::channel(256);
     let info = Arc::new(RwLock::new(PeerInfo::new(*CLIENT_ID, Direction::Inbound)));
@@ -992,6 +1005,7 @@ pub fn spawn_inbound(
                 torrent_tx,
                 rx,
                 supports_ext,
+                dht_enabled,
             )
             .run()
             .await

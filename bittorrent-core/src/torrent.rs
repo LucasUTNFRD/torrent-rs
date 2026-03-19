@@ -61,6 +61,7 @@ pub enum PeerOrigin {
         remote_addr: SocketAddr,
         supports_ext: bool,
         peer_id: PeerID,
+        dht_enabled: bool,
     },
     Outbound(SocketAddr),
 }
@@ -73,6 +74,7 @@ impl PeerOrigin {
                 remote_addr,
                 supports_ext: _,
                 peer_id: _,
+                dht_enabled: _,
             }
             | Self::Outbound(remote_addr) => remote_addr,
         }
@@ -161,6 +163,7 @@ pub enum TorrentMessage {
         remote_addr: SocketAddr,
         supports_ext: bool,
         peer_id: PeerID,
+        dht_enabled: bool,
     },
     /// Direct peer injection (for simulation testing, bypasses tracker/DHT)
     ConnectPeer {
@@ -651,6 +654,7 @@ impl Torrent {
                 stream,
                 supports_ext,
                 remote_addr,
+                dht_enabled,
             } => spawn_inbound(
                 pid,
                 remote_addr,
@@ -659,6 +663,7 @@ impl Torrent {
                 self.tx.clone(),
                 remote_peer_id,
                 supports_ext,
+                dht_enabled,
             ),
             PeerOrigin::Outbound(remote_addr) => spawn_outbound(
                 pid,
@@ -897,6 +902,7 @@ impl Torrent {
                 remote_addr,
                 supports_ext,
                 peer_id,
+                dht_enabled,
             } => {
                 info!("Received inbound peer connection from {}", remote_addr);
                 self.add_peer(PeerOrigin::Inbound {
@@ -904,6 +910,7 @@ impl Torrent {
                     remote_addr,
                     supports_ext,
                     peer_id,
+                    dht_enabled,
                 })
                 .await;
             }

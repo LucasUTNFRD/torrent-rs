@@ -823,6 +823,7 @@ impl SessionManager {
                     }
 
                     let supports_ext = remote_handshake.support_extended_message();
+                    let dht_enabled = remote_handshake.support_dht();
 
                     tracing::info!(
                         "Incoming peer connection from {:?} for {:?}",
@@ -846,6 +847,7 @@ impl SessionManager {
                                 remote_addr,
                                 supports_ext,
                                 peer_id: remote_handshake.peer_id,
+                                dht_enabled,
                             })
                             .await;
                     }
