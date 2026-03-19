@@ -21,7 +21,6 @@ use bittorrent_common::{
 use bytes::Bytes;
 use magnet_uri::Magnet;
 use mainline_dht::DhtHandler;
-// use peer_protocol::protocol::{Block, BlockInfo, Message};
 use std::{
     collections::HashMap,
     net::SocketAddr,
@@ -126,6 +125,9 @@ pub enum TorrentMessage {
         bitfield: Bitfield,
         block_tx: oneshot::Sender<Vec<BlockInfo>>,
     },
+    ClearPeerRequest {
+        pid: Pid,
+    },
 
     RemoteBlockRequest {
         pid: Pid,
@@ -229,6 +231,8 @@ pub struct Torrent {
     event_bus: EventBus,
 }
 
+const ALPHA: f64 = 0.5;
+
 impl Torrent {
     /// Create a new Torrent from a .torrent file (with complete metadata)
     pub fn from_torrent_info(
@@ -305,8 +309,8 @@ impl Torrent {
                 progress_tx,
                 event_bus,
                 pending_requests: HashMap::new(),
-                ul_rate: EmaRate::default(),
-                dl_rate: EmaRate::default(),
+                ul_rate: EmaRate::new(ALPHA),
+                dl_rate: EmaRate::new(ALPHA),
             },
             tx,
             progress_rx,
@@ -387,8 +391,8 @@ impl Torrent {
                 progress_tx,
                 event_bus,
                 pending_requests: HashMap::new(),
-                ul_rate: EmaRate::default(),
-                dl_rate: EmaRate::default(),
+                ul_rate: EmaRate::new(ALPHA),
+                dl_rate: EmaRate::new(ALPHA),
             },
             tx,
             progress_rx,
@@ -472,8 +476,8 @@ impl Torrent {
                 progress_tx,
                 event_bus,
                 pending_requests: HashMap::new(),
-                ul_rate: EmaRate::default(),
-                dl_rate: EmaRate::default(),
+                ul_rate: EmaRate::new(ALPHA),
+                dl_rate: EmaRate::new(ALPHA),
             },
             tx,
             progress_rx,
@@ -501,6 +505,7 @@ impl Torrent {
 
         // Periodic metrics update (every 1 second)
         let mut metrics_ticker = tokio::time::interval(Duration::from_millis(500));
+        let mut ema_rates = tokio::time::interval(Duration::from_secs(1));
 
         loop {
             tokio::select! {
@@ -525,6 +530,10 @@ impl Torrent {
                 }
                 _ = metrics_ticker.tick() => {
                     self.update_progress();
+                }
+                _ = ema_rates.tick() => {
+                    self.dl_rate.update();
+                    self.ul_rate.update();
                 }
             }
         }
@@ -771,10 +780,9 @@ impl Torrent {
                 bitfield,
                 block_tx,
             } => {
-                tracing::debug!("----received block request");
                 let p = self.piece_mananger.as_mut().expect("init");
                 let blocks = p.pick_piece(&bitfield, max_requests);
-                //
+
                 // Register these requests (increment heat)
                 for block in &blocks {
                     let request = BlockRequest::from(*block);
@@ -787,6 +795,22 @@ impl Torrent {
                     .extend_from_slice(&blocks);
 
                 let _ = block_tx.send(blocks);
+            }
+            TorrentMessage::ClearPeerRequest { pid } => {
+                let Some(m) = self.piece_mananger.as_mut() else {
+                    return Ok(());
+                };
+
+                let requests: Vec<_> = self
+                    .pending_requests
+                    .get_mut(&pid)
+                    .map(std::mem::take)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(BlockRequest::from)
+                    .collect();
+
+                m.cancel_peer_requests(&requests);
             }
             TorrentMessage::ValidMetadata { resp } => {
                 let metadata = self.metadata.info();
@@ -892,6 +916,7 @@ impl Torrent {
     }
 
     async fn incoming_block(&mut self, pid: Pid, block: Block) {
+        self.dl_rate.record(block.data.len() as u64);
         let request = BlockRequest {
             piece_index: block.index,
             begin: block.begin,
@@ -1004,7 +1029,6 @@ impl Torrent {
         self.metrics
             .downloaded_bytes
             .fetch_add(piece_len, Ordering::Relaxed);
-        self.dl_rate.record(piece_len);
 
         debug!("MARKED AS HAVE");
         tracing::debug!("BROADCASTING PIECE TO PEERS");
@@ -1167,9 +1191,6 @@ impl Torrent {
     }
 
     fn update_progress(&mut self) {
-        self.dl_rate.update();
-        self.ul_rate.update();
-
         let progress = if let Some(mananger) = &self.piece_mananger {
             mananger.get_progress()
         } else {

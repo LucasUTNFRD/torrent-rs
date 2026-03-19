@@ -6,7 +6,7 @@ use std::{
 };
 
 use crate::{
-    metrics::counters::{dec_connected, inc_connected},
+    metrics::counters::inc_connected,
     protocol::{
         extension::{
             DATA_ID, ExtendedHandshake, ExtendedMessage, MetadataMessage, REJECT_ID, REQUEST_ID,
@@ -222,7 +222,7 @@ impl PeerConnection {
             metadata_size: 0,
             request_queue: Vec::new(),
             outgoing_requests: HashSet::new(),
-            target_request_queue: 2,
+            target_request_queue: 4,
             max_outgoing_request: 250,
             slow_start: true,
             prev_download_rate: 0.0,
@@ -338,16 +338,43 @@ impl PeerConnection {
         let current_rate = self.metrics.download_rate_f64();
 
         if self.slow_start {
-            let increase = current_rate - self.prev_download_rate;
-            let threshold = (current_rate / 20.0).max(10_240.0);
-            if current_rate > 0.0 && increase < threshold {
+            let remote_choking = self.peer_info.read().unwrap().remote_choking;
+            let plateaued =
+                self.prev_download_rate > 0.0 && current_rate + 5000.0 >= self.prev_download_rate;
+
+            if !remote_choking && current_rate > 0.0 && plateaued {
                 self.slow_start = false;
+                tracing::info!(
+                    peer = %self.peer_addr,
+                    current_rate,
+                    prev_rate = self.prev_download_rate,
+                    target_queue = self.target_request_queue,
+                    "slow_start exit: rate plateaued"
+                );
+            } else {
+                tracing::debug!(
+                    peer = %self.peer_addr,
+                    current_rate,
+                    prev_rate = self.prev_download_rate,
+                    remote_choking,
+                    target_queue = self.target_request_queue,
+                    "metric_update: still in slow_start"
+                );
             }
         } else {
             const BLOCK_SIZE: f64 = 16384.0;
-            const ASSUMED_LATENCY: f64 = 0.5;
-            let target = (current_rate * ASSUMED_LATENCY / BLOCK_SIZE) as usize;
-            self.target_request_queue = target.max(2).min(self.max_outgoing_request);
+            const QUEUE_TIME: f64 = 3.0;
+            let raw_target = (QUEUE_TIME * current_rate / BLOCK_SIZE) as usize;
+            let new_target = raw_target.max(4).min(self.max_outgoing_request);
+            self.target_request_queue = new_target;
+            tracing::debug!(
+                peer = %self.peer_addr,
+                current_rate,
+                raw_target,
+                new_target,
+                in_flight = self.outgoing_requests.len(),
+                "metric_update: steady-state target recalculated"
+            );
         }
 
         self.prev_download_rate = current_rate;
@@ -359,7 +386,7 @@ impl PeerConnection {
         self.last_recv_msg = Instant::now();
         match msg {
             Message::KeepAlive => {}
-            Message::Choke => self.on_choke(),
+            Message::Choke => self.on_choke().await,
             Message::Unchoke => self.on_unchoke().await?,
             Message::Interested => self.on_interested().await?,
             Message::NotInterested => self.on_not_interested().await?,
@@ -428,8 +455,15 @@ impl PeerConnection {
 
     // ── Protocol handlers ─────────────────────────────────────────────────────
 
-    fn on_choke(&mut self) {
+    async fn on_choke(&mut self) {
         self.set_remote_choking(true);
+
+        // clear the requests that haven't been sent yet
+        self.request_queue.clear();
+        let _ = self
+            .torrent_tx
+            .send(TorrentMessage::ClearPeerRequest { pid: self.pid })
+            .await;
     }
 
     async fn on_unchoke(&mut self) -> Result<(), ConnectionError> {
@@ -562,20 +596,9 @@ impl PeerConnection {
     }
 
     fn adjust_pipeline_on_piece(&mut self) {
-        let pending_bytes = self.outgoing_requests.len() as u64 * 16384;
-
-        let rate = self.metrics.download_rate_f64().max(1.0);
-        let queue_secs = pending_bytes as f64 / rate;
-
         if self.slow_start {
-            if queue_secs < 5.0 {
-                self.target_request_queue =
-                    (self.target_request_queue + 1).min(self.max_outgoing_request);
-            } else {
-                self.slow_start = false;
-            }
-        } else if queue_secs >= 5.0 {
-            self.slow_start = false;
+            self.target_request_queue =
+                (self.target_request_queue + 1).min(self.max_outgoing_request);
         }
     }
 
@@ -591,10 +614,26 @@ impl PeerConnection {
 
         let in_flight = self.outgoing_requests.len();
         if in_flight >= self.target_request_queue {
+            tracing::debug!(
+                peer = %self.peer_addr,
+                in_flight,
+                target_queue = self.target_request_queue,
+                slow_start = self.slow_start,
+                "request_block: pipeline full, not requesting more"
+            );
             return Ok(());
         }
 
         let slots = self.target_request_queue - in_flight;
+        tracing::debug!(
+            peer = %self.peer_addr,
+            in_flight,
+            target_queue = self.target_request_queue,
+            slots,
+            slow_start = self.slow_start,
+            "request_block: fetching blocks from session"
+        );
+
         let BitfieldState::Validated(bitfield) = self.bitfield.clone() else {
             return Ok(());
         };
@@ -611,7 +650,14 @@ impl PeerConnection {
             .await;
 
         let blocks = rx.await.expect("TorrentSession dropped oneshot sender");
+        let received = blocks.len();
         self.request_queue.extend(blocks);
+        tracing::debug!(
+            peer = %self.peer_addr,
+            slots_requested = slots,
+            blocks_received = received,
+            "request_block: session returned blocks"
+        );
         Ok(())
     }
 
@@ -625,6 +671,7 @@ impl PeerConnection {
             self.sink.feed(Message::Request(block)).await?;
         }
         self.sink.flush().await?;
+
         Ok(())
     }
 
