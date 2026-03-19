@@ -386,7 +386,7 @@ impl PeerConnection {
         self.last_recv_msg = Instant::now();
         match msg {
             Message::KeepAlive => {}
-            Message::Choke => self.on_choke(),
+            Message::Choke => self.on_choke().await,
             Message::Unchoke => self.on_unchoke().await?,
             Message::Interested => self.on_interested().await?,
             Message::NotInterested => self.on_not_interested().await?,
@@ -455,8 +455,15 @@ impl PeerConnection {
 
     // ── Protocol handlers ─────────────────────────────────────────────────────
 
-    fn on_choke(&mut self) {
+    async fn on_choke(&mut self) {
         self.set_remote_choking(true);
+
+        // clear the requests that haven't been sent yet
+        self.request_queue.clear();
+        let _ = self
+            .torrent_tx
+            .send(TorrentMessage::ClearPeerRequest { pid: self.pid })
+            .await;
     }
 
     async fn on_unchoke(&mut self) -> Result<(), ConnectionError> {
