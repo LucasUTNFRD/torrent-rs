@@ -5,7 +5,7 @@ use crate::{
     ema::EmaRate,
     events::{EventBus, SessionEvent},
     metadata::{Metadata, MetadataState},
-    metrics::counters,
+    metrics::counters::{self, dec_connected},
     net::TcpStream,
     peer::{
         PeerMessage,
@@ -1129,6 +1129,8 @@ impl Torrent {
             manager.decrement_availability(&AvailabilityUpdate::Bitfield(&bitfield));
             manager.cancel_peer_requests(&requests);
         }
+
+        dec_connected();
     }
 
     /// Run the choker algorithm periodically to rotate upload slots

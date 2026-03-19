@@ -1,6 +1,5 @@
 use metrics::{counter, gauge, histogram};
 // torrent
-
 pub fn set_downloading(n: usize) {
     gauge!("torrent.downloading").set(n as f64);
 }

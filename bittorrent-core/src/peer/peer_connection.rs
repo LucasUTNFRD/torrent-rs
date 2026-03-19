@@ -899,7 +899,6 @@ pub fn spawn_outbound(
 
         if let Err(e) = result {
             debug!(peer = %addr, error = %e, "Outbound peer failed");
-            dec_connected();
             let _ = tx_err.send(TorrentMessage::PeerError(pid, e, None)).await;
         }
     });
@@ -953,7 +952,6 @@ pub fn spawn_inbound(
         .await;
 
         if let Err(e) = result {
-            dec_connected();
             debug!(peer = %addr, error = %e, "Inbound peer failed");
             let _ = tx_err.send(TorrentMessage::PeerError(pid, e, None)).await;
         }
