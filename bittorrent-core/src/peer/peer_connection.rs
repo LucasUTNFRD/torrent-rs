@@ -609,11 +609,6 @@ impl PeerConnection {
             return Ok(());
         }
         if !self.request_queue.is_empty() {
-            tracing::trace!(
-                peer = %self.peer_addr,
-                pending_in_queue = self.request_queue.len(),
-                "request_block: request_queue non-empty, skipping refill"
-            );
             return Ok(());
         }
 
@@ -667,7 +662,6 @@ impl PeerConnection {
     }
 
     async fn send_block_requests(&mut self) -> Result<(), ConnectionError> {
-        let before = self.outgoing_requests.len();
         while let Some(block) = self.request_queue.pop() {
             if self.outgoing_requests.len() > self.max_outgoing_request {
                 break;
@@ -677,17 +671,7 @@ impl PeerConnection {
             self.sink.feed(Message::Request(block)).await?;
         }
         self.sink.flush().await?;
-        let after = self.outgoing_requests.len();
-        if after != before {
-            tracing::debug!(
-                peer = %self.peer_addr,
-                sent = after - before,
-                in_flight = after,
-                target_queue = self.target_request_queue,
-                remaining_in_local_queue = self.request_queue.len(),
-                "send_block_requests: sent wire requests"
-            );
-        }
+
         Ok(())
     }
 
