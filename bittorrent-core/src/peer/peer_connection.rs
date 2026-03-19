@@ -222,7 +222,7 @@ impl PeerConnection {
             metadata_size: 0,
             request_queue: Vec::new(),
             outgoing_requests: HashSet::new(),
-            target_request_queue: 2,
+            target_request_queue: 4,
             max_outgoing_request: 250,
             slow_start: true,
             prev_download_rate: 0.0,
@@ -338,34 +338,34 @@ impl PeerConnection {
         let current_rate = self.metrics.download_rate_f64();
 
         if self.slow_start {
-            let increase = current_rate - self.prev_download_rate;
-            let threshold = (current_rate / 20.0).max(10_240.0);
-            if current_rate > 0.0 && increase < threshold {
+            let remote_choking = self.peer_info.read().unwrap().remote_choking;
+            let plateaued =
+                self.prev_download_rate > 0.0 && current_rate + 5000.0 >= self.prev_download_rate;
+
+            if !remote_choking && current_rate > 0.0 && plateaued {
                 self.slow_start = false;
                 tracing::info!(
                     peer = %self.peer_addr,
                     current_rate,
-                    increase,
-                    threshold,
+                    prev_rate = self.prev_download_rate,
                     target_queue = self.target_request_queue,
-                    "slow_start exit via metric_update (rate converged)"
+                    "slow_start exit: rate plateaued"
                 );
             } else {
                 tracing::debug!(
                     peer = %self.peer_addr,
                     current_rate,
-                    increase,
-                    threshold,
-                    in_slow_start = true,
+                    prev_rate = self.prev_download_rate,
+                    remote_choking,
                     target_queue = self.target_request_queue,
                     "metric_update: still in slow_start"
                 );
             }
         } else {
             const BLOCK_SIZE: f64 = 16384.0;
-            const ASSUMED_LATENCY: f64 = 0.5;
-            let raw_target = (current_rate * ASSUMED_LATENCY / BLOCK_SIZE) as usize;
-            let new_target = raw_target.max(2).min(self.max_outgoing_request);
+            const QUEUE_TIME: f64 = 3.0;
+            let raw_target = (QUEUE_TIME * current_rate / BLOCK_SIZE) as usize;
+            let new_target = raw_target.max(4).min(self.max_outgoing_request);
             self.target_request_queue = new_target;
             tracing::debug!(
                 peer = %self.peer_addr,
@@ -589,28 +589,9 @@ impl PeerConnection {
     }
 
     fn adjust_pipeline_on_piece(&mut self) {
-        let raw_rate = self.metrics.download_rate_f64();
-
-        // EMA not yet seeded — don't make slow_start decisions based on a zero rate.
-        // Just increment the queue and wait for metric_update to take over.
-        if raw_rate == 0.0 {
-            if self.slow_start {
-                self.target_request_queue =
-                    (self.target_request_queue + 1).min(self.max_outgoing_request);
-            }
-            return;
-        }
-
-        let pending_bytes = self.outgoing_requests.len() as u64 * 16384;
-        let queue_secs = pending_bytes as f64 / raw_rate;
-
         if self.slow_start {
-            if queue_secs < 5.0 {
-                self.target_request_queue =
-                    (self.target_request_queue + 1).min(self.max_outgoing_request);
-            } else {
-                self.slow_start = false;
-            }
+            self.target_request_queue =
+                (self.target_request_queue + 1).min(self.max_outgoing_request);
         }
     }
 
