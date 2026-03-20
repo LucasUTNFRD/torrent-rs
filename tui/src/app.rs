@@ -99,10 +99,10 @@ impl App {
 
     pub async fn tick(&mut self) {
         for (id, rx) in &mut self.receivers {
-            if rx.has_changed().unwrap_or(false) {
-                if let Some(snap) = self.progress.get_mut(id) {
-                    *snap = rx.borrow_and_update().clone();
-                }
+            if rx.has_changed().unwrap_or(false)
+                && let Some(snap) = self.progress.get_mut(id)
+            {
+                *snap = rx.borrow_and_update().clone();
             }
         }
 
@@ -127,7 +127,7 @@ impl App {
         }
     }
 
-    pub fn quit(&mut self) {
+    pub const fn quit(&mut self) {
         self.should_quit = true;
     }
 
