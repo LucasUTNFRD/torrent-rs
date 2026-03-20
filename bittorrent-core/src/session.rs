@@ -30,7 +30,7 @@ use tracker_client::TrackerHandler;
 use crate::{
     SessionConfig, TorrentProgress,
     events::SessionEvent,
-    metrics::counters::{self, incoming_connections},
+    metrics::counters::{self},
     net::TcpListener,
     protocol::peer_wire::Handshake,
     storage::{DiskStorage, StorageBackend},
@@ -127,7 +127,22 @@ pub enum SessionCommand {
         addr: std::net::SocketAddr,
         resp: oneshot::Sender<Result<(), SessionError>>,
     },
+    GetTorrentDetail {
+        id: TorrentId,
+        resp: oneshot::Sender<Result<TorrentDetail, SessionError>>,
+    },
+    GetPeerSnapshots {
+        id: TorrentId,
+        resp: oneshot::Sender<Result<Vec<PeerSnapshot>, SessionError>>,
+    },
+    GetTrackerStatuses {
+        id: TorrentId,
+        resp: oneshot::Sender<Result<Vec<TrackerStatus>, SessionError>>,
+    },
 }
+
+// Re-export detail types from detail module
+pub use crate::detail::{FileInfo, PeerSnapshot, TorrentDetail, TorrentMeta, TrackerStatus};
 
 /// Errors that can occur in session operations.
 #[derive(Debug, thiserror::Error)]
@@ -152,6 +167,9 @@ pub enum SessionError {
 
     #[error("No peer discovery available: no trackers and DHT disabled")]
     NoPeerDiscovery,
+
+    #[error("Metadata not yet available for torrent: {0}. Waiting for peer connection...")]
+    MetadataPending(TorrentId),
 }
 
 impl Session {
@@ -317,6 +335,32 @@ impl Session {
     pub fn suscribe(&self) -> broadcast::Receiver<SessionEvent> {
         self.subscribe()
     }
+
+    pub async fn get_torrent_meta(&self, id: TorrentId) -> Result<TorrentDetail, SessionError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(SessionCommand::GetTorrentDetail { id, resp: tx })
+            .map_err(|_| SessionError::SessionClosed)?;
+        rx.await.map_err(|_| SessionError::SessionClosed)?
+    }
+
+    /// Get peer connection snapshots for a torrent
+    pub async fn get_peers(&self, id: TorrentId) -> Result<Vec<PeerSnapshot>, SessionError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(SessionCommand::GetPeerSnapshots { id, resp: tx })
+            .map_err(|_| SessionError::SessionClosed)?;
+        rx.await.map_err(|_| SessionError::SessionClosed)?
+    }
+
+    /// Get tracker statuses for a torrent
+    pub async fn get_trackers(&self, id: TorrentId) -> Result<Vec<TrackerStatus>, SessionError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(SessionCommand::GetTrackerStatuses { id, resp: tx })
+            .map_err(|_| SessionError::SessionClosed)?;
+        rx.await.map_err(|_| SessionError::SessionClosed)?
+    }
 }
 
 /// Metadata stored for each active torrent.
@@ -331,6 +375,8 @@ struct TorrentEntry {
     name: String,
     /// Total size in bytes (0 if metadata not yet fetched)
     size_bytes: u64,
+    /// Torrent metadata (None for magnet links until metadata is fetched)
+    metainfo: Option<Arc<TorrentInfo>>,
 }
 
 /// Internal session manager that runs as a background task.
@@ -507,8 +553,47 @@ impl SessionManager {
                     };
                     let _ = resp.send(result);
                 }
+                SessionCommand::GetTorrentDetail { id, resp } => {
+                    let result = self
+                        .query_torrent(id, |tx| TorrentMessage::GetTorrentDetail { resp: tx })
+                        .await;
+                    let _ = resp.send(result);
+                }
+                SessionCommand::GetPeerSnapshots { id, resp } => {
+                    let result = self
+                        .query_torrent(id, |tx| TorrentMessage::GetPeerSnapshots { resp: tx })
+                        .await;
+                    let _ = resp.send(result);
+                }
+                SessionCommand::GetTrackerStatuses { id, resp } => {
+                    let result = self
+                        .query_torrent(id, |tx| TorrentMessage::GetTrackerStatuses { resp: tx })
+                        .await;
+                    let _ = resp.send(result);
+                }
             }
         }
+    }
+
+    /// Helper to forward a oneshot-bearing message to a torrent actor and await the reply.
+    /// Handles the common pattern of: lookup entry, clone channel, send message, await response.
+    async fn query_torrent<T>(
+        &self,
+        id: TorrentId,
+        make_msg: impl FnOnce(oneshot::Sender<T>) -> TorrentMessage,
+    ) -> Result<T, SessionError> {
+        let (tx, rx) = oneshot::channel();
+        let torrent_tx = {
+            let sessions = self.sessions.read().unwrap();
+            sessions
+                .get(&id)
+                .map(|e| e.tx.clone())
+                .ok_or(SessionError::TorrentNotFound(id))?
+        };
+        torrent_tx
+            .try_send(make_msg(tx))
+            .map_err(|_| SessionError::SessionClosed)?;
+        rx.await.map_err(|_| SessionError::SessionClosed)
     }
 
     async fn handle_seed_torrent(
@@ -537,7 +622,7 @@ impl SessionManager {
         let (torrent, tx, progress_rx) = Torrent::as_seed(
             self.peer_id,
             content_dir,
-            metainfo,
+            metainfo.clone(),
             tracker.clone(),
             dht.cloned(),
             self.storage.clone(),
@@ -552,9 +637,10 @@ impl SessionManager {
         let entry = TorrentEntry {
             tx,
             handle,
-            progress_rx,
-            name,
+            progress_rx: progress_rx.clone(),
+            name: name.clone(),
             size_bytes,
+            metainfo: Some(Arc::new(metainfo)),
         };
 
         {
@@ -594,7 +680,7 @@ impl SessionManager {
 
         let (torrent, tx, progress_rx) = Torrent::from_torrent_info(
             self.peer_id,
-            metainfo,
+            metainfo.clone(),
             tracker.clone(),
             dht.cloned(),
             self.storage.clone(),
@@ -609,9 +695,10 @@ impl SessionManager {
         let entry = TorrentEntry {
             tx,
             handle,
-            progress_rx,
-            name,
+            progress_rx: progress_rx.clone(),
+            name: name.clone(),
             size_bytes,
+            metainfo: Some(Arc::new(metainfo)),
         };
 
         {
@@ -679,7 +766,8 @@ impl SessionManager {
             handle,
             progress_rx,
             name,
-            size_bytes: 0, // Unknown until metadata is fetched
+            size_bytes: 0,  // Unknown until metadata is fetched
+            metainfo: None, // Will be populated when metadata is fetched
         };
 
         {

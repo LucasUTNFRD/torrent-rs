@@ -141,6 +141,10 @@ pub struct PeerInfo {
     pub am_interested: bool, // we are interested in them
 
     pub snubbed: bool, // no piece in >60s
+
+    // Extension support (set during handshake)
+    pub supports_extended: bool,
+    pub dht_enabled: bool,
 }
 
 impl PeerInfo {
@@ -153,6 +157,8 @@ impl PeerInfo {
             am_choking: true,
             am_interested: false,
             snubbed: false,
+            supports_extended: false,
+            dht_enabled: false,
         }
     }
 }
@@ -938,8 +944,13 @@ pub fn spawn_outbound(
                 PeerConnection::handshake(&mut stream, local_peer_id, info_hash).await?;
             inc_connected();
 
-            // Update real peer_id now that handshake is done
-            info.write().unwrap().peer_id = remote_peer_id;
+            // Update peer info with handshake results
+            {
+                let mut info_guard = info.write().unwrap();
+                info_guard.peer_id = remote_peer_id;
+                info_guard.supports_extended = supports_extended;
+                info_guard.dht_enabled = dht_enabled;
+            }
 
             PeerConnection::new(
                 pid,
@@ -995,7 +1006,12 @@ pub fn spawn_inbound(
             //     PeerConnection::handshake(&mut stream, local_peer_id, info_hash).await?;
 
             inc_connected();
-            info.write().unwrap().peer_id = remote_peer_id;
+            {
+                let mut info_guard = info.write().unwrap();
+                info_guard.peer_id = remote_peer_id;
+                info_guard.supports_extended = supports_ext;
+                info_guard.dht_enabled = dht_enabled;
+            }
 
             PeerConnection::new(
                 pid,

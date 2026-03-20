@@ -1,7 +1,9 @@
-use bittorrent_core::{Session, TorrentProgress, types::TorrentId, TorrentMeta, FileInfo, PeerSnapshot, TrackerStatus};
+use bittorrent_core::{
+    FileInfo, PeerSnapshot, Session, TorrentMeta, TorrentProgress, TrackerStatus, types::TorrentId,
+};
+use ratatui::widgets::TableState;
 use std::{collections::HashMap, fmt::Display};
 use tokio::sync::watch;
-use ratatui::widgets::TableState;
 
 pub enum Status {
     None,
@@ -11,17 +13,14 @@ pub enum Status {
 
 pub enum View {
     List,
-    Detail {
-        id: TorrentId,
-        tab: DetailTab,
-    },
+    Detail { id: TorrentId, tab: DetailTab },
 }
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum DetailTab {
     Overview = 0,
-    Files    = 1,
-    Peers    = 2,
+    Files = 1,
+    Peers = 2,
     Trackers = 3,
 }
 
@@ -29,16 +28,16 @@ impl DetailTab {
     pub fn next(self) -> Self {
         match self {
             Self::Overview => Self::Files,
-            Self::Files    => Self::Peers,
-            Self::Peers    => Self::Trackers,
+            Self::Files => Self::Peers,
+            Self::Peers => Self::Trackers,
             Self::Trackers => Self::Overview,
         }
     }
     pub fn prev(self) -> Self {
         match self {
             Self::Overview => Self::Trackers,
-            Self::Files    => Self::Overview,
-            Self::Peers    => Self::Files,
+            Self::Files => Self::Overview,
+            Self::Peers => Self::Files,
             Self::Trackers => Self::Peers,
         }
     }
@@ -107,24 +106,25 @@ impl App {
             }
         }
 
-        if let View::Detail { id, tab } = self.view {
-            self.detail_tick += 1;
-            if self.detail_tick % 5 == 0 {
-                match tab {
-                    DetailTab::Peers => {
-                        if let Ok(p) = self.session.get_peers(id).await {
-                            self.detail.peers = p;
-                        }
-                    }
-                    DetailTab::Trackers => {
-                        if let Ok(t) = self.session.get_trackers(id).await {
-                            self.detail.trackers = t;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
+        // TODO: Refresh peer/tracker data periodically when those APIs are implemented
+        // if let View::Detail { id, tab } = self.view {
+        //     self.detail_tick += 1;
+        //     if self.detail_tick % 5 == 0 {
+        //         match tab {
+        //             DetailTab::Peers => {
+        //                 if let Ok(p) = self.session.get_peers(id).await {
+        //                     self.detail.peers = p;
+        //                 }
+        //             }
+        //             DetailTab::Trackers => {
+        //                 if let Ok(t) = self.session.get_trackers(id).await {
+        //                     self.detail.trackers = t;
+        //                 }
+        //             }
+        //             _ => {}
+        //         }
+        //     }
+        // }
     }
 
     pub fn quit(&mut self) {
@@ -145,7 +145,9 @@ impl App {
         self.receivers.remove(&id);
         self.progress.remove(&id);
         self.torrent_order.retain(|&x| x != id);
-        self.selected_index = self.selected_index.min(self.torrent_order.len().saturating_sub(1));
+        self.selected_index = self
+            .selected_index
+            .min(self.torrent_order.len().saturating_sub(1));
     }
 
     pub fn selected_id(&self) -> Option<TorrentId> {
@@ -165,16 +167,19 @@ impl App {
     }
 
     pub async fn open_detail(&mut self, id: TorrentId) -> anyhow::Result<()> {
-        let meta = self.session.get_torrent_meta(id).await?;
+        let detail = self.session.get_torrent_meta(id).await?;
         self.detail = DetailCache {
-            meta: Some(meta),
-            files: self.session.get_files(id).await.unwrap_or_default(),
-            peers: self.session.get_peers(id).await.unwrap_or_default(),
-            trackers: self.session.get_trackers(id).await.unwrap_or_default(),
+            meta: Some(detail.meta),
+            files: detail.files,
+            peers: detail.peers,
+            trackers: detail.trackers,
             files_table_state: std::cell::Cell::new(TableState::default()),
             peers_table_state: std::cell::Cell::new(TableState::default()),
         };
-        self.view = View::Detail { id, tab: DetailTab::Overview };
+        self.view = View::Detail {
+            id,
+            tab: DetailTab::Overview,
+        };
         Ok(())
     }
 

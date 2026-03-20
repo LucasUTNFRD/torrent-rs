@@ -2,7 +2,12 @@ use crate::{
     StorageBackend, TorrentProgress, TorrentState,
     bitfield::Bitfield,
     choker::Choker,
+    detail::{
+        DirectionSnapshot, FileInfo, PeerSnapshot, TorrentDetail, TorrentMeta, TrackerState,
+        TrackerStatus,
+    },
     ema::EmaRate,
+    events::peer::Direction,
     events::{EventBus, SessionEvent},
     metadata::{Metadata, MetadataState},
     metrics::counters::{self, dec_connected},
@@ -169,6 +174,18 @@ pub enum TorrentMessage {
     ConnectPeer {
         addr: SocketAddr,
     },
+    /// Query peer snapshots for UI/TUI
+    GetPeerSnapshots {
+        resp: oneshot::Sender<Vec<PeerSnapshot>>,
+    },
+    /// Query tracker statuses for UI/TUI
+    GetTrackerStatuses {
+        resp: oneshot::Sender<Vec<TrackerStatus>>,
+    },
+    /// Query torrent detail (files, metadata) for UI/TUI
+    GetTorrentDetail {
+        resp: oneshot::Sender<TorrentDetail>,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -180,7 +197,7 @@ pub struct Metrics {
 }
 
 #[derive(Debug, Clone)]
-struct TrackerState {
+struct InternalTrackerState {
     url: Url,
     error: Option<String>,
     last_report: Option<chrono::DateTime<chrono::Utc>>,
@@ -197,7 +214,7 @@ pub struct Torrent {
     /// metadata and metadata state of the torrent
     metadata: Metadata,
     state: TorrentState,
-    trackers: HashMap<Url, TrackerState>,
+    trackers: HashMap<Url, InternalTrackerState>,
 
     tracker_client: Arc<TrackerHandler>,
     dht_client: Option<Arc<DhtHandler>>,
@@ -261,7 +278,7 @@ impl Torrent {
                 Url::parse(&url).ok().map(|u| {
                     (
                         u.clone(),
-                        TrackerState {
+                        InternalTrackerState {
                             url: u,
                             error: None,
                             last_report: None,
@@ -345,7 +362,7 @@ impl Torrent {
             .map(|u| {
                 (
                     u.clone(),
-                    TrackerState {
+                    InternalTrackerState {
                         url: u,
                         error: None,
                         last_report: None,
@@ -426,7 +443,7 @@ impl Torrent {
                 Url::parse(&url).ok().map(|u| {
                     (
                         u.clone(),
-                        TrackerState {
+                        InternalTrackerState {
                             url: u,
                             error: None,
                             last_report: None,
@@ -917,6 +934,191 @@ impl Torrent {
             TorrentMessage::ConnectPeer { addr } => {
                 info!("Injected outbound peer connection to {}", addr);
                 self.add_peer(PeerOrigin::Outbound(addr)).await;
+            }
+            TorrentMessage::GetPeerSnapshots { resp } => {
+                let snapshots: Vec<PeerSnapshot> = self
+                    .peers
+                    .values()
+                    .map(|handle| {
+                        let info = handle.info.read().unwrap();
+                        PeerSnapshot {
+                            addr: handle.peer_addr,
+                            info: crate::detail::PeerInfoSnapshot {
+                                remote_choking: info.remote_choking,
+                                remote_interested: info.remote_interested,
+                                am_choking: info.am_choking,
+                                am_interested: info.am_interested,
+                                source: match info.source {
+                                    Direction::Inbound => DirectionSnapshot::Inbound,
+                                    Direction::Outbound => DirectionSnapshot::Outbound,
+                                },
+                                download_rate: 0.0, // TODO: query from metrics
+                                upload_rate: 0.0,   // TODO: query from metrics
+                                peer_progress: 0.0, // TODO: query from bitfield
+                                client_name: info
+                                    .peer_id
+                                    .identify_client()
+                                    .unwrap_or("Unknown")
+                                    .to_string(),
+                                extension_flags: crate::detail::ExtensionFlags {
+                                    dht: info.dht_enabled,
+                                    extension_protocol: info.supports_extended,
+                                    metadata: info.supports_extended, // If extended, supports metadata
+                                    pex: false,                       // TODO: detect PEX support
+                                },
+                            },
+                        }
+                    })
+                    .collect();
+                let _ = resp.send(snapshots);
+            }
+            TorrentMessage::GetTrackerStatuses { resp } => {
+                let statuses: Vec<TrackerStatus> = self
+                    .trackers
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, (url, state))| {
+                        TrackerStatus {
+                            url: url.to_string(),
+                            tier: Some(idx), // Trackers are ordered by tier in the torrent file
+                            seeder_count: None, // TODO: query from tracker client
+                            leecher_count: None, // TODO: query from tracker client
+                            peers_received: 0, // TODO: query from tracker client
+                            status: if state.error.is_some() {
+                                TrackerState::Error
+                            } else if state.last_report.is_some() {
+                                TrackerState::Ok
+                            } else {
+                                TrackerState::Idle
+                            },
+                            last_error: state.error.clone(),
+                        }
+                    })
+                    .collect();
+                let _ = resp.send(statuses);
+            }
+            TorrentMessage::GetTorrentDetail { resp } => {
+                // Build metadata from the Torrent's stored metadata
+                let meta = match &self.metadata {
+                    Metadata::TorrentFile(ti) => {
+                        Some(TorrentMeta::from_torrent_info(self.info_hash, ti))
+                    }
+                    Metadata::MagnetUri { metadata_state, .. } => match metadata_state {
+                        MetadataState::Complete(info) => {
+                            Some(TorrentMeta::from_info(self.info_hash, info))
+                        }
+                        _ => None,
+                    },
+                };
+
+                match meta {
+                    Some(m) => {
+                        // Build files list from metadata
+                        let files: Vec<FileInfo> = match &self.metadata {
+                            Metadata::TorrentFile(ti) => {
+                                ti.info
+                                    .files()
+                                    .into_iter()
+                                    .enumerate()
+                                    .map(|(idx, f)| FileInfo {
+                                        index: idx,
+                                        path: f.path,
+                                        size_bytes: f.length as u64,
+                                        downloaded_bytes: 0, // TODO: compute from bitfield
+                                    })
+                                    .collect()
+                            }
+                            Metadata::MagnetUri { metadata_state, .. } => match metadata_state {
+                                MetadataState::Complete(info) => info
+                                    .files()
+                                    .into_iter()
+                                    .enumerate()
+                                    .map(|(idx, f)| FileInfo {
+                                        index: idx,
+                                        path: f.path,
+                                        size_bytes: f.length as u64,
+                                        downloaded_bytes: 0,
+                                    })
+                                    .collect(),
+                                _ => Vec::new(),
+                            },
+                        };
+
+                        // Get live peer snapshots
+                        let peers: Vec<PeerSnapshot> = self
+                            .peers
+                            .values()
+                            .map(|handle| {
+                                let info = handle.info.read().unwrap();
+                                PeerSnapshot {
+                                    addr: handle.peer_addr,
+                                    info: crate::detail::PeerInfoSnapshot {
+                                        remote_choking: info.remote_choking,
+                                        remote_interested: info.remote_interested,
+                                        am_choking: info.am_choking,
+                                        am_interested: info.am_interested,
+                                        source: match info.source {
+                                            crate::events::peer::Direction::Inbound => {
+                                                DirectionSnapshot::Inbound
+                                            }
+                                            crate::events::peer::Direction::Outbound => {
+                                                DirectionSnapshot::Outbound
+                                            }
+                                        },
+                                        download_rate: 0.0, // TODO: query from metrics
+                                        upload_rate: 0.0,   // TODO: query from metrics
+                                        peer_progress: 0.0, // TODO: query from bitfield
+                                        client_name: info
+                                            .peer_id
+                                            .identify_client()
+                                            .unwrap_or("Unknown")
+                                            .to_string(),
+                                        extension_flags: crate::detail::ExtensionFlags {
+                                            dht: info.dht_enabled,
+                                            extension_protocol: info.supports_extended,
+                                            metadata: info.supports_extended,
+                                            pex: false,
+                                        },
+                                    },
+                                }
+                            })
+                            .collect();
+
+                        // Get live tracker statuses
+                        let trackers: Vec<TrackerStatus> = self
+                            .trackers
+                            .iter()
+                            .enumerate()
+                            .map(|(idx, (url, state))| TrackerStatus {
+                                url: url.to_string(),
+                                tier: Some(idx),
+                                seeder_count: None,
+                                leecher_count: None,
+                                peers_received: 0,
+                                status: if state.error.is_some() {
+                                    TrackerState::Error
+                                } else if state.last_report.is_some() {
+                                    TrackerState::Ok
+                                } else {
+                                    TrackerState::Idle
+                                },
+                                last_error: state.error.clone(),
+                            })
+                            .collect();
+
+                        let detail = TorrentDetail {
+                            meta: m,
+                            files,
+                            peers,
+                            trackers,
+                        };
+                        let _ = resp.send(detail);
+                    }
+                    None => {
+                        // Metadata not yet available - send nothing (caller will timeout)
+                        // The oneshot channel will be dropped, causing a RecvError
+                    }
+                }
             }
         }
         Ok(())
