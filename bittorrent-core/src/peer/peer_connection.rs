@@ -6,6 +6,7 @@ use std::{
 };
 
 use crate::{
+    detail::Direction,
     metrics::counters::inc_connected,
     protocol::{
         extension::{
@@ -35,7 +36,6 @@ use tracing::debug;
 
 use crate::{
     bitfield::{Bitfield, BitfieldError},
-    events::peer::Direction,
     metrics::counters,
     net::{ConnectTimeout, TcpStream},
     peer::{PeerMessage, metrics::PeerMetrics},

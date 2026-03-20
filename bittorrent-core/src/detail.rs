@@ -105,7 +105,7 @@ pub struct PeerInfoSnapshot {
     /// Whether we are interested in the peer (want data)
     pub am_interested: bool,
     /// Connection direction
-    pub source: DirectionSnapshot,
+    pub source: Direction,
     /// Download rate (bytes/sec)
     pub download_rate: f32,
     /// Upload rate (bytes/sec)
@@ -116,15 +116,6 @@ pub struct PeerInfoSnapshot {
     pub client_name: String,
     /// Extension flags
     pub extension_flags: ExtensionFlags,
-}
-
-/// Connection direction for a peer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DirectionSnapshot {
-    /// We connected to this peer
-    Outbound,
-    /// This peer connected to us
-    Inbound,
 }
 
 /// Snapshot of a connected peer's state for the UI.
@@ -153,6 +144,15 @@ pub struct TrackerStatus {
     pub status: TrackerState,
     /// Last error message (if any)
     pub last_error: Option<String>,
+}
+
+/// Connection direction for a peer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    /// We connected to this peer
+    Outbound,
+    /// This peer connected to us
+    Inbound,
 }
 
 /// Tracker connection state.

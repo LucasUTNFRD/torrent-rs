@@ -57,8 +57,7 @@ pub mod utils;
 mod verify_torrent_file;
 
 pub use detail::{
-    DirectionSnapshot, FileInfo, PeerSnapshot, TorrentDetail, TorrentMeta, TrackerState,
-    TrackerStatus,
+    Direction, FileInfo, PeerSnapshot, TorrentDetail, TorrentMeta, TrackerState, TrackerStatus,
 };
 pub use events::SessionEvent;
 pub use metrics::progress::{TorrentProgress, TorrentState};

@@ -24,10 +24,13 @@ pub enum PeerEvent {
     },
 }
 
-#[derive(Debug, Clone)]
+/// Connection direction for a peer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
-    Inbound,
+    /// We connected to this peer
     Outbound,
+    /// This peer connected to us
+    Inbound,
 }
 
 #[derive(Debug, Clone)]

@@ -107,24 +107,24 @@ impl App {
         }
 
         // TODO: Refresh peer/tracker data periodically when those APIs are implemented
-        // if let View::Detail { id, tab } = self.view {
-        //     self.detail_tick += 1;
-        //     if self.detail_tick % 5 == 0 {
-        //         match tab {
-        //             DetailTab::Peers => {
-        //                 if let Ok(p) = self.session.get_peers(id).await {
-        //                     self.detail.peers = p;
-        //                 }
-        //             }
-        //             DetailTab::Trackers => {
-        //                 if let Ok(t) = self.session.get_trackers(id).await {
-        //                     self.detail.trackers = t;
-        //                 }
-        //             }
-        //             _ => {}
-        //         }
-        //     }
-        // }
+        if let View::Detail { id, tab } = self.view {
+            self.detail_tick += 1;
+            if self.detail_tick % 5 == 0 {
+                match tab {
+                    DetailTab::Peers => {
+                        if let Ok(p) = self.session.get_peers(id).await {
+                            self.detail.peers = p;
+                        }
+                    }
+                    DetailTab::Trackers => {
+                        if let Ok(t) = self.session.get_trackers(id).await {
+                            self.detail.trackers = t;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
 
     pub fn quit(&mut self) {

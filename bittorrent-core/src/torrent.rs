@@ -2,12 +2,8 @@ use crate::{
     StorageBackend, TorrentProgress, TorrentState,
     bitfield::Bitfield,
     choker::Choker,
-    detail::{
-        DirectionSnapshot, FileInfo, PeerSnapshot, TorrentDetail, TorrentMeta, TrackerState,
-        TrackerStatus,
-    },
+    detail::{FileInfo, PeerSnapshot, TorrentDetail, TorrentMeta, TrackerState, TrackerStatus},
     ema::EmaRate,
-    events::peer::Direction,
     events::{EventBus, SessionEvent},
     metadata::{Metadata, MetadataState},
     metrics::counters::{self, dec_connected},
@@ -948,10 +944,7 @@ impl Torrent {
                                 remote_interested: info.remote_interested,
                                 am_choking: info.am_choking,
                                 am_interested: info.am_interested,
-                                source: match info.source {
-                                    Direction::Inbound => DirectionSnapshot::Inbound,
-                                    Direction::Outbound => DirectionSnapshot::Outbound,
-                                },
+                                source: info.source,
                                 download_rate: 0.0, // TODO: query from metrics
                                 upload_rate: 0.0,   // TODO: query from metrics
                                 peer_progress: 0.0, // TODO: query from bitfield
@@ -1057,14 +1050,7 @@ impl Torrent {
                                         remote_interested: info.remote_interested,
                                         am_choking: info.am_choking,
                                         am_interested: info.am_interested,
-                                        source: match info.source {
-                                            crate::events::peer::Direction::Inbound => {
-                                                DirectionSnapshot::Inbound
-                                            }
-                                            crate::events::peer::Direction::Outbound => {
-                                                DirectionSnapshot::Outbound
-                                            }
-                                        },
+                                        source: info.source,
                                         download_rate: 0.0, // TODO: query from metrics
                                         upload_rate: 0.0,   // TODO: query from metrics
                                         peer_progress: 0.0, // TODO: query from bitfield

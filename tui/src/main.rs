@@ -9,8 +9,8 @@ use std::{
 use anyhow::Result;
 use app::{App, DetailTab, View};
 use bittorrent_core::{
-    DirectionSnapshot, Session, SessionConfig, TorrentProgress, TorrentState, TrackerState,
-    events::SessionEvent, types::TorrentId,
+    Direction as DirectionSnapshot, Session, SessionConfig, TorrentProgress, TorrentState,
+    TrackerState, events::SessionEvent, types::TorrentId,
 };
 
 use crossterm::{
@@ -727,7 +727,7 @@ fn render_peers(f: &mut Frame, area: Rect, app: &App) {
             };
             Row::new(vec![
                 Cell::from(ul_state),
-                Cell::from(fmt_rate(p.info.download_rate as f64))
+                Cell::from(fmt_rate(p.info.download_rate.into()))
                     .style(Style::default().fg(Color::Blue)),
                 Cell::from(dl_state),
                 Cell::from(format!("{:.0}%", p.info.peer_progress * 100.0)),
