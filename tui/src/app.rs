@@ -16,7 +16,7 @@ pub enum View {
     Detail { id: TorrentId, tab: DetailTab },
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum DetailTab {
     Overview = 0,
     Files = 1,
@@ -25,7 +25,7 @@ pub enum DetailTab {
 }
 
 impl DetailTab {
-    pub fn next(self) -> Self {
+    pub const fn next(self) -> Self {
         match self {
             Self::Overview => Self::Files,
             Self::Files => Self::Peers,
@@ -33,7 +33,7 @@ impl DetailTab {
             Self::Trackers => Self::Overview,
         }
     }
-    pub fn prev(self) -> Self {
+    pub const fn prev(self) -> Self {
         match self {
             Self::Overview => Self::Trackers,
             Self::Files => Self::Overview,
@@ -106,7 +106,6 @@ impl App {
             }
         }
 
-        // TODO: Refresh peer/tracker data periodically when those APIs are implemented
         if let View::Detail { id, tab } = self.view {
             self.detail_tick += 1;
             if self.detail_tick % 5 == 0 {
@@ -160,10 +159,6 @@ impl App {
 
     pub fn set_status(&mut self, msg: impl Into<String>) {
         self.status = Status::Info(msg.into());
-    }
-
-    pub fn clear_status(&mut self) {
-        self.status = Status::None;
     }
 
     pub async fn open_detail(&mut self, id: TorrentId) -> anyhow::Result<()> {

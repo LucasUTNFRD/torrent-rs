@@ -107,9 +107,9 @@ pub struct PeerInfoSnapshot {
     /// Connection direction
     pub source: Direction,
     /// Download rate (bytes/sec)
-    pub download_rate: f32,
+    pub download_rate: f64,
     /// Upload rate (bytes/sec)
-    pub upload_rate: f32,
+    pub upload_rate: f64,
     /// Peer's progress (0.0 - 1.0)
     pub peer_progress: f32,
     /// Peer client identification string

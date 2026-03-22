@@ -1,5 +1,4 @@
 mod app;
-mod command;
 
 use std::{
     io::{self, Stdout},
@@ -154,10 +153,10 @@ async fn handle_key_event(key: KeyEvent, app: &mut App, dialog: &mut DialogState
             Ok(())
         }
         KeyCode::Enter => {
-            if let Some(id) = app.selected_id() {
-                if let Err(e) = app.open_detail(id).await {
-                    app.set_error(format!("Failed to open detail: {}", e));
-                }
+            if let Some(id) = app.selected_id()
+                && let Err(e) = app.open_detail(id).await
+            {
+                app.set_error(format!("Failed to open detail: {e}"));
             }
             Ok(())
         }
@@ -280,6 +279,7 @@ async fn handle_add_dialog_key(
         }
         KeyCode::Enter => {
             let value = input.trim();
+            // TODO: Add torrent via path should be via file explorer
             if !value.is_empty() {
                 let res = if value.starts_with("magnet:") {
                     app.session.add_magnet(value).await
@@ -588,11 +588,7 @@ fn render_overview_details(f: &mut Frame, area: Rect, app: &App) {
 
     let label_style = Style::default().fg(Color::DarkGray);
     let rows: Vec<Line> = vec![
-        kv_line(
-            "Name",
-            meta.map(|m| m.name.as_str()).unwrap_or("…"),
-            label_style,
-        ),
+        kv_line("Name", meta.map_or("...", |m| m.name.as_str()), label_style),
         kv_line(
             "Hash",
             meta.map(|m| m.info_hash.to_string())
@@ -609,21 +605,20 @@ fn render_overview_details(f: &mut Frame, area: Rect, app: &App) {
         ),
         kv_line(
             "Pieces",
-            meta.map(|m| format!("{} @ {}", m.num_pieces, fmt_size(m.piece_length as u64)))
+            meta.map(|m| format!("{} @ {}", m.num_pieces, fmt_size(m.piece_length.into())))
                 .as_deref()
                 .unwrap_or("…"),
             label_style,
         ),
         kv_line(
             "Privacy",
-            meta.map(|m| {
+            meta.map_or("...", |m| {
                 if m.is_private {
                     "Private"
                 } else {
                     "Public torrent"
                 }
-            })
-            .unwrap_or("…"),
+            }),
             label_style,
         ),
     ];
@@ -637,7 +632,7 @@ fn render_overview_details(f: &mut Frame, area: Rect, app: &App) {
 
 fn kv_line<'a>(label: &'static str, value: &str, label_style: Style) -> Line<'a> {
     Line::from(vec![
-        Span::styled(format!("{:>12}: ", label), label_style),
+        Span::styled(format!("{label:>12}: "), label_style),
         Span::raw(value.to_string()),
     ])
 }
@@ -662,7 +657,7 @@ fn render_files(f: &mut Frame, area: Rect, app: &App) {
                         .to_string(),
                 ),
                 Cell::from(fmt_size(fi.size_bytes)),
-                Cell::from(format!("{:.1}%", pct)).style(Style::default().fg(if pct >= 100.0 {
+                Cell::from(format!("{pct:.1}%")).style(Style::default().fg(if pct >= 100.0 {
                     Color::Green
                 } else {
                     Color::Blue
@@ -727,8 +722,7 @@ fn render_peers(f: &mut Frame, area: Rect, app: &App) {
             };
             Row::new(vec![
                 Cell::from(ul_state),
-                Cell::from(fmt_rate(p.info.download_rate.into()))
-                    .style(Style::default().fg(Color::Blue)),
+                Cell::from(fmt_rate(p.info.download_rate)).style(Style::default().fg(Color::Blue)),
                 Cell::from(dl_state),
                 Cell::from(format!("{:.0}%", p.info.peer_progress * 100.0)),
                 Cell::from("TCP"), // protocol placeholder
@@ -849,7 +843,7 @@ fn fmt_size(bytes: u64) -> String {
     } else if bytes >= kb {
         format!("{:.2} KB", bytes / kb)
     } else {
-        format!("{} B", bytes)
+        format!("{bytes} B")
     }
 }
 

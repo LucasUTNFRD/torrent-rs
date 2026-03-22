@@ -145,6 +145,8 @@ pub struct PeerInfo {
     // Extension support (set during handshake)
     pub supports_extended: bool,
     pub dht_enabled: bool,
+    pub download_rate: f64,
+    pub upload_rate: f64,
 }
 
 impl PeerInfo {
@@ -159,6 +161,8 @@ impl PeerInfo {
             snubbed: false,
             supports_extended: false,
             dht_enabled: false,
+            download_rate: 0.0,
+            upload_rate: 0.0,
         }
     }
 }
@@ -352,6 +356,13 @@ impl PeerConnection {
 
     fn metric_update(&mut self) {
         self.metrics.update_rates();
+
+        {
+            let mut info = self.peer_info.write().unwrap();
+            info.download_rate = self.metrics.download_rate_f64();
+            info.upload_rate = self.metrics.upload_rate_f64();
+        }
+
         let current_rate = self.metrics.download_rate_f64();
 
         if self.slow_start {

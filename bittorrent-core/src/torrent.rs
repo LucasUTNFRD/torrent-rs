@@ -210,6 +210,7 @@ pub struct Torrent {
     /// metadata and metadata state of the torrent
     metadata: Metadata,
     state: TorrentState,
+    // TODO: Use crate::detail::TrackerStatus  instead of InternalTrackerState
     trackers: HashMap<Url, InternalTrackerState>,
 
     tracker_client: Arc<TrackerHandler>,
@@ -945,8 +946,8 @@ impl Torrent {
                                 am_choking: info.am_choking,
                                 am_interested: info.am_interested,
                                 source: info.source,
-                                download_rate: 0.0, // TODO: query from metrics
-                                upload_rate: 0.0,   // TODO: query from metrics
+                                download_rate: info.download_rate,
+                                upload_rate: info.download_rate,
                                 peer_progress: 0.0, // TODO: query from bitfield
                                 client_name: info
                                     .peer_id
@@ -1051,8 +1052,8 @@ impl Torrent {
                                         am_choking: info.am_choking,
                                         am_interested: info.am_interested,
                                         source: info.source,
-                                        download_rate: 0.0, // TODO: query from metrics
-                                        upload_rate: 0.0,   // TODO: query from metrics
+                                        download_rate: info.download_rate,
+                                        upload_rate: info.upload_rate,
                                         peer_progress: 0.0, // TODO: query from bitfield
                                         client_name: info
                                             .peer_id
