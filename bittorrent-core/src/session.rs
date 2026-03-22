@@ -34,7 +34,7 @@ use crate::{
     net::TcpListener,
     protocol::peer_wire::Handshake,
     storage::{DiskStorage, StorageBackend},
-    torrent::{Torrent, TorrentError, TorrentMessage},
+    torrent::{Torrent, TorrentContext, TorrentError, TorrentMessage, TorrentSource},
     types::TorrentId,
     verify_torrent_file::verify_content,
 };
@@ -619,17 +619,20 @@ impl SessionManager {
         let name = metainfo.info.mode.name().to_string();
         let size_bytes = u64::try_from(metainfo.info.total_size()).expect("size is non-negative");
 
-        let (torrent, tx, progress_rx) = Torrent::as_seed(
-            self.peer_id,
-            content_dir,
-            metainfo.clone(),
-            tracker.clone(),
-            dht.cloned(),
-            self.storage.clone(),
-            shutdown_rx.clone(),
-            self.config.torrents_dir.clone(),
-            self.event_bus.clone(),
-            self.config.unchoke_slots_limit as usize,
+        let ctx = TorrentContext {
+            peer_id: self.peer_id,
+            tracker_client: tracker.clone(),
+            dht_client: dht.cloned(),
+            storage: self.storage.clone(),
+            shutdown_rx: shutdown_rx.clone(),
+            torrents_dir: self.config.torrents_dir.clone(),
+            event_bus: self.event_bus.clone(),
+            unchoke_slots: self.config.unchoke_slots_limit as usize,
+        };
+
+        let (torrent, tx, progress_rx) = Torrent::new(
+            ctx,
+            TorrentSource::Seed { torrent_info: metainfo.clone(), content_dir },
         );
 
         let handle = tokio::spawn(async move { torrent.start_session().await });
@@ -678,16 +681,20 @@ impl SessionManager {
         let name = metainfo.info.mode.name().to_string();
         let size_bytes = u64::try_from(metainfo.info.total_size()).expect("size is non-negative");
 
-        let (torrent, tx, progress_rx) = Torrent::from_torrent_info(
-            self.peer_id,
-            metainfo.clone(),
-            tracker.clone(),
-            dht.cloned(),
-            self.storage.clone(),
-            shutdown_rx.clone(),
-            self.config.torrents_dir.clone(),
-            self.event_bus.clone(),
-            self.config.unchoke_slots_limit as usize,
+        let ctx = TorrentContext {
+            peer_id: self.peer_id,
+            tracker_client: tracker.clone(),
+            dht_client: dht.cloned(),
+            storage: self.storage.clone(),
+            shutdown_rx: shutdown_rx.clone(),
+            torrents_dir: self.config.torrents_dir.clone(),
+            event_bus: self.event_bus.clone(),
+            unchoke_slots: self.config.unchoke_slots_limit as usize,
+        };
+
+        let (torrent, tx, progress_rx) = Torrent::new(
+            ctx,
+            TorrentSource::Torrent(metainfo.clone()),
         );
 
         let handle = tokio::spawn(async move { torrent.start_session().await });
@@ -747,16 +754,20 @@ impl SessionManager {
             .clone()
             .unwrap_or_else(|| info_hash.to_string());
 
-        let (torrent, tx, progress_rx) = Torrent::from_magnet(
-            self.peer_id,
-            magnet,
-            tracker.clone(),
-            dht.cloned(),
-            self.storage.clone(),
-            shutdown_rx.clone(),
-            self.config.torrents_dir.clone(),
-            self.event_bus.clone(),
-            self.config.unchoke_slots_limit as usize,
+        let ctx = TorrentContext {
+            peer_id: self.peer_id,
+            tracker_client: tracker.clone(),
+            dht_client: dht.cloned(),
+            storage: self.storage.clone(),
+            shutdown_rx: shutdown_rx.clone(),
+            torrents_dir: self.config.torrents_dir.clone(),
+            event_bus: self.event_bus.clone(),
+            unchoke_slots: self.config.unchoke_slots_limit as usize,
+        };
+
+        let (torrent, tx, progress_rx) = Torrent::new(
+            ctx,
+            TorrentSource::Magnet(magnet),
         );
 
         let handle = tokio::spawn(async move { torrent.start_session().await });
