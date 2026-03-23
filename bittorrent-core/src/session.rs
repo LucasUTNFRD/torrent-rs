@@ -142,7 +142,7 @@ pub enum SessionCommand {
 }
 
 // Re-export detail types from detail module
-pub use crate::detail::{FileInfo, PeerSnapshot, TorrentDetail, TorrentMeta, TrackerStatus};
+pub use crate::detail::{PeerSnapshot, TorrentDetail, TorrentMeta, TrackerStatus};
 
 /// Errors that can occur in session operations.
 #[derive(Debug, thiserror::Error)]
@@ -416,40 +416,7 @@ impl SessionManager {
         #[cfg(feature = "sim")]
         let tracker = Arc::new(TrackerHandler::new_noop());
 
-        let dht: Option<Arc<DhtHandler>> = if self.config.enable_dht {
-            let config_dir = &self.config.config_dir;
-            let dht_config = DhtConfig {
-                id_file_path: Some(config_dir.join("node.id")),
-                state_file_path: Some(config_dir.join("dht_state.dat")),
-                port: self.config.listen_addr.port(),
-            };
-
-            match DhtHandler::with_config(dht_config).await {
-                Ok(dht) => {
-                    tracing::info!("DHT node created, bootstrapping...");
-                    match dht.bootstrap().await {
-                        Ok(node_id) => {
-                            tracing::info!(
-                                "DHT bootstrapped successfully with node ID: {:?}",
-                                node_id
-                            );
-                            Some(Arc::new(dht))
-                        }
-                        Err(e) => {
-                            tracing::warn!("DHT bootstrap failed: {}, continuing without DHT", e);
-                            None
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to create DHT node: {}, continuing without DHT", e);
-                    None
-                }
-            }
-        } else {
-            tracing::info!("DHT disabled by configuration");
-            None
-        };
+        let dht = self.initialize_dht().await;
 
         // Ensure torrents directory exists
         if let Err(e) = std::fs::create_dir_all(&self.config.torrents_dir) {
@@ -575,6 +542,41 @@ impl SessionManager {
         }
     }
 
+    /// Initialize DHT if enabled. Handles graceful degradation on failure.
+    async fn initialize_dht(&self) -> Option<Arc<DhtHandler>> {
+        if !self.config.enable_dht {
+            tracing::info!("DHT disabled by configuration");
+            return None;
+        }
+
+        let config_dir = &self.config.config_dir;
+        let dht_config = DhtConfig {
+            id_file_path: Some(config_dir.join("node.id")),
+            state_file_path: Some(config_dir.join("dht_state.dat")),
+            port: self.config.listen_addr.port(),
+        };
+
+        let dht = DhtHandler::with_config(dht_config)
+            .await
+            .inspect_err(|e| {
+                tracing::warn!("Failed to create DHT node: {e}, continuing without DHT");
+            })
+            .ok()?;
+
+        tracing::info!("DHT node created, bootstrapping...");
+
+        if let Err(e) = dht.bootstrap().await {
+            tracing::warn!("DHT bootstrap failed: {e}, continuing without DHT");
+            return None;
+        }
+
+        tracing::info!(
+            "DHT bootstrapped successfully with node ID: {:?}",
+            dht.node_id()
+        );
+        Some(Arc::new(dht))
+    }
+
     /// Helper to forward a oneshot-bearing message to a torrent actor and await the reply.
     /// Handles the common pattern of: lookup entry, clone channel, send message, await response.
     async fn query_torrent<T>(
@@ -632,7 +634,10 @@ impl SessionManager {
 
         let (torrent, tx, progress_rx) = Torrent::new(
             ctx,
-            TorrentSource::Seed { torrent_info: metainfo.clone(), content_dir },
+            TorrentSource::Seed {
+                torrent_info: metainfo.clone(),
+                content_dir,
+            },
         );
 
         let handle = tokio::spawn(async move { torrent.start_session().await });
@@ -692,10 +697,8 @@ impl SessionManager {
             unchoke_slots: self.config.unchoke_slots_limit as usize,
         };
 
-        let (torrent, tx, progress_rx) = Torrent::new(
-            ctx,
-            TorrentSource::Torrent(metainfo.clone()),
-        );
+        let (torrent, tx, progress_rx) =
+            Torrent::new(ctx, TorrentSource::Torrent(metainfo.clone()));
 
         let handle = tokio::spawn(async move { torrent.start_session().await });
 
@@ -765,10 +768,7 @@ impl SessionManager {
             unchoke_slots: self.config.unchoke_slots_limit as usize,
         };
 
-        let (torrent, tx, progress_rx) = Torrent::new(
-            ctx,
-            TorrentSource::Magnet(magnet),
-        );
+        let (torrent, tx, progress_rx) = Torrent::new(ctx, TorrentSource::Magnet(magnet));
 
         let handle = tokio::spawn(async move { torrent.start_session().await });
 

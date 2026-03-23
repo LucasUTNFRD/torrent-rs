@@ -205,6 +205,15 @@ pub enum TorrentMessage {
     GetTrackerStatuses {
         resp: oneshot::Sender<Vec<TrackerStatus>>,
     },
+    /// Update tracker status (from announce task)
+    TrackerUpdate {
+        url: Url,
+        status: TrackerState,
+        seeder_count: Option<u32>,
+        leecher_count: Option<u32>,
+        peers_received: u32,
+        error: Option<String>,
+    },
     /// Query torrent detail (files, metadata) for UI/TUI
     GetTorrentDetail {
         resp: oneshot::Sender<TorrentDetail>,
@@ -219,13 +228,6 @@ pub struct Metrics {
     pub peers_discovered: AtomicUsize,
 }
 
-#[derive(Debug, Clone)]
-struct InternalTrackerState {
-    url: Url,
-    error: Option<String>,
-    last_report: Option<chrono::DateTime<chrono::Utc>>,
-}
-
 //
 // TORRENT Control Structure
 //
@@ -237,8 +239,8 @@ pub struct Torrent {
     /// metadata and metadata state of the torrent
     metadata: Metadata,
     state: TorrentState,
-    // TODO: Use crate::detail::TrackerStatus  instead of InternalTrackerState
-    trackers: HashMap<Url, InternalTrackerState>,
+    /// Tracker statuses, keyed by announce URL
+    trackers: HashMap<Url, TrackerStatus>,
 
     tracker_client: Arc<TrackerHandler>,
     dht_client: Option<Arc<DhtHandler>>,
@@ -317,10 +319,14 @@ impl Torrent {
                         .map(|u| {
                             (
                                 u.clone(),
-                                InternalTrackerState {
-                                    url: u,
-                                    error: None,
-                                    last_report: None,
+                                TrackerStatus {
+                                    url: u.to_string(),
+                                    tier: None,
+                                    seeder_count: None,
+                                    leecher_count: None,
+                                    peers_received: 0,
+                                    status: TrackerState::Idle,
+                                    last_error: None,
                                 },
                             )
                         })
@@ -374,7 +380,7 @@ impl Torrent {
     }
 
     /// Helper to parse trackers from TorrentInfo
-    fn parse_trackers(torrent_info: &TorrentInfo) -> HashMap<Url, InternalTrackerState> {
+    fn parse_trackers(torrent_info: &TorrentInfo) -> HashMap<Url, TrackerStatus> {
         torrent_info
             .all_trackers()
             .into_iter()
@@ -382,10 +388,14 @@ impl Torrent {
                 Url::parse(&url).ok().map(|u| {
                     (
                         u.clone(),
-                        InternalTrackerState {
-                            url: u,
-                            error: None,
-                            last_report: None,
+                        TrackerStatus {
+                            url,
+                            tier: None,
+                            seeder_count: None,
+                            leecher_count: None,
+                            peers_received: 0,
+                            status: TrackerState::Idle,
+                            last_error: None,
                         },
                     )
                 })
@@ -399,7 +409,7 @@ impl Torrent {
         ctx: TorrentContext,
         info_hash: InfoHash,
         metadata: Metadata,
-        trackers: HashMap<Url, InternalTrackerState>,
+        trackers: HashMap<Url, TrackerStatus>,
         bitfield: Bitfield,
         state: TorrentState,
         content_dir: Option<PathBuf>,
@@ -932,29 +942,24 @@ impl Torrent {
                 let _ = resp.send(snapshots);
             }
             TorrentMessage::GetTrackerStatuses { resp } => {
-                let statuses: Vec<TrackerStatus> = self
-                    .trackers
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, (url, state))| {
-                        TrackerStatus {
-                            url: url.to_string(),
-                            tier: Some(idx), // Trackers are ordered by tier in the torrent file
-                            seeder_count: None, // TODO: query from tracker client
-                            leecher_count: None, // TODO: query from tracker client
-                            peers_received: 0, // TODO: query from tracker client
-                            status: if state.error.is_some() {
-                                TrackerState::Error
-                            } else if state.last_report.is_some() {
-                                TrackerState::Ok
-                            } else {
-                                TrackerState::Idle
-                            },
-                            last_error: state.error.clone(),
-                        }
-                    })
-                    .collect();
+                let statuses: Vec<TrackerStatus> = self.trackers.values().cloned().collect();
                 let _ = resp.send(statuses);
+            }
+            TorrentMessage::TrackerUpdate {
+                url,
+                status,
+                seeder_count,
+                leecher_count,
+                peers_received,
+                error,
+            } => {
+                if let Some(tracker) = self.trackers.get_mut(&url) {
+                    tracker.status = status;
+                    tracker.seeder_count = seeder_count;
+                    tracker.leecher_count = leecher_count;
+                    tracker.peers_received = peers_received;
+                    tracker.last_error = error;
+                }
             }
             TorrentMessage::GetTorrentDetail { resp } => {
                 // Build metadata from the Torrent's stored metadata
@@ -1037,26 +1042,8 @@ impl Torrent {
                             .collect();
 
                         // Get live tracker statuses
-                        let trackers: Vec<TrackerStatus> = self
-                            .trackers
-                            .iter()
-                            .enumerate()
-                            .map(|(idx, (url, state))| TrackerStatus {
-                                url: url.to_string(),
-                                tier: Some(idx),
-                                seeder_count: None,
-                                leecher_count: None,
-                                peers_received: 0,
-                                status: if state.error.is_some() {
-                                    TrackerState::Error
-                                } else if state.last_report.is_some() {
-                                    TrackerState::Ok
-                                } else {
-                                    TrackerState::Idle
-                                },
-                                last_error: state.error.clone(),
-                            })
-                            .collect();
+                        let trackers: Vec<TrackerStatus> =
+                            self.trackers.values().cloned().collect();
 
                         let detail = TorrentDetail {
                             meta: m,
@@ -1454,53 +1441,83 @@ impl Torrent {
         );
 
         // Spawn tracker announce tasks
-        for announce_url in self.trackers.keys() {
+        for (announce_url, _tracker_status) in self.trackers.iter() {
             let tracker_client = self.tracker_client.clone();
             let info_hash = self.info_hash;
             let seed = self.state == TorrentState::Seeding;
-            // TODO: Why use .to_string()?
+            let announce_url = announce_url.clone();
             let announce = announce_url.to_string();
             let discovered_peers_tx = discovered_peers_tx.clone();
-            let _torrent_tx = self.tx.clone();
+            let torrent_tx = self.tx.clone();
             let event_bus_tx = self.event_bus.torrent_tx.clone();
             tokio::spawn(async move {
-                loop {
-                    let response = tracker_client
-                        .announce(info_hash, announce.clone(), client_state)
-                        .await;
+                // Signal that we're starting to announce
+                let _ = torrent_tx
+                    .send(TorrentMessage::TrackerUpdate {
+                        url: announce_url.clone(),
+                        status: TrackerState::Announcing,
+                        seeder_count: None,
+                        leecher_count: None,
+                        peers_received: 0,
+                        error: None,
+                    })
+                    .await;
 
-                    if let Err(e) = response {
+                let response = tracker_client
+                    .announce(info_hash, announce.clone(), client_state)
+                    .await;
+
+                match response {
+                    Err(e) => {
                         tracing::warn!("Failed to announce to tracker {}: {}", announce, e);
+                        let _ = torrent_tx
+                            .send(TorrentMessage::TrackerUpdate {
+                                url: announce_url,
+                                status: TrackerState::Error,
+                                seeder_count: None,
+                                leecher_count: None,
+                                peers_received: 0,
+                                error: Some(format!("{:?}", e)),
+                            })
+                            .await;
                         let _ =
                             event_bus_tx.send(crate::events::torrent::TorrentEvent::TrackerError {
                                 url: announce.clone(),
                                 error: format!("{:?}", e),
                                 times_in_row: 1,
                             });
-                        return;
                     }
+                    Ok(response) => {
+                        let peers_count = response.peers.len() as u32;
+                        let _ = torrent_tx
+                            .send(TorrentMessage::TrackerUpdate {
+                                url: announce_url,
+                                status: TrackerState::Ok,
+                                seeder_count: Some(response.seeders as u32),
+                                leecher_count: Some(response.leechers as u32),
+                                peers_received: peers_count,
+                                error: None,
+                            })
+                            .await;
+                        let _ = event_bus_tx.send(
+                            crate::events::torrent::TorrentEvent::TrackerAnnounced {
+                                url: announce.clone(),
+                                peers_received: peers_count,
+                            },
+                        );
 
-                    let Ok(response) = response else {
-                        tracing::warn!("Tracker failure");
-                        break;
-                    };
+                        if !seed {
+                            let _ = discovered_peers_tx.send(response.peers).await;
+                        }
 
-                    let _ =
-                        event_bus_tx.send(crate::events::torrent::TorrentEvent::TrackerAnnounced {
-                            url: announce.clone(),
-                            peers_received: response.peers.len() as u32,
-                        });
-
-                    let sleep_duration = response.interval;
-                    if !seed {
-                        let _ = discovered_peers_tx.send(response.peers).await;
+                        // Sleep for the interval then loop back to announce again
+                        let sleep_duration = response.interval;
+                        sleep(Duration::from_secs(
+                            u64::try_from(sleep_duration)
+                                .expect("tracker interval must be non-negative"),
+                        ))
+                        .await;
                     }
-
-                    sleep(Duration::from_secs(
-                        u64::try_from(sleep_duration)
-                            .expect("tracker interval must be  non-negative"),
-                    ))
-                    .await;
                 }
             });
         }
