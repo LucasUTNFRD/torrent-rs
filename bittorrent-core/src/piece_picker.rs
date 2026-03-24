@@ -324,6 +324,7 @@ impl PieceManager {
     }
 
     /// Calculate progress for each file in the torrent
+    #[allow(dead_code)]
     pub fn get_file_progress(&self) -> Vec<f64> {
         let files = self.torrent_info.files();
         let mut file_progress = Vec::with_capacity(files.len());

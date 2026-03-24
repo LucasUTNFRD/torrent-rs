@@ -14,7 +14,9 @@ pub enum ExtensionError {
     InvalidFieldType,
 }
 
+#[allow(dead_code)]
 pub const EXTENSION_NAME_METADATA: &str = "ut_metadata";
+#[allow(dead_code)]
 pub const EXTENSION_NAME_PEX: &str = "ut_pex";
 
 /// [docs](https://www.libtorrent.org/extension_protocol.html)
@@ -160,7 +162,9 @@ impl ExtendedHandshake {
         self
     }
 
-    /// Set the IP address this peer sees you as (compact representation)
+    // ── Builder methods for optional fields ─────────────────────────────────────
+
+    #[allow(dead_code)]
     pub fn with_yourip(mut self, ip: IpAddr) -> Self {
         let octets = match ip {
             IpAddr::V4(v4) => v4.octets().to_vec(),
@@ -171,23 +175,25 @@ impl ExtendedHandshake {
         self
     }
 
-    /// Set IPv4 address (4 bytes compact representation)
+    #[allow(dead_code)]
     pub fn with_ipv4(mut self, ip: Bytes) -> Self {
         self.ipv4 = Some(ip);
         self
     }
 
-    /// Set IPv6 address (16 bytes compact representation)
+    #[allow(dead_code)]
     pub fn with_ipv6(mut self, ip: Bytes) -> Self {
         self.ipv6 = Some(ip);
         self
     }
 
+    #[allow(dead_code)]
     pub fn with_port(mut self, port: i64) -> Self {
         self.p = Some(port);
         self
     }
 
+    #[allow(dead_code)]
     pub fn with_metadata_size(mut self, size: i64) -> Self {
         self.metadata_size = Some(size);
         self
@@ -218,6 +224,7 @@ pub struct RawExtendedMessage {
 
 /// ut_metadata extension message types
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum MetadataMessage {
     /// Request metadata piece
     Request { piece: u32 },

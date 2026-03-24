@@ -142,7 +142,7 @@ pub enum SessionCommand {
 }
 
 // Re-export detail types from detail module
-pub use crate::detail::{PeerSnapshot, TorrentDetail, TorrentMeta, TrackerStatus};
+pub use crate::detail::{PeerSnapshot, TorrentDetail, TrackerStatus};
 
 /// Errors that can occur in session operations.
 #[derive(Debug, thiserror::Error)]
@@ -364,6 +364,7 @@ impl Session {
 }
 
 /// Metadata stored for each active torrent.
+#[allow(dead_code)]
 struct TorrentEntry {
     /// Channel to send messages to the torrent task
     tx: mpsc::Sender<TorrentMessage>,

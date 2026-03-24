@@ -52,6 +52,7 @@ pub enum ConnectionError {
     Protocol(String),
 
     #[error("Connection timeout")]
+    #[allow(dead_code)]
     Timeout,
 
     #[error("Invalid handshake")]
@@ -121,7 +122,9 @@ impl BitfieldState {
     }
 }
 
+#[allow(dead_code)]
 pub const EXTENSION_NAME_METADATA: &str = "ut_metadata";
+#[allow(dead_code)]
 pub const EXTENSION_NAME_PEX: &str = "ut_pex";
 
 const UT_METADATA_ID: u8 = 1;
@@ -140,6 +143,7 @@ pub struct PeerInfo {
     pub am_choking: bool,    // we are choking them
     pub am_interested: bool, // we are interested in them
 
+    #[allow(dead_code)]
     pub snubbed: bool, // no piece in >60s
 
     // Extension support (set during handshake)
@@ -207,6 +211,7 @@ struct PeerConnection {
 }
 
 impl PeerConnection {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         pid: Pid,
         stream: TcpStream,
@@ -915,6 +920,7 @@ impl PeerConnection {
 // Clone-able. The info Arc lets the choker read state without a message round
 // trip. The tx channel is for sending commands into the peer task.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct PeerHandle {
     pub pid: Pid,
     pub peer_addr: SocketAddr,

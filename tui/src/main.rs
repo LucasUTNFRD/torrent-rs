@@ -311,10 +311,7 @@ async fn handle_session_event(event: SessionEvent, app: &mut App) {
 }
 
 fn ui(f: &mut Frame, app: &App, dialog: &DialogState) {
-    let mut dialog_len = 0;
-    if !matches!(dialog, DialogState::None) {
-        dialog_len = 3;
-    }
+    let dialog_len = if matches!(dialog, DialogState::None) { 0 } else { 3 };
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -388,20 +385,20 @@ fn render_status_bar(f: &mut Frame, area: Rect, app: &App) {
     let total = app.torrent_order.len();
 
     let text = Line::from(vec![
-        Span::raw(format!(" Torrents: {} ", total)),
+        Span::raw(format!(" Torrents: {total} ")),
         Span::raw("("),
         Span::styled(
-            format!("Downloading: {}", downloading),
+            format!("Downloading: {downloading}"),
             Style::default().fg(Color::Blue),
         ),
         Span::raw(", "),
         Span::styled(
-            format!("Seeding: {}", seeding),
+            format!("Seeding: {seeding}"),
             Style::default().fg(Color::Green),
         ),
         Span::raw(", "),
         Span::styled(
-            format!("Paused: {}", paused),
+            format!("Paused: {paused}"),
             Style::default().fg(Color::Gray),
         ),
         Span::raw(")"),
@@ -427,7 +424,7 @@ fn render_dialog(f: &mut Frame, area: Rect, app: &App, dialog: &DialogState) {
                 .borders(Borders::ALL)
                 .title("Add Torrent")
                 .style(Style::default().fg(Color::Yellow)),
-            format!("Path or magnet URI: {}_", input),
+            format!("Path or magnet URI: {input}_"),
             Color::Yellow,
         ),
         DialogState::ConfirmRemove(id) => {
@@ -441,14 +438,14 @@ fn render_dialog(f: &mut Frame, area: Rect, app: &App, dialog: &DialogState) {
                     .borders(Borders::ALL)
                     .title("Confirm Remove")
                     .style(Style::default().fg(Color::Red)),
-                format!("Remove \"{}\"? [y] yes  [Esc] cancel", name),
+                format!("Remove \"{name}\"? [y] yes  [Esc] cancel"),
                 Color::Red,
             )
         }
         DialogState::None => match &app.status {
             app::Status::Error(err) => (
                 Block::default().borders(Borders::ALL).title("Status"),
-                format!("Error: {}", err),
+                format!("Error: {err}"),
                 Color::Red,
             ),
             app::Status::Info(msg) => (
@@ -486,6 +483,7 @@ fn torrent_row(progress: &TorrentProgress) -> Line<'static> {
     let progress_bar = if progress.total_bytes == 0 {
         "[????????????]".to_string()
     } else {
+        #[allow(clippy::cast_precision_loss)]
         let pct = (progress.downloaded_bytes as f64 / progress.total_bytes as f64) * 100.0;
         progress_bar(pct, 12)
     };
@@ -517,7 +515,7 @@ fn torrent_row(progress: &TorrentProgress) -> Line<'static> {
         Span::raw("  ul:"),
         Span::styled(ul_rate, dim_style),
         Span::raw("  peers:"),
-        Span::raw(format!("{:>3}", peers)),
+        Span::raw(format!("{peers:>3}")),
         Span::raw("  "),
         Span::styled(eta, dim_style),
     ];
@@ -643,6 +641,7 @@ fn render_files(f: &mut Frame, area: Rect, app: &App) {
         .files
         .iter()
         .map(|fi| {
+            #[allow(clippy::cast_precision_loss)]
             let pct = if fi.size_bytes > 0 {
                 (fi.downloaded_bytes as f64 / fi.size_bytes as f64) * 100.0
             } else {
@@ -821,6 +820,9 @@ fn render_trackers(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(table, area);
 }
 
+#[allow(clippy::cast_precision_loss)]
+#[allow(clippy::cast_sign_loss)]
+#[allow(clippy::cast_possible_truncation)]
 fn progress_bar(pct: f64, width: usize) -> String {
     let filled = ((pct / 100.0) * width as f64).round() as usize;
     let filled = filled.min(width);
@@ -835,6 +837,7 @@ fn fmt_size(bytes: u64) -> String {
     let kb = 1024.0;
     let mb = kb * 1024.0;
     let gb = mb * 1024.0;
+    #[allow(clippy::cast_precision_loss)]
     let bytes = bytes as f64;
     if bytes >= gb {
         format!("{:.2} GB", bytes / gb)
@@ -865,7 +868,7 @@ fn fmt_eta(eta: Option<u64>) -> String {
 
 fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
-        format!("{:<width$}", s, width = max)
+        format!("{s:<max$}")
     } else {
         format!("{}…", s.chars().take(max - 1).collect::<String>())
     }

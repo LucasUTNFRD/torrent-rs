@@ -2,6 +2,7 @@ use crate::ema::EmaRate;
 
 /// Tracks per-peer upload/download rates and choking algorithm counters.
 #[derive(Debug, Default)]
+#[allow(dead_code)]
 pub struct PeerMetrics {
     download: EmaRate,
     total_downloaded: u64,
@@ -20,6 +21,7 @@ impl PeerMetrics {
     }
 
     /// Reset timing windows. Call when a peer slot is reused.
+    #[allow(dead_code)]
     pub fn reset_timing(&mut self) {
         self.download.reset();
         self.upload.reset();
@@ -42,10 +44,12 @@ impl PeerMetrics {
         self.download.rate()
     }
 
+    #[allow(dead_code)]
     pub fn get_download_rate(&self) -> u64 {
         self.download.rate() as u64
     }
 
+    #[allow(dead_code)]
     pub fn get_bytes_downloaded(&self) -> u64 {
         self.total_downloaded
     }
@@ -57,6 +61,7 @@ impl PeerMetrics {
 
     // ── Upload ───────────────────────────────────────────────────────────────
 
+    #[allow(dead_code)]
     pub fn record_upload(&mut self, bytes: u64) {
         self.total_uploaded += bytes;
         self.upload.record(bytes);
@@ -68,10 +73,12 @@ impl PeerMetrics {
         self.upload.rate()
     }
 
+    #[allow(dead_code)]
     pub fn get_upload_rate(&self) -> u64 {
         self.upload.rate() as u64
     }
 
+    #[allow(dead_code)]
     pub fn get_bytes_uploaded(&self) -> u64 {
         self.total_uploaded
     }
@@ -83,15 +90,18 @@ impl PeerMetrics {
 
     // ── Choking counters ─────────────────────────────────────────────────────
 
+    #[allow(dead_code)]
     pub fn uploaded_in_last_round(&self) -> u64 {
         self.uploaded_in_last_round
     }
 
+    #[allow(dead_code)]
     pub fn uploaded_since_unchoked(&self) -> u64 {
         self.uploaded_since_unchoked
     }
 
     /// Call at each unchoke interval.
+    #[allow(dead_code)]
     pub fn reset_round_counters(&mut self) {
         self.uploaded_in_last_round = 0;
     }
