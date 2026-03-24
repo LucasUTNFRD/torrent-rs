@@ -311,7 +311,11 @@ async fn handle_session_event(event: SessionEvent, app: &mut App) {
 }
 
 fn ui(f: &mut Frame, app: &App, dialog: &DialogState) {
-    let dialog_len = if matches!(dialog, DialogState::None) { 0 } else { 3 };
+    let dialog_len = if matches!(dialog, DialogState::None) {
+        0
+    } else {
+        3
+    };
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
