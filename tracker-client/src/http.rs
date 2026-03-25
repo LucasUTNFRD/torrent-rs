@@ -116,7 +116,6 @@ impl HttpTrackerClient {
 
         //Error Checking
         if let Some(failure_reason) = dict.get_str(KEY_FAILURE_REASON) {
-            println!("{failure_reason}");
             return Err(TrackerError::TrackerError(failure_reason.to_string()));
         }
         if let Some(warning_message) = dict.get_str(KEY_WARNING_MESSAGE) {

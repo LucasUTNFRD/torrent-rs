@@ -6,6 +6,7 @@ use std::{
 };
 
 use crate::{
+    detail::Direction,
     metrics::counters::inc_connected,
     protocol::{
         extension::{
@@ -35,7 +36,6 @@ use tracing::debug;
 
 use crate::{
     bitfield::{Bitfield, BitfieldError},
-    events::peer::Direction,
     metrics::counters,
     net::{ConnectTimeout, TcpStream},
     peer::{PeerMessage, metrics::PeerMetrics},
@@ -52,6 +52,7 @@ pub enum ConnectionError {
     Protocol(String),
 
     #[error("Connection timeout")]
+    #[allow(dead_code)]
     Timeout,
 
     #[error("Invalid handshake")]
@@ -121,7 +122,9 @@ impl BitfieldState {
     }
 }
 
+#[allow(dead_code)]
 pub const EXTENSION_NAME_METADATA: &str = "ut_metadata";
+#[allow(dead_code)]
 pub const EXTENSION_NAME_PEX: &str = "ut_pex";
 
 const UT_METADATA_ID: u8 = 1;
@@ -140,7 +143,14 @@ pub struct PeerInfo {
     pub am_choking: bool,    // we are choking them
     pub am_interested: bool, // we are interested in them
 
+    #[allow(dead_code)]
     pub snubbed: bool, // no piece in >60s
+
+    // Extension support (set during handshake)
+    pub supports_extended: bool,
+    pub dht_enabled: bool,
+    pub download_rate: f64,
+    pub upload_rate: f64,
 }
 
 impl PeerInfo {
@@ -153,6 +163,10 @@ impl PeerInfo {
             am_choking: true,
             am_interested: false,
             snubbed: false,
+            supports_extended: false,
+            dht_enabled: false,
+            download_rate: 0.0,
+            upload_rate: 0.0,
         }
     }
 }
@@ -172,6 +186,7 @@ struct PeerConnection {
 
     remote_extensions: HashMap<String, i64>,
     supports_extended: bool,
+    dht_enabled: bool,
 
     // remote peer bitfield
     bitfield: BitfieldState,
@@ -196,6 +211,7 @@ struct PeerConnection {
 }
 
 impl PeerConnection {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         pid: Pid,
         stream: TcpStream,
@@ -204,6 +220,7 @@ impl PeerConnection {
         torrent_tx: mpsc::Sender<TorrentMessage>,
         cmd_rx: mpsc::Receiver<PeerMessage>,
         supports_extended: bool,
+        dht_enabled: bool,
     ) -> Self {
         let framed = Framed::new(stream, MessageCodec {});
         let (sink, stream) = framed.split();
@@ -229,6 +246,7 @@ impl PeerConnection {
             last_recv_msg: Instant::now(),
             last_block_request: Instant::now(),
             metrics: PeerMetrics::new(),
+            dht_enabled,
         }
     }
 
@@ -236,7 +254,7 @@ impl PeerConnection {
         stream: &mut TcpStream,
         local_peer_id: PeerID,
         info_hash: InfoHash,
-    ) -> Result<(PeerID, bool), ConnectionError> {
+    ) -> Result<(PeerID, bool, bool), ConnectionError> /* (peer_id, ext, dht)*/ {
         let handshake = Handshake::new(local_peer_id, info_hash);
         stream.write_all(&handshake.to_bytes()).await?;
 
@@ -252,7 +270,11 @@ impl PeerConnection {
             return Err(ConnectionError::SelfConnection);
         }
 
-        Ok((remote.peer_id, remote.support_extended_message()))
+        Ok((
+            remote.peer_id,
+            remote.support_extended_message(),
+            remote.support_dht(),
+        ))
     }
 
     // ── Event loop ────────────────────────────────────────────────────────────
@@ -261,6 +283,10 @@ impl PeerConnection {
 
         if self.supports_extended {
             self.send_extended_handshake().await?;
+        }
+        if self.dht_enabled {
+            // TODO: send real port
+            self.sink.send(Message::Port { port: 6881 }).await?;
         }
 
         let mut heartbeat = interval(Duration::from_secs(60));
@@ -335,6 +361,13 @@ impl PeerConnection {
 
     fn metric_update(&mut self) {
         self.metrics.update_rates();
+
+        {
+            let mut info = self.peer_info.write().unwrap();
+            info.download_rate = self.metrics.download_rate_f64();
+            info.upload_rate = self.metrics.upload_rate_f64();
+        }
+
         let current_rate = self.metrics.download_rate_f64();
 
         if self.slow_start {
@@ -887,6 +920,7 @@ impl PeerConnection {
 // Clone-able. The info Arc lets the choker read state without a message round
 // trip. The tx channel is for sending commands into the peer task.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct PeerHandle {
     pub pid: Pid,
     pub peer_addr: SocketAddr,
@@ -923,12 +957,17 @@ pub fn spawn_outbound(
     tokio::spawn(async move {
         let result: Result<(), ConnectionError> = async {
             let mut stream = TcpStream::connect_timeout(&addr, CONNECTION_TIMEOUT).await?;
-            let (remote_peer_id, supports_extended) =
+            let (remote_peer_id, supports_extended, dht_enabled) =
                 PeerConnection::handshake(&mut stream, local_peer_id, info_hash).await?;
             inc_connected();
 
-            // Update real peer_id now that handshake is done
-            info.write().unwrap().peer_id = remote_peer_id;
+            // Update peer info with handshake results
+            {
+                let mut info_guard = info.write().unwrap();
+                info_guard.peer_id = remote_peer_id;
+                info_guard.supports_extended = supports_extended;
+                info_guard.dht_enabled = dht_enabled;
+            }
 
             PeerConnection::new(
                 pid,
@@ -938,6 +977,7 @@ pub fn spawn_outbound(
                 torrent_tx,
                 rx,
                 supports_extended,
+                dht_enabled,
             )
             .run()
             .await
@@ -964,6 +1004,7 @@ pub fn spawn_inbound(
     torrent_tx: mpsc::Sender<TorrentMessage>,
     remote_peer_id: PeerID,
     supports_ext: bool,
+    dht_enabled: bool,
 ) -> PeerHandle {
     let (tx, rx) = mpsc::channel(256);
     let info = Arc::new(RwLock::new(PeerInfo::new(*CLIENT_ID, Direction::Inbound)));
@@ -982,7 +1023,12 @@ pub fn spawn_inbound(
             //     PeerConnection::handshake(&mut stream, local_peer_id, info_hash).await?;
 
             inc_connected();
-            info.write().unwrap().peer_id = remote_peer_id;
+            {
+                let mut info_guard = info.write().unwrap();
+                info_guard.peer_id = remote_peer_id;
+                info_guard.supports_extended = supports_ext;
+                info_guard.dht_enabled = dht_enabled;
+            }
 
             PeerConnection::new(
                 pid,
@@ -992,6 +1038,7 @@ pub fn spawn_inbound(
                 torrent_tx,
                 rx,
                 supports_ext,
+                dht_enabled,
             )
             .run()
             .await

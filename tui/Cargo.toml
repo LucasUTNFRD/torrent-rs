@@ -1,0 +1,17 @@
+[package]
+name = "tui"
+version = "0.1.0"
+license.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+tokio.workspace = true
+ratatui = "0.30.0"
+crossterm = { version = "0.28.0", features = ["event-stream"] }
+bittorrent-core = { path = "../bittorrent-core/" }
+futures-util = "0.3"
+
+[lints]
+workspace = true

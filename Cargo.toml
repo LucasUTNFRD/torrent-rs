@@ -7,6 +7,7 @@ members = [
   "magnet-uri",
   "mainline-dht",
   "tracker-client",
+  "tui",
 ]
 
 resolver = "2"
@@ -32,6 +33,7 @@ tracing-subscriber = "0.3"
 console-subscriber = "0.5.0"
 rand = "0.10.0"
 metrics = "0.24.3"
+anyhow = "1.0"
 
 
 [workspace.lints.clippy]

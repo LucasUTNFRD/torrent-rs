@@ -42,7 +42,8 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt::init();
+    // tracing_subscriber::fmt::init();
+    console_subscriber::init();
 
     let cli = Cli::parse();
 
@@ -52,14 +53,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Commands::Download { source } => download_torrent(source).await?,
         Commands::Add { source } => add_torrent(source).await?,
-        Commands::List => list_torrents().await?,
-        Commands::Stats => show_stats().await?,
+        Commands::List => list_torrents(),
+        Commands::Stats => show_stats(),
     }
 
     Ok(())
 }
 
 async fn download_torrent(input: String) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::{self, Write};
+
     let config = SessionConfig::default();
     let session = Session::new(config);
 
@@ -69,7 +72,7 @@ async fn download_torrent(input: String) -> Result<(), Box<dyn std::error::Error
         session.add_torrent(&input).await?
     };
 
-    println!("Added torrent: {}", torrent_id);
+    println!("Added torrent: {torrent_id}");
 
     let mut metrics_rx = session.subscribe_torrent(torrent_id).await?;
     let mut event_rx = session.subscribe();
@@ -88,29 +91,34 @@ async fn download_torrent(input: String) -> Result<(), Box<dyn std::error::Error
             _ = metrics_rx.changed() => {
                 let m = metrics_rx.borrow().clone();
                 let progress = if m.total_pieces > 0 {
-                    m.verified_pieces as f64 / m.total_pieces as f64
+                    f64::from(m.verified_pieces) / f64::from(m.total_pieces)
                 } else {
                     0.0
                 };
-                print!("\r{:<20} | {:>8.2}% | {:>10} | {:>10} | {:>5}",
+                #[allow(clippy::cast_sign_loss)]
+                #[allow(clippy::cast_possible_truncation)]
+                let download_rate = m.download_rate as u64;
+                #[allow(clippy::cast_sign_loss)]
+                #[allow(clippy::cast_possible_truncation)]
+                let upload_rate = m.upload_rate as u64;
+                print!("{:<20} | {:>8.2}% | {:>10} | {:>10} | {:>5}",
                     truncate(&m.name, 20),
                     progress * 100.0,
-                    format_speed(m.download_rate as u64),
-                    format_speed(m.upload_rate as u64),
+                    format_speed(download_rate),
+                    format_speed(upload_rate),
                     m.connected_peers
                 );
-                use std::io::{self, Write};
                 io::stdout().flush().unwrap();
             }
 
             Ok(event) = event_rx.recv() => {
                 match event {
                     SessionEvent::TorrentCompleted(id) if id == torrent_id => {
-                        println!("\n\nTorrent {} completed!", id);
+                        println!("\n\nTorrent {id} completed!");
                         break;
                     }
                     SessionEvent::TorrentError(id, err) if id == torrent_id => {
-                        eprintln!("\n\nError in torrent {}: {}", id, err);
+                        eprintln!("\n\nError in torrent {id}: {err}");
                         break;
                     }
                     _ => {}
@@ -136,19 +144,17 @@ async fn add_torrent(input: String) -> Result<(), Box<dyn std::error::Error>> {
         session.add_torrent(&input).await?
     };
 
-    println!("Added torrent: {}", torrent_id);
+    println!("Added torrent: {torrent_id}");
     session.shutdown().await?;
     Ok(())
 }
 
-async fn list_torrents() -> Result<(), Box<dyn std::error::Error>> {
+fn list_torrents() {
     println!("Listing torrents (not implemented yet)");
-    Ok(())
 }
 
-async fn show_stats() -> Result<(), Box<dyn std::error::Error>> {
+fn show_stats() {
     println!("Show stats (not implemented yet)");
-    Ok(())
 }
 
 fn truncate(s: &str, max_len: usize) -> String {

@@ -21,7 +21,7 @@ use tokio::{
         mpsc::{self, UnboundedSender},
         oneshot, watch,
     },
-    task::JoinHandle,
+    task::{self, JoinHandle},
 };
 
 use mainline_dht::{DhtConfig, DhtHandler};
@@ -30,11 +30,11 @@ use tracker_client::TrackerHandler;
 use crate::{
     SessionConfig, TorrentProgress,
     events::SessionEvent,
-    metrics::counters::{self, incoming_connections},
+    metrics::counters::{self},
     net::TcpListener,
     protocol::peer_wire::Handshake,
     storage::{DiskStorage, StorageBackend},
-    torrent::{Torrent, TorrentError, TorrentMessage},
+    torrent::{Torrent, TorrentContext, TorrentError, TorrentMessage, TorrentSource},
     types::TorrentId,
     verify_torrent_file::verify_content,
 };
@@ -127,7 +127,22 @@ pub enum SessionCommand {
         addr: std::net::SocketAddr,
         resp: oneshot::Sender<Result<(), SessionError>>,
     },
+    GetTorrentDetail {
+        id: TorrentId,
+        resp: oneshot::Sender<Result<TorrentDetail, SessionError>>,
+    },
+    GetPeerSnapshots {
+        id: TorrentId,
+        resp: oneshot::Sender<Result<Vec<PeerSnapshot>, SessionError>>,
+    },
+    GetTrackerStatuses {
+        id: TorrentId,
+        resp: oneshot::Sender<Result<Vec<TrackerStatus>, SessionError>>,
+    },
 }
+
+// Re-export detail types from detail module
+pub use crate::detail::{PeerSnapshot, TorrentDetail, TrackerStatus};
 
 /// Errors that can occur in session operations.
 #[derive(Debug, thiserror::Error)]
@@ -152,6 +167,9 @@ pub enum SessionError {
 
     #[error("No peer discovery available: no trackers and DHT disabled")]
     NoPeerDiscovery,
+
+    #[error("Metadata not yet available for torrent: {0}. Waiting for peer connection...")]
+    MetadataPending(TorrentId),
 }
 
 impl Session {
@@ -317,9 +335,36 @@ impl Session {
     pub fn suscribe(&self) -> broadcast::Receiver<SessionEvent> {
         self.subscribe()
     }
+
+    pub async fn get_torrent_meta(&self, id: TorrentId) -> Result<TorrentDetail, SessionError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(SessionCommand::GetTorrentDetail { id, resp: tx })
+            .map_err(|_| SessionError::SessionClosed)?;
+        rx.await.map_err(|_| SessionError::SessionClosed)?
+    }
+
+    /// Get peer connection snapshots for a torrent
+    pub async fn get_peers(&self, id: TorrentId) -> Result<Vec<PeerSnapshot>, SessionError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(SessionCommand::GetPeerSnapshots { id, resp: tx })
+            .map_err(|_| SessionError::SessionClosed)?;
+        rx.await.map_err(|_| SessionError::SessionClosed)?
+    }
+
+    /// Get tracker statuses for a torrent
+    pub async fn get_trackers(&self, id: TorrentId) -> Result<Vec<TrackerStatus>, SessionError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(SessionCommand::GetTrackerStatuses { id, resp: tx })
+            .map_err(|_| SessionError::SessionClosed)?;
+        rx.await.map_err(|_| SessionError::SessionClosed)?
+    }
 }
 
 /// Metadata stored for each active torrent.
+#[allow(dead_code)]
 struct TorrentEntry {
     /// Channel to send messages to the torrent task
     tx: mpsc::Sender<TorrentMessage>,
@@ -331,6 +376,8 @@ struct TorrentEntry {
     name: String,
     /// Total size in bytes (0 if metadata not yet fetched)
     size_bytes: u64,
+    /// Torrent metadata (None for magnet links until metadata is fetched)
+    metainfo: Option<Arc<TorrentInfo>>,
 }
 
 /// Internal session manager that runs as a background task.
@@ -370,40 +417,7 @@ impl SessionManager {
         #[cfg(feature = "sim")]
         let tracker = Arc::new(TrackerHandler::new_noop());
 
-        let dht: Option<Arc<DhtHandler>> = if self.config.enable_dht {
-            let config_dir = &self.config.config_dir;
-            let dht_config = DhtConfig {
-                id_file_path: Some(config_dir.join("node.id")),
-                state_file_path: Some(config_dir.join("dht_state.dat")),
-                port: self.config.listen_addr.port(),
-            };
-
-            match DhtHandler::with_config(dht_config).await {
-                Ok(dht) => {
-                    tracing::info!("DHT node created, bootstrapping...");
-                    match dht.bootstrap().await {
-                        Ok(node_id) => {
-                            tracing::info!(
-                                "DHT bootstrapped successfully with node ID: {:?}",
-                                node_id
-                            );
-                            Some(Arc::new(dht))
-                        }
-                        Err(e) => {
-                            tracing::warn!("DHT bootstrap failed: {}, continuing without DHT", e);
-                            None
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to create DHT node: {}, continuing without DHT", e);
-                    None
-                }
-            }
-        } else {
-            tracing::info!("DHT disabled by configuration");
-            None
-        };
+        let dht = self.initialize_dht().await;
 
         // Ensure torrents directory exists
         if let Err(e) = std::fs::create_dir_all(&self.config.torrents_dir) {
@@ -436,7 +450,14 @@ impl SessionManager {
                     resp,
                 } => {
                     // 1. Validate metadate from .torrent with  content_dir
-                    let is_valid = verify_content(&content_dir, &info).expect("Failed to verify");
+                    let dir = content_dir.clone();
+                    let info_clone = info.clone();
+
+                    let is_valid = task::spawn_blocking(move || {
+                        verify_content(&dir, &info_clone).expect("Failed to verify")
+                    })
+                    .await
+                    .unwrap_or(false);
 
                     let result = if is_valid {
                         self.handle_seed_torrent(
@@ -500,8 +521,82 @@ impl SessionManager {
                     };
                     let _ = resp.send(result);
                 }
+                SessionCommand::GetTorrentDetail { id, resp } => {
+                    let result = self
+                        .query_torrent(id, |tx| TorrentMessage::GetTorrentDetail { resp: tx })
+                        .await;
+                    let _ = resp.send(result);
+                }
+                SessionCommand::GetPeerSnapshots { id, resp } => {
+                    let result = self
+                        .query_torrent(id, |tx| TorrentMessage::GetPeerSnapshots { resp: tx })
+                        .await;
+                    let _ = resp.send(result);
+                }
+                SessionCommand::GetTrackerStatuses { id, resp } => {
+                    let result = self
+                        .query_torrent(id, |tx| TorrentMessage::GetTrackerStatuses { resp: tx })
+                        .await;
+                    let _ = resp.send(result);
+                }
             }
         }
+    }
+
+    /// Initialize DHT if enabled. Handles graceful degradation on failure.
+    async fn initialize_dht(&self) -> Option<Arc<DhtHandler>> {
+        if !self.config.enable_dht {
+            tracing::info!("DHT disabled by configuration");
+            return None;
+        }
+
+        let config_dir = &self.config.config_dir;
+        let dht_config = DhtConfig {
+            id_file_path: Some(config_dir.join("node.id")),
+            state_file_path: Some(config_dir.join("dht_state.dat")),
+            port: self.config.listen_addr.port(),
+        };
+
+        let dht = DhtHandler::with_config(dht_config)
+            .await
+            .inspect_err(|e| {
+                tracing::warn!("Failed to create DHT node: {e}, continuing without DHT");
+            })
+            .ok()?;
+
+        tracing::info!("DHT node created, bootstrapping...");
+
+        if let Err(e) = dht.bootstrap().await {
+            tracing::warn!("DHT bootstrap failed: {e}, continuing without DHT");
+            return None;
+        }
+
+        tracing::info!(
+            "DHT bootstrapped successfully with node ID: {:?}",
+            dht.node_id()
+        );
+        Some(Arc::new(dht))
+    }
+
+    /// Helper to forward a oneshot-bearing message to a torrent actor and await the reply.
+    /// Handles the common pattern of: lookup entry, clone channel, send message, await response.
+    async fn query_torrent<T>(
+        &self,
+        id: TorrentId,
+        make_msg: impl FnOnce(oneshot::Sender<T>) -> TorrentMessage,
+    ) -> Result<T, SessionError> {
+        let (tx, rx) = oneshot::channel();
+        let torrent_tx = {
+            let sessions = self.sessions.read().unwrap();
+            sessions
+                .get(&id)
+                .map(|e| e.tx.clone())
+                .ok_or(SessionError::TorrentNotFound(id))?
+        };
+        torrent_tx
+            .try_send(make_msg(tx))
+            .map_err(|_| SessionError::SessionClosed)?;
+        rx.await.map_err(|_| SessionError::SessionClosed)
     }
 
     async fn handle_seed_torrent(
@@ -527,17 +622,23 @@ impl SessionManager {
         let name = metainfo.info.mode.name().to_string();
         let size_bytes = u64::try_from(metainfo.info.total_size()).expect("size is non-negative");
 
-        let (torrent, tx, progress_rx) = Torrent::as_seed(
-            self.peer_id,
-            content_dir,
-            metainfo,
-            tracker.clone(),
-            dht.cloned(),
-            self.storage.clone(),
-            shutdown_rx.clone(),
-            self.config.torrents_dir.clone(),
-            self.event_bus.clone(),
-            self.config.unchoke_slots_limit as usize,
+        let ctx = TorrentContext {
+            peer_id: self.peer_id,
+            tracker_client: tracker.clone(),
+            dht_client: dht.cloned(),
+            storage: self.storage.clone(),
+            shutdown_rx: shutdown_rx.clone(),
+            torrents_dir: self.config.torrents_dir.clone(),
+            event_bus: self.event_bus.clone(),
+            unchoke_slots: self.config.unchoke_slots_limit as usize,
+        };
+
+        let (torrent, tx, progress_rx) = Torrent::new(
+            ctx,
+            TorrentSource::Seed {
+                torrent_info: metainfo.clone(),
+                content_dir,
+            },
         );
 
         let handle = tokio::spawn(async move { torrent.start_session().await });
@@ -545,9 +646,10 @@ impl SessionManager {
         let entry = TorrentEntry {
             tx,
             handle,
-            progress_rx,
-            name,
+            progress_rx: progress_rx.clone(),
+            name: name.clone(),
             size_bytes,
+            metainfo: Some(Arc::new(metainfo)),
         };
 
         {
@@ -585,26 +687,29 @@ impl SessionManager {
         let name = metainfo.info.mode.name().to_string();
         let size_bytes = u64::try_from(metainfo.info.total_size()).expect("size is non-negative");
 
-        let (torrent, tx, progress_rx) = Torrent::from_torrent_info(
-            self.peer_id,
-            metainfo,
-            tracker.clone(),
-            dht.cloned(),
-            self.storage.clone(),
-            shutdown_rx.clone(),
-            self.config.torrents_dir.clone(),
-            self.event_bus.clone(),
-            self.config.unchoke_slots_limit as usize,
-        );
+        let ctx = TorrentContext {
+            peer_id: self.peer_id,
+            tracker_client: tracker.clone(),
+            dht_client: dht.cloned(),
+            storage: self.storage.clone(),
+            shutdown_rx: shutdown_rx.clone(),
+            torrents_dir: self.config.torrents_dir.clone(),
+            event_bus: self.event_bus.clone(),
+            unchoke_slots: self.config.unchoke_slots_limit as usize,
+        };
+
+        let (torrent, tx, progress_rx) =
+            Torrent::new(ctx, TorrentSource::Torrent(metainfo.clone()));
 
         let handle = tokio::spawn(async move { torrent.start_session().await });
 
         let entry = TorrentEntry {
             tx,
             handle,
-            progress_rx,
-            name,
+            progress_rx: progress_rx.clone(),
+            name: name.clone(),
             size_bytes,
+            metainfo: Some(Arc::new(metainfo)),
         };
 
         {
@@ -653,17 +758,18 @@ impl SessionManager {
             .clone()
             .unwrap_or_else(|| info_hash.to_string());
 
-        let (torrent, tx, progress_rx) = Torrent::from_magnet(
-            self.peer_id,
-            magnet,
-            tracker.clone(),
-            dht.cloned(),
-            self.storage.clone(),
-            shutdown_rx.clone(),
-            self.config.torrents_dir.clone(),
-            self.event_bus.clone(),
-            self.config.unchoke_slots_limit as usize,
-        );
+        let ctx = TorrentContext {
+            peer_id: self.peer_id,
+            tracker_client: tracker.clone(),
+            dht_client: dht.cloned(),
+            storage: self.storage.clone(),
+            shutdown_rx: shutdown_rx.clone(),
+            torrents_dir: self.config.torrents_dir.clone(),
+            event_bus: self.event_bus.clone(),
+            unchoke_slots: self.config.unchoke_slots_limit as usize,
+        };
+
+        let (torrent, tx, progress_rx) = Torrent::new(ctx, TorrentSource::Magnet(magnet));
 
         let handle = tokio::spawn(async move { torrent.start_session().await });
 
@@ -672,7 +778,8 @@ impl SessionManager {
             handle,
             progress_rx,
             name,
-            size_bytes: 0, // Unknown until metadata is fetched
+            size_bytes: 0,  // Unknown until metadata is fetched
+            metainfo: None, // Will be populated when metadata is fetched
         };
 
         {
@@ -816,6 +923,7 @@ impl SessionManager {
                     }
 
                     let supports_ext = remote_handshake.support_extended_message();
+                    let dht_enabled = remote_handshake.support_dht();
 
                     tracing::info!(
                         "Incoming peer connection from {:?} for {:?}",
@@ -839,6 +947,7 @@ impl SessionManager {
                                 remote_addr,
                                 supports_ext,
                                 peer_id: remote_handshake.peer_id,
+                                dht_enabled,
                             })
                             .await;
                     }

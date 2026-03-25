@@ -80,6 +80,7 @@ impl EmaRate {
     }
 
     /// Reset window and timestamp. Use when a peer slot is reused.
+    #[allow(dead_code)]
     pub fn reset(&mut self) {
         self.window_bytes = 0;
         self.ema = 0.0;

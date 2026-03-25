@@ -2,6 +2,7 @@ use crate::{
     StorageBackend, TorrentProgress, TorrentState,
     bitfield::Bitfield,
     choker::Choker,
+    detail::{FileInfo, PeerSnapshot, TorrentDetail, TorrentMeta, TrackerState, TrackerStatus},
     ema::EmaRate,
     events::{EventBus, SessionEvent},
     metadata::{Metadata, MetadataState},
@@ -43,6 +44,33 @@ use url::Url;
 // TODO: Use a criteria for this, this is so harcoded lol
 const CHANNEL_SIZE: usize = 1000;
 
+/// Session-level context shared across all torrents.
+/// Contains resources and configuration that are identical for every torrent in a session.
+pub struct TorrentContext {
+    pub peer_id: PeerID,
+    pub tracker_client: Arc<TrackerHandler>,
+    pub dht_client: Option<Arc<DhtHandler>>,
+    pub storage: Arc<dyn StorageBackend>,
+    pub shutdown_rx: watch::Receiver<()>,
+    pub torrents_dir: PathBuf,
+    pub event_bus: EventBus,
+    pub unchoke_slots: usize,
+}
+
+/// Source material for creating a torrent.
+/// Determines the initial state and metadata source.
+pub enum TorrentSource {
+    /// Download from a .torrent file (complete metadata, start downloading)
+    Torrent(TorrentInfo),
+    /// Download from a magnet link (fetch metadata from peers first)
+    Magnet(Magnet),
+    /// Seed existing content (all pieces available, start seeding)
+    Seed {
+        torrent_info: TorrentInfo,
+        content_dir: PathBuf,
+    },
+}
+
 // Peer related
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub struct Pid(pub usize);
@@ -61,6 +89,7 @@ pub enum PeerOrigin {
         remote_addr: SocketAddr,
         supports_ext: bool,
         peer_id: PeerID,
+        dht_enabled: bool,
     },
     Outbound(SocketAddr),
 }
@@ -73,6 +102,7 @@ impl PeerOrigin {
                 remote_addr,
                 supports_ext: _,
                 peer_id: _,
+                dht_enabled: _,
             }
             | Self::Outbound(remote_addr) => remote_addr,
         }
@@ -161,10 +191,32 @@ pub enum TorrentMessage {
         remote_addr: SocketAddr,
         supports_ext: bool,
         peer_id: PeerID,
+        dht_enabled: bool,
     },
     /// Direct peer injection (for simulation testing, bypasses tracker/DHT)
     ConnectPeer {
         addr: SocketAddr,
+    },
+    /// Query peer snapshots for UI/TUI
+    GetPeerSnapshots {
+        resp: oneshot::Sender<Vec<PeerSnapshot>>,
+    },
+    /// Query tracker statuses for UI/TUI
+    GetTrackerStatuses {
+        resp: oneshot::Sender<Vec<TrackerStatus>>,
+    },
+    /// Update tracker status (from announce task)
+    TrackerUpdate {
+        url: Url,
+        status: TrackerState,
+        seeder_count: Option<u32>,
+        leecher_count: Option<u32>,
+        peers_received: u32,
+        error: Option<String>,
+    },
+    /// Query torrent detail (files, metadata) for UI/TUI
+    GetTorrentDetail {
+        resp: oneshot::Sender<TorrentDetail>,
     },
 }
 
@@ -174,13 +226,6 @@ pub struct Metrics {
     pub uploaded_bytes: AtomicU64,
     /// Total number of unique peers discovered from trackers/DHT (cumulative, never decrements)
     pub peers_discovered: AtomicUsize,
-}
-
-#[derive(Debug, Clone)]
-struct TrackerState {
-    url: Url,
-    error: Option<String>,
-    last_report: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 //
@@ -194,7 +239,8 @@ pub struct Torrent {
     /// metadata and metadata state of the torrent
     metadata: Metadata,
     state: TorrentState,
-    trackers: HashMap<Url, TrackerState>,
+    /// Tracker statuses, keyed by announce URL
+    trackers: HashMap<Url, TrackerStatus>,
 
     tracker_client: Arc<TrackerHandler>,
     dht_client: Option<Arc<DhtHandler>>,
@@ -234,136 +280,167 @@ pub struct Torrent {
 const ALPHA: f64 = 0.5;
 
 impl Torrent {
-    /// Create a new Torrent from a .torrent file (with complete metadata)
-    pub fn from_torrent_info(
-        peer_id: PeerID,
-        torrent_info: TorrentInfo,
-        tracker_client: Arc<TrackerHandler>,
-        dht_client: Option<Arc<DhtHandler>>,
-        storage: Arc<dyn StorageBackend>,
-        shutdown_rx: watch::Receiver<()>,
-        torrents_dir: PathBuf,
-        event_bus: crate::events::EventBus,
-        unchoke_slots: usize,
+    /// Create a new Torrent from the given source.
+    ///
+    /// The `ctx` provides session-level configuration shared across all torrents.
+    /// The `source` determines the torrent type and initial state.
+    pub fn new(
+        ctx: TorrentContext,
+        source: TorrentSource,
     ) -> (
         Self,
         mpsc::Sender<TorrentMessage>,
         watch::Receiver<TorrentProgress>,
     ) {
-        let info_hash = torrent_info.info_hash;
-        let trackers = torrent_info
+        let (info_hash, metadata, trackers, bitfield, state, content_dir, progress_state) =
+            match source {
+                TorrentSource::Torrent(torrent_info) => {
+                    let info_hash = torrent_info.info_hash;
+                    let trackers = Self::parse_trackers(&torrent_info);
+                    let bitfield = Bitfield::with_size(torrent_info.num_pieces());
+                    let metadata = Metadata::TorrentFile(Arc::new(torrent_info));
+                    let progress_state = crate::metrics::progress::TorrentState::Downloading;
+                    (
+                        info_hash,
+                        metadata,
+                        trackers,
+                        bitfield,
+                        TorrentState::Downloading,
+                        None,
+                        progress_state,
+                    )
+                }
+                TorrentSource::Magnet(magnet) => {
+                    let info_hash = magnet.info_hash().expect("InfoHash is a mandatory field");
+                    let trackers = magnet
+                        .trackers
+                        .clone()
+                        .into_iter()
+                        .map(|u| {
+                            (
+                                u.clone(),
+                                TrackerStatus {
+                                    url: u.to_string(),
+                                    tier: None,
+                                    seeder_count: None,
+                                    leecher_count: None,
+                                    peers_received: 0,
+                                    status: TrackerState::Idle,
+                                    last_error: None,
+                                },
+                            )
+                        })
+                        .collect();
+                    let metadata = Metadata::MagnetUri {
+                        magnet,
+                        metadata_state: MetadataState::Pending,
+                    };
+                    let progress_state = crate::metrics::progress::TorrentState::FetchingMetadata;
+                    (
+                        info_hash,
+                        metadata,
+                        trackers,
+                        Bitfield::new(),
+                        TorrentState::Downloading,
+                        None,
+                        progress_state,
+                    )
+                }
+                TorrentSource::Seed {
+                    torrent_info,
+                    content_dir,
+                } => {
+                    let info_hash = torrent_info.info_hash;
+                    let trackers = Self::parse_trackers(&torrent_info);
+                    let bitfield = Bitfield::with_all_set(torrent_info.num_pieces());
+                    let metadata = Metadata::TorrentFile(Arc::new(torrent_info));
+                    let progress_state = crate::metrics::progress::TorrentState::Seeding;
+                    (
+                        info_hash,
+                        metadata,
+                        trackers,
+                        bitfield,
+                        TorrentState::Seeding,
+                        Some(content_dir),
+                        progress_state,
+                    )
+                }
+            };
+
+        Self::build_with_progress(
+            ctx,
+            info_hash,
+            metadata,
+            trackers,
+            bitfield,
+            state,
+            content_dir,
+            progress_state,
+        )
+    }
+
+    /// Helper to parse trackers from TorrentInfo
+    fn parse_trackers(torrent_info: &TorrentInfo) -> HashMap<Url, TrackerStatus> {
+        torrent_info
             .all_trackers()
             .into_iter()
             .filter_map(|url| {
                 Url::parse(&url).ok().map(|u| {
                     (
                         u.clone(),
-                        TrackerState {
-                            url: u,
-                            error: None,
-                            last_report: None,
+                        TrackerStatus {
+                            url,
+                            tier: None,
+                            seeder_count: None,
+                            leecher_count: None,
+                            peers_received: 0,
+                            status: TrackerState::Idle,
+                            last_error: None,
                         },
                     )
                 })
             })
-            .collect();
-
-        let bitfield = Bitfield::with_size(torrent_info.num_pieces());
-
-        let metadata = Metadata::TorrentFile(Arc::new(torrent_info));
-
-        let (tx, rx) = mpsc::channel(CHANNEL_SIZE);
-
-        let initial_metrics = TorrentProgress {
-            name: metadata
-                .display_name()
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| info_hash.to_string()),
-            total_pieces: metadata.info().map(|i| i.num_pieces() as u32).unwrap_or(0),
-            total_bytes: metadata.info().map(|i| i.total_size() as u64).unwrap_or(0),
-            state: crate::metrics::progress::TorrentState::Downloading,
-            ..Default::default()
-        };
-        let (progress_tx, progress_rx) = watch::channel(initial_metrics);
-
-        (
-            Self {
-                info_hash,
-                peer_id,
-                metadata,
-                state: TorrentState::Downloading,
-                trackers,
-                tracker_client,
-                dht_client,
-                storage,
-                metrics: Arc::new(Metrics::default()),
-                peers: HashMap::default(),
-                shutdown_rx,
-                tx: tx.clone(),
-                rx,
-                bitfield,
-                piece_mananger: None,
-                choker: Choker::new(unchoke_slots),
-                torrents_dir,
-                content_dir: None,
-                progress_tx,
-                event_bus,
-                pending_requests: HashMap::new(),
-                ul_rate: EmaRate::new(ALPHA),
-                dl_rate: EmaRate::new(ALPHA),
-            },
-            tx,
-            progress_rx,
-        )
+            .collect()
     }
 
-    /// Create a new Torrent from a magnet URI (metadata needs to be fetched)
-    pub fn from_magnet(
-        peer_id: PeerID,
-        magnet: Magnet,
-        tracker_client: Arc<TrackerHandler>,
-        dht_client: Option<Arc<DhtHandler>>,
-        storage: Arc<dyn StorageBackend>,
-        shutdown_rx: watch::Receiver<()>,
-        torrents_dir: PathBuf,
-        event_bus: crate::events::EventBus,
-        unchoke_slots: usize,
+    /// Build the Torrent instance with progress metrics computed from state
+    #[allow(clippy::too_many_arguments)]
+    fn build_with_progress(
+        ctx: TorrentContext,
+        info_hash: InfoHash,
+        metadata: Metadata,
+        trackers: HashMap<Url, TrackerStatus>,
+        bitfield: Bitfield,
+        state: TorrentState,
+        content_dir: Option<PathBuf>,
+        progress_state: crate::metrics::progress::TorrentState,
     ) -> (
         Self,
         mpsc::Sender<TorrentMessage>,
         watch::Receiver<TorrentProgress>,
     ) {
-        let info_hash = magnet.info_hash().expect("InfoHash is a mandatory field");
-
-        let trackers = magnet
-            .trackers
-            .clone()
-            .into_iter()
-            .map(|u| {
-                (
-                    u.clone(),
-                    TrackerState {
-                        url: u,
-                        error: None,
-                        last_report: None,
-                    },
-                )
-            })
-            .collect();
-
-        let metadata = Metadata::MagnetUri {
-            magnet,
-            metadata_state: MetadataState::Pending,
-        };
-
         let (tx, rx) = mpsc::channel(CHANNEL_SIZE);
 
+        let name = metadata
+            .display_name()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| info_hash.to_string());
+
+        // Compute progress metrics from metadata and state
+        let total_pieces = metadata.info().map(|i| i.num_pieces() as u32).unwrap_or(0);
+        let total_bytes = metadata.info().map(|i| i.total_size() as u64).unwrap_or(0);
+        let (verified_pieces, downloaded_bytes) = match state {
+            TorrentState::Seeding => (total_pieces, total_bytes),
+            _ => (0, 0),
+        };
+
         let initial_metrics = TorrentProgress {
-            name: metadata
-                .display_name()
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| info_hash.to_string()),
-            state: crate::metrics::progress::TorrentState::FetchingMetadata,
+            name,
+            total_pieces,
+            verified_pieces,
+            total_bytes,
+            downloaded_bytes,
+            state: progress_state,
             ..Default::default()
         };
         let (progress_tx, progress_rx) = watch::channel(initial_metrics);
@@ -371,110 +448,25 @@ impl Torrent {
         (
             Self {
                 info_hash,
-                peer_id,
+                peer_id: ctx.peer_id,
                 metadata,
-                state: TorrentState::Downloading,
+                state,
                 trackers,
-                tracker_client,
-                dht_client,
-                storage,
-                metrics: Arc::new(Metrics::default()),
-                shutdown_rx,
-                peers: HashMap::default(),
-                tx: tx.clone(),
-                rx,
-                bitfield: Bitfield::new(),
-                piece_mananger: None,
-                choker: Choker::new(unchoke_slots),
-                torrents_dir,
-                content_dir: None,
-                progress_tx,
-                event_bus,
-                pending_requests: HashMap::new(),
-                ul_rate: EmaRate::new(ALPHA),
-                dl_rate: EmaRate::new(ALPHA),
-            },
-            tx,
-            progress_rx,
-        )
-    }
-
-    pub fn as_seed(
-        peer_id: PeerID,
-        content_dir: PathBuf,
-        torrent_info: TorrentInfo,
-        tracker_client: Arc<TrackerHandler>,
-        dht_client: Option<Arc<DhtHandler>>,
-        storage: Arc<dyn StorageBackend>,
-        shutdown_rx: watch::Receiver<()>,
-        torrents_dir: PathBuf,
-        event_bus: crate::events::EventBus,
-        unchoke_slots: usize,
-    ) -> (
-        Self,
-        mpsc::Sender<TorrentMessage>,
-        watch::Receiver<TorrentProgress>,
-    ) {
-        let info_hash = torrent_info.info_hash;
-        let trackers = torrent_info
-            .all_trackers()
-            .into_iter()
-            .filter_map(|url| {
-                Url::parse(&url).ok().map(|u| {
-                    (
-                        u.clone(),
-                        TrackerState {
-                            url: u,
-                            error: None,
-                            last_report: None,
-                        },
-                    )
-                })
-            })
-            .collect();
-
-        let bitfield = Bitfield::with_all_set(torrent_info.num_pieces());
-
-        let metadata = Metadata::TorrentFile(Arc::new(torrent_info));
-
-        let (tx, rx) = mpsc::channel(CHANNEL_SIZE);
-
-        let initial_metrics = TorrentProgress {
-            name: metadata
-                .display_name()
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| info_hash.to_string()),
-            total_pieces: metadata.info().map(|i| i.num_pieces() as u32).unwrap_or(0),
-            verified_pieces: metadata.info().map(|i| i.num_pieces() as u32).unwrap_or(0),
-            total_bytes: metadata.info().map(|i| i.total_size() as u64).unwrap_or(0),
-            downloaded_bytes: metadata.info().map(|i| i.total_size() as u64).unwrap_or(0),
-            state: crate::metrics::progress::TorrentState::Seeding,
-            ..Default::default()
-        };
-        let (progress_tx, progress_rx) = watch::channel(initial_metrics);
-
-        (
-            Self {
-                info_hash,
-                peer_id,
-                metadata,
-                state: TorrentState::Seeding,
-                trackers,
-                tracker_client,
-                dht_client,
-                storage,
+                tracker_client: ctx.tracker_client,
+                dht_client: ctx.dht_client,
+                storage: ctx.storage,
                 metrics: Arc::new(Metrics::default()),
                 peers: HashMap::default(),
-                shutdown_rx,
+                shutdown_rx: ctx.shutdown_rx,
                 tx: tx.clone(),
                 rx,
                 bitfield,
                 piece_mananger: None,
-                choker: Choker::new(unchoke_slots),
-                torrents_dir,
-                content_dir: Some(content_dir),
+                choker: Choker::new(ctx.unchoke_slots),
+                torrents_dir: ctx.torrents_dir,
+                content_dir,
                 progress_tx,
-                event_bus,
+                event_bus: ctx.event_bus,
                 pending_requests: HashMap::new(),
                 ul_rate: EmaRate::new(ALPHA),
                 dl_rate: EmaRate::new(ALPHA),
@@ -651,6 +643,7 @@ impl Torrent {
                 stream,
                 supports_ext,
                 remote_addr,
+                dht_enabled,
             } => spawn_inbound(
                 pid,
                 remote_addr,
@@ -659,6 +652,7 @@ impl Torrent {
                 self.tx.clone(),
                 remote_peer_id,
                 supports_ext,
+                dht_enabled,
             ),
             PeerOrigin::Outbound(remote_addr) => spawn_outbound(
                 pid,
@@ -897,6 +891,7 @@ impl Torrent {
                 remote_addr,
                 supports_ext,
                 peer_id,
+                dht_enabled,
             } => {
                 info!("Received inbound peer connection from {}", remote_addr);
                 self.add_peer(PeerOrigin::Inbound {
@@ -904,12 +899,165 @@ impl Torrent {
                     remote_addr,
                     supports_ext,
                     peer_id,
+                    dht_enabled,
                 })
                 .await;
             }
             TorrentMessage::ConnectPeer { addr } => {
                 info!("Injected outbound peer connection to {}", addr);
                 self.add_peer(PeerOrigin::Outbound(addr)).await;
+            }
+            TorrentMessage::GetPeerSnapshots { resp } => {
+                let snapshots: Vec<PeerSnapshot> = self
+                    .peers
+                    .values()
+                    .map(|handle| {
+                        let info = handle.info.read().unwrap();
+                        PeerSnapshot {
+                            addr: handle.peer_addr,
+                            info: crate::detail::PeerInfoSnapshot {
+                                remote_choking: info.remote_choking,
+                                remote_interested: info.remote_interested,
+                                am_choking: info.am_choking,
+                                am_interested: info.am_interested,
+                                source: info.source,
+                                download_rate: info.download_rate,
+                                upload_rate: info.download_rate,
+                                peer_progress: 0.0, // TODO: query from bitfield
+                                client_name: info
+                                    .peer_id
+                                    .identify_client()
+                                    .unwrap_or("Unknown")
+                                    .to_string(),
+                                extension_flags: crate::detail::ExtensionFlags {
+                                    dht: info.dht_enabled,
+                                    extension_protocol: info.supports_extended,
+                                    metadata: info.supports_extended, // If extended, supports metadata
+                                    pex: false,                       // TODO: detect PEX support
+                                },
+                            },
+                        }
+                    })
+                    .collect();
+                let _ = resp.send(snapshots);
+            }
+            TorrentMessage::GetTrackerStatuses { resp } => {
+                let statuses: Vec<TrackerStatus> = self.trackers.values().cloned().collect();
+                let _ = resp.send(statuses);
+            }
+            TorrentMessage::TrackerUpdate {
+                url,
+                status,
+                seeder_count,
+                leecher_count,
+                peers_received,
+                error,
+            } => {
+                if let Some(tracker) = self.trackers.get_mut(&url) {
+                    tracker.status = status;
+                    tracker.seeder_count = seeder_count;
+                    tracker.leecher_count = leecher_count;
+                    tracker.peers_received = peers_received;
+                    tracker.last_error = error;
+                }
+            }
+            TorrentMessage::GetTorrentDetail { resp } => {
+                // Build metadata from the Torrent's stored metadata
+                let meta = match &self.metadata {
+                    Metadata::TorrentFile(ti) => {
+                        Some(TorrentMeta::from_torrent_info(self.info_hash, ti))
+                    }
+                    Metadata::MagnetUri { metadata_state, .. } => match metadata_state {
+                        MetadataState::Complete(info) => {
+                            Some(TorrentMeta::from_info(self.info_hash, info))
+                        }
+                        _ => None,
+                    },
+                };
+
+                match meta {
+                    Some(m) => {
+                        // Build files list from metadata
+                        let files: Vec<FileInfo> = match &self.metadata {
+                            Metadata::TorrentFile(ti) => {
+                                ti.info
+                                    .files()
+                                    .into_iter()
+                                    .enumerate()
+                                    .map(|(idx, f)| FileInfo {
+                                        index: idx,
+                                        path: f.path,
+                                        size_bytes: f.length as u64,
+                                        downloaded_bytes: 0, // TODO: compute from bitfield
+                                    })
+                                    .collect()
+                            }
+                            Metadata::MagnetUri { metadata_state, .. } => match metadata_state {
+                                MetadataState::Complete(info) => info
+                                    .files()
+                                    .into_iter()
+                                    .enumerate()
+                                    .map(|(idx, f)| FileInfo {
+                                        index: idx,
+                                        path: f.path,
+                                        size_bytes: f.length as u64,
+                                        downloaded_bytes: 0,
+                                    })
+                                    .collect(),
+                                _ => Vec::new(),
+                            },
+                        };
+
+                        // Get live peer snapshots
+                        let peers: Vec<PeerSnapshot> = self
+                            .peers
+                            .values()
+                            .map(|handle| {
+                                let info = handle.info.read().unwrap();
+                                PeerSnapshot {
+                                    addr: handle.peer_addr,
+                                    info: crate::detail::PeerInfoSnapshot {
+                                        remote_choking: info.remote_choking,
+                                        remote_interested: info.remote_interested,
+                                        am_choking: info.am_choking,
+                                        am_interested: info.am_interested,
+                                        source: info.source,
+                                        download_rate: info.download_rate,
+                                        upload_rate: info.upload_rate,
+                                        peer_progress: 0.0, // TODO: query from bitfield
+                                        client_name: info
+                                            .peer_id
+                                            .identify_client()
+                                            .unwrap_or("Unknown")
+                                            .to_string(),
+                                        extension_flags: crate::detail::ExtensionFlags {
+                                            dht: info.dht_enabled,
+                                            extension_protocol: info.supports_extended,
+                                            metadata: info.supports_extended,
+                                            pex: false,
+                                        },
+                                    },
+                                }
+                            })
+                            .collect();
+
+                        // Get live tracker statuses
+                        let trackers: Vec<TrackerStatus> =
+                            self.trackers.values().cloned().collect();
+
+                        let detail = TorrentDetail {
+                            meta: m,
+                            files,
+                            peers,
+                            trackers,
+                        };
+                        let _ = resp.send(detail);
+                    }
+                    None => {
+                        // Metadata not yet available - send nothing (caller will timeout)
+                        // The oneshot channel will be dropped, causing a RecvError
+                    }
+                }
             }
         }
         Ok(())
@@ -1293,53 +1441,83 @@ impl Torrent {
         );
 
         // Spawn tracker announce tasks
-        for announce_url in self.trackers.keys() {
+        for (announce_url, _tracker_status) in self.trackers.iter() {
             let tracker_client = self.tracker_client.clone();
             let info_hash = self.info_hash;
             let seed = self.state == TorrentState::Seeding;
-            // TODO: Why use .to_string()?
+            let announce_url = announce_url.clone();
             let announce = announce_url.to_string();
             let discovered_peers_tx = discovered_peers_tx.clone();
-            let _torrent_tx = self.tx.clone();
+            let torrent_tx = self.tx.clone();
             let event_bus_tx = self.event_bus.torrent_tx.clone();
             tokio::spawn(async move {
-                loop {
-                    let response = tracker_client
-                        .announce(info_hash, announce.clone(), client_state)
-                        .await;
+                // Signal that we're starting to announce
+                let _ = torrent_tx
+                    .send(TorrentMessage::TrackerUpdate {
+                        url: announce_url.clone(),
+                        status: TrackerState::Announcing,
+                        seeder_count: None,
+                        leecher_count: None,
+                        peers_received: 0,
+                        error: None,
+                    })
+                    .await;
 
-                    if let Err(e) = response {
+                let response = tracker_client
+                    .announce(info_hash, announce.clone(), client_state)
+                    .await;
+
+                match response {
+                    Err(e) => {
                         tracing::warn!("Failed to announce to tracker {}: {}", announce, e);
+                        let _ = torrent_tx
+                            .send(TorrentMessage::TrackerUpdate {
+                                url: announce_url,
+                                status: TrackerState::Error,
+                                seeder_count: None,
+                                leecher_count: None,
+                                peers_received: 0,
+                                error: Some(format!("{:?}", e)),
+                            })
+                            .await;
                         let _ =
                             event_bus_tx.send(crate::events::torrent::TorrentEvent::TrackerError {
                                 url: announce.clone(),
                                 error: format!("{:?}", e),
                                 times_in_row: 1,
                             });
-                        return;
                     }
+                    Ok(response) => {
+                        let peers_count = response.peers.len() as u32;
+                        let _ = torrent_tx
+                            .send(TorrentMessage::TrackerUpdate {
+                                url: announce_url,
+                                status: TrackerState::Ok,
+                                seeder_count: Some(response.seeders as u32),
+                                leecher_count: Some(response.leechers as u32),
+                                peers_received: peers_count,
+                                error: None,
+                            })
+                            .await;
+                        let _ = event_bus_tx.send(
+                            crate::events::torrent::TorrentEvent::TrackerAnnounced {
+                                url: announce.clone(),
+                                peers_received: peers_count,
+                            },
+                        );
 
-                    let Ok(response) = response else {
-                        tracing::warn!("Tracker failure");
-                        break;
-                    };
+                        if !seed {
+                            let _ = discovered_peers_tx.send(response.peers).await;
+                        }
 
-                    let _ =
-                        event_bus_tx.send(crate::events::torrent::TorrentEvent::TrackerAnnounced {
-                            url: announce.clone(),
-                            peers_received: response.peers.len() as u32,
-                        });
-
-                    let sleep_duration = response.interval;
-                    if !seed {
-                        let _ = discovered_peers_tx.send(response.peers).await;
+                        // Sleep for the interval then loop back to announce again
+                        let sleep_duration = response.interval;
+                        sleep(Duration::from_secs(
+                            u64::try_from(sleep_duration)
+                                .expect("tracker interval must be non-negative"),
+                        ))
+                        .await;
                     }
-
-                    sleep(Duration::from_secs(
-                        u64::try_from(sleep_duration)
-                            .expect("tracker interval must be  non-negative"),
-                    ))
-                    .await;
                 }
             });
         }

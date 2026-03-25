@@ -1,109 +1,93 @@
 # torrent-rs
 
-A BitTorrent client written in Rust, built as a learning project to explore network programming and async Rust.
+A BitTorrent client in Rust.
 
-## Scope
+## Binaries
 
-This project implements a functional BitTorrent client with support for downloading and seeding torrents. It is designed for educational purposes and personal use.
+| Binary | Crate | Description |
+|--------|-------|-------------|
+| `torrent-rs` | `cmd` | CLI downloader |
+| `tui` | `tui` | Interactive terminal UI |
 
-## Supported BEPs
+### CLI
 
-| BEP | Description | Link |
-|-----|-------------|------|
-| BEP 3 | Core Protocol | [bep_0003](https://www.bittorrent.org/beps/bep_0003.html) |
-| BEP 5 | DHT | [bep_0005](https://www.bittorrent.org/beps/bep_0005.html) |
-| BEP 9 | Magnet URI | [bep_0009](https://www.bittorrent.org/beps/bep_0009.html) |
-| BEP 10 | Peer Extension | [bep_0010](https://www.bittorrent.org/beps/bep_0010.html) |
-| BEP 15 | UDP Tracker | [bep_0015](https://www.bittorrent.org/beps/bep_0015.html) |
-| BEP 23 | Tracker Return Compact | [bep_0023](https://www.bittorrent.org/beps/bep_0023.html) |
+```bash
+# Download a torrent
+cargo run -p cmd -- download <file.torrent|magnet:?>
 
-## Architecture
+# Add without starting (list/stats are stubs)
+cargo run -p cmd -- add <file.torrent|magnet:?>
+cargo run -p cmd -- list
+cargo run -p cmd -- stats
+```
 
-The project is split into a headless engine (**daemon**) and multiple controllers (**CLI**, **TUI**).
+Options:
+- `--metrics-addr <ADDR>` — Prometheus endpoint (default: `0.0.0.0:9000`)
 
-1. **`bittorrent-daemon` (btd)**: The main engine that manages torrent sessions, downloads, and seeding. It exposes a RESTful HTTP API.
-2. **`bittorrent-tui`**: A terminal user interface to monitor and manage torrents in real-time.
-3. **`bittorrent-cli`**: A command-line controller to add, list, or remove torrents via the daemon.
+### TUI
+
+```bash
+cargo run -p tui
+```
+
+Keybindings:
+- `a` — add torrent (path or magnet URI)
+- `d` — remove selected torrent
+- `Enter` — open detail view
+- `Tab` / `Shift+Tab` — switch detail tabs
+- `Esc` / `q` — close detail view
+- `q` — quit
+
+## BEPs
+
+| BEP | Description |
+|-----|-------------|
+| 3 | Core protocol |
+| 5 | DHT peer discovery |
+| 9 | Magnet URI |
+| 10 | Peer extensions |
+| 15 | UDP tracker |
+| 23 | Compact peer format |
 
 ## Crates
 
-| Crate | Description |
-|-------|-------------|
-| `bittorrent-daemon` | Headless engine (binary: `btd`) |
-| `bittorrent-tui` | Terminal user interface |
-| `bittorrent-cli` | Command-line controller |
-| `bittorrent-remote` | Simple IPC-based remote client |
-| `bittorrent-core` | Core session management and coordination |
-| `bittorrent-common` | Shared types, metainfo parsing, utilities |
-| `bencode` | Bencode encoding/decoding library |
-| `peer-protocol` | BitTorrent wire protocol implementation |
+| Crate | Purpose |
+|-------|---------|
+| `bittorrent-core` | Session management, peer connections, piece coordination |
+| `bittorrent-common` | Shared types: `InfoHash`, `PeerId`, hashing |
+| `bencode` | Bencode codec |
+| `magnet-uri` | Magnet link parser |
+| `mainline-dht` | DHT implementation |
 | `tracker-client` | HTTP and UDP tracker client |
-| `mainline-dht` | DHT protocol implementation (BEP 5) |
-| `magnet-uri` | Magnet URI parsing |
-
-## Prerequisites
-
-- [Rust and Cargo](https://rustup.rs/)
-- [just](https://github.com/casey/just) (optional, for using the justfile)
+| `cmd` | CLI binary |
+| `tui` | Terminal UI |
 
 ## Build
 
 ```bash
-cargo build --release
+just build
 ```
 
-## Usage
+Or directly: `cargo build --release`
 
-### 1. Start the Daemon
+Requires Rust 2024 edition (Rust 1.85+) and optionally [just](https://github.com/casey/just).
 
-The daemon must be running to manage torrents. It listens for peer connections on port 6881 and provides an API on port 6969 by default.
+## Development
 
 ```bash
-cargo run -p bittorrent-daemon -- [OPTIONS] [TORRENTS...]
+just test            # unit tests
+just test-simulation # network simulation tests (turmoil)
+just lint            # clippy
 ```
 
-**Options:**
-- `-d, --save-dir <PATH>`: Directory to save downloaded files (default: `~/Downloads/Torrents`).
-- `--api-port <PORT>`: Port for the HTTP API (default: `6969`).
-- `--port <PORT>`: Port for peer connections (default: `6881`).
-- `--no-dht`: Disable DHT support.
-
-### 2. Monitor with TUI
-
-Start the TUI to see live progress of all active torrents.
+## Observability
 
 ```bash
-cargo run -p bittorrent-tui
+just metrics-up    # start Prometheus + Grafana
+just metrics-down  # stop
 ```
 
-### 3. Control with CLI
-
-Use the CLI to add, list, or manage torrents.
-
-#### Add a torrent
-```bash
-cargo run -p bittorrent-cli -- add <FILE_OR_MAGNET> [--follow]
-```
-
-#### List active torrents
-```bash
-cargo run -p bittorrent-cli -- list
-```
-
-#### Show detailed info
-```bash
-cargo run -p bittorrent-cli -- show <INFO_HASH> [--follow]
-```
-
-#### Remove a torrent
-```bash
-cargo run -p bittorrent-cli -- remove <INFO_HASH>
-```
-
-#### Global Stats
-```bash
-cargo run -p bittorrent-cli -- stats
-```
+The CLI exposes metrics at the configured `--metrics-addr`.
 
 ## License
 
