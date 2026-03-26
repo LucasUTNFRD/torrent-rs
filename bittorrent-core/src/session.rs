@@ -25,6 +25,7 @@ use tokio::{
 };
 
 use mainline_dht::{DhtConfig, DhtHandler};
+use tokio_util::sync::CancellationToken;
 use tracker_client::TrackerHandler;
 
 use crate::{
@@ -428,20 +429,27 @@ impl SessionManager {
             );
         }
 
-        let (shutdown_tx, shutdown_rx) = watch::channel(());
-
+        let torrent_token = CancellationToken::new();
         self.spawn_tcp_listener();
 
         while let Some(cmd) = self.rx.recv().await {
             match cmd {
                 SessionCommand::AddTorrent { info, resp } => {
-                    let result =
-                        self.handle_add_torrent(info, &tracker, dht.as_ref(), &shutdown_rx);
+                    let result = self.handle_add_torrent(
+                        info,
+                        &tracker,
+                        dht.as_ref(),
+                        torrent_token.clone(),
+                    );
                     let _ = resp.send(result);
                 }
                 SessionCommand::AddMagnet { magnet, resp } => {
-                    let result =
-                        self.handle_add_magnet(magnet, &tracker, dht.as_ref(), &shutdown_rx);
+                    let result = self.handle_add_magnet(
+                        magnet,
+                        &tracker,
+                        dht.as_ref(),
+                        torrent_token.clone(),
+                    );
                     let _ = resp.send(result);
                 }
                 SessionCommand::SeedFile {
@@ -465,7 +473,7 @@ impl SessionManager {
                             content_dir,
                             &tracker,
                             dht.as_ref(),
-                            &shutdown_rx,
+                            torrent_token.clone(),
                         )
                         .await
                     } else {
@@ -483,7 +491,7 @@ impl SessionManager {
                             PathBuf::new(),
                             &tracker,
                             dht.as_ref(),
-                            &shutdown_rx,
+                            torrent_token.clone(),
                         )
                         .await;
                     let _ = resp.send(result);
@@ -504,7 +512,7 @@ impl SessionManager {
                 }
 
                 SessionCommand::Shutdown { resp } => {
-                    let result = self.handle_shutdown(&shutdown_tx, dht.as_ref()).await;
+                    let result = self.handle_shutdown(dht.as_ref(), torrent_token).await;
                     let _ = resp.send(result);
                     break;
                 }
@@ -605,7 +613,7 @@ impl SessionManager {
         content_dir: PathBuf,
         tracker: &Arc<TrackerHandler>,
         dht: Option<&Arc<DhtHandler>>,
-        shutdown_rx: &watch::Receiver<()>,
+        cancellation_token: CancellationToken,
     ) -> Result<TorrentId, SessionError> {
         let info_hash = metainfo.info_hash;
 
@@ -627,7 +635,6 @@ impl SessionManager {
             tracker_client: tracker.clone(),
             dht_client: dht.cloned(),
             storage: self.storage.clone(),
-            shutdown_rx: shutdown_rx.clone(),
             torrents_dir: self.config.torrents_dir.clone(),
             event_bus: self.event_bus.clone(),
             unchoke_slots: self.config.unchoke_slots_limit as usize,
@@ -641,7 +648,7 @@ impl SessionManager {
             },
         );
 
-        let handle = tokio::spawn(async move { torrent.start_session().await });
+        let handle = tokio::spawn(async move { torrent.start_session(cancellation_token).await });
 
         let entry = TorrentEntry {
             tx,
@@ -670,7 +677,7 @@ impl SessionManager {
         metainfo: TorrentInfo,
         tracker: &Arc<TrackerHandler>,
         dht: Option<&Arc<DhtHandler>>,
-        shutdown_rx: &watch::Receiver<()>,
+        cancellation_token: CancellationToken,
     ) -> Result<TorrentId, SessionError> {
         let info_hash = metainfo.info_hash;
 
@@ -692,7 +699,6 @@ impl SessionManager {
             tracker_client: tracker.clone(),
             dht_client: dht.cloned(),
             storage: self.storage.clone(),
-            shutdown_rx: shutdown_rx.clone(),
             torrents_dir: self.config.torrents_dir.clone(),
             event_bus: self.event_bus.clone(),
             unchoke_slots: self.config.unchoke_slots_limit as usize,
@@ -701,7 +707,7 @@ impl SessionManager {
         let (torrent, tx, progress_rx) =
             Torrent::new(ctx, TorrentSource::Torrent(metainfo.clone()));
 
-        let handle = tokio::spawn(async move { torrent.start_session().await });
+        let handle = tokio::spawn(async move { torrent.start_session(cancellation_token).await });
 
         let entry = TorrentEntry {
             tx,
@@ -730,7 +736,7 @@ impl SessionManager {
         magnet: Magnet,
         tracker: &Arc<TrackerHandler>,
         dht: Option<&Arc<DhtHandler>>,
-        shutdown_rx: &watch::Receiver<()>,
+        cancellation_token: CancellationToken,
     ) -> Result<TorrentId, SessionError> {
         let info_hash = magnet.info_hash().ok_or(SessionError::InvalidMagnet)?;
 
@@ -763,7 +769,6 @@ impl SessionManager {
             tracker_client: tracker.clone(),
             dht_client: dht.cloned(),
             storage: self.storage.clone(),
-            shutdown_rx: shutdown_rx.clone(),
             torrents_dir: self.config.torrents_dir.clone(),
             event_bus: self.event_bus.clone(),
             unchoke_slots: self.config.unchoke_slots_limit as usize,
@@ -771,7 +776,7 @@ impl SessionManager {
 
         let (torrent, tx, progress_rx) = Torrent::new(ctx, TorrentSource::Magnet(magnet));
 
-        let handle = tokio::spawn(async move { torrent.start_session().await });
+        let handle = tokio::spawn(async move { torrent.start_session(cancellation_token).await });
 
         let entry = TorrentEntry {
             tx,
@@ -823,14 +828,14 @@ impl SessionManager {
 
     async fn handle_shutdown(
         &self,
-        shutdown_tx: &watch::Sender<()>,
         dht: Option<&Arc<DhtHandler>>,
+        torrent_token: CancellationToken,
     ) -> Result<(), SessionError> {
-        // Signal shutdown to all torrents
-        if shutdown_tx.send(()).is_err() {
-            tracing::warn!("No receivers for shutdown signal");
-        }
-
+        // Signal all torrents to stop. Each Torrent internally
+        // cancels its peer tokens and awaits its peer JoinSet
+        // before returning — so by the time join_all() resolves,
+        // zero PeerConnection tasks are alive.
+        torrent_token.cancel();
         // Collect and wait for all torrent handles
         let handles: Vec<_> = {
             let mut sessions = self.sessions.write().unwrap();

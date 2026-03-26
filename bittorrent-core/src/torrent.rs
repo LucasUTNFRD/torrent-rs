@@ -37,12 +37,13 @@ use tokio::{
     sync::{mpsc, oneshot, watch},
     time::sleep,
 };
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument, warn};
 use tracker_client::{ClientState, Events, TrackerError, TrackerHandler};
 use url::Url;
 
 // TODO: Use a criteria for this, this is so harcoded lol
-const CHANNEL_SIZE: usize = 1000;
+const CHANNEL_SIZE: usize = 1024;
 
 /// Session-level context shared across all torrents.
 /// Contains resources and configuration that are identical for every torrent in a session.
@@ -51,7 +52,6 @@ pub struct TorrentContext {
     pub tracker_client: Arc<TrackerHandler>,
     pub dht_client: Option<Arc<DhtHandler>>,
     pub storage: Arc<dyn StorageBackend>,
-    pub shutdown_rx: watch::Receiver<()>,
     pub torrents_dir: PathBuf,
     pub event_bus: EventBus,
     pub unchoke_slots: usize,
@@ -258,8 +258,6 @@ pub struct Torrent {
     // Download related
     piece_mananger: Option<PieceManager>,
     choker: Choker,
-    //
-    shutdown_rx: watch::Receiver<()>,
 
     bitfield: Bitfield,
 
@@ -457,7 +455,6 @@ impl Torrent {
                 storage: ctx.storage,
                 metrics: Arc::new(Metrics::default()),
                 peers: HashMap::default(),
-                shutdown_rx: ctx.shutdown_rx,
                 tx: tx.clone(),
                 rx,
                 bitfield,
@@ -479,7 +476,10 @@ impl Torrent {
     #[instrument(skip(self), name = "torrent", fields(
     info_hash=%self.info_hash,
     ))]
-    pub async fn start_session(mut self) -> Result<(), TorrentError> {
+    pub async fn start_session(
+        mut self,
+        cancelation_token: CancellationToken,
+    ) -> Result<(), TorrentError> {
         match self.state {
             TorrentState::Downloading | TorrentState::Checking | TorrentState::FetchingMetadata => {
                 self.init_interal().await
@@ -501,10 +501,11 @@ impl Torrent {
 
         loop {
             tokio::select! {
-                Ok(()) = self.shutdown_rx.changed() => {
-                    tracing::info!("Shutting down...");
-                    break;
+                biased;
+                _ = cancelation_token.cancelled() => {
+                    todo!()
                 }
+                // todo
                 maybe_msg = self.rx.recv() => {
                     match maybe_msg{
                         Some(msg) => self.handle_message(msg).await?,
@@ -531,6 +532,12 @@ impl Torrent {
         }
 
         Ok(())
+    }
+
+    fn shutdown(&mut self) {
+        // wait for peer_conn
+        // drop storage
+        // tracker task shutdown
     }
 
     // init bitfield
