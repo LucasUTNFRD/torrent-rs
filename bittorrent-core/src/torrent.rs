@@ -35,6 +35,7 @@ use std::{
 use thiserror::Error;
 use tokio::{
     sync::{mpsc, oneshot, watch},
+    task::JoinSet,
     time::sleep,
 };
 use tokio_util::sync::CancellationToken;
@@ -503,13 +504,13 @@ impl Torrent {
             tokio::select! {
                 biased;
                 _ = cancelation_token.cancelled() => {
-                    todo!()
+                    self.shutdown().await;
+                    break Ok(());
                 }
-                // todo
                 maybe_msg = self.rx.recv() => {
                     match maybe_msg{
                         Some(msg) => self.handle_message(msg).await?,
-                        None => break,
+                        None => break Ok(()),
                     }
                 }
                 Some(discovered_peers) = discovered_peers_rx.recv() => {
@@ -530,14 +531,21 @@ impl Torrent {
                 }
             }
         }
-
-        Ok(())
     }
 
-    fn shutdown(&mut self) {
+    async fn shutdown(&mut self) {
+        // self.peer_token.cancel()
+        let jhs = self
+            .peers
+            .drain()
+            .map(|(_pid, peer)| peer.handle)
+            .collect::<Vec<_>>();
+
+        for jh in jhs {
+            jh.await.unwrap();
+        }
+
         // wait for peer_conn
-        // drop storage
-        // tracker task shutdown
     }
 
     // init bitfield
@@ -682,12 +690,13 @@ impl Torrent {
         }
 
         self.pending_requests.insert(pid, Vec::new());
-        self.peers.insert(pid, peer_handle.clone());
+        let peer_addr = peer_handle.peer_addr;
+        self.peers.insert(pid, peer_handle);
         let _ = self
             .event_bus
             .peer_tx
             .send(crate::events::peer::PeerEvent::Connected {
-                addr: peer_handle.peer_addr,
+                addr: peer_addr,
                 direction,
             });
     }
