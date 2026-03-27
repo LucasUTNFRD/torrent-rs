@@ -34,7 +34,7 @@ use crate::{
     metrics::counters::{self},
     net::TcpListener,
     protocol::peer_wire::Handshake,
-    storage::{DiskStorage, StorageBackend},
+    storage::{DiskStorage, DiskStorageRuntime, disk_storage_factory},
     torrent::{Torrent, TorrentContext, TorrentError, TorrentMessage, TorrentSource},
     types::TorrentId,
     verify_torrent_file::verify_content,
@@ -55,21 +55,26 @@ pub struct Session {
     tx: UnboundedSender<SessionCommand>,
 }
 
+type StorageFactory = Box<dyn FnOnce() -> (DiskStorage, DiskStorageRuntime) + Send>;
+
 pub struct SessionBuilder {
     config: SessionConfig,
-    storage: Option<Arc<dyn StorageBackend>>,
+    storage_factory: Option<StorageFactory>,
 }
 
 impl SessionBuilder {
     pub fn new(config: SessionConfig) -> Self {
         Self {
             config,
-            storage: None,
+            storage_factory: None,
         }
     }
 
-    pub fn with_storage(mut self, storage: Arc<dyn StorageBackend>) -> Self {
-        self.storage = Some(storage);
+    pub fn with_storage_factory<F>(mut self, factory: F) -> Self
+    where
+        F: FnOnce() -> (DiskStorage, DiskStorageRuntime) + Send + 'static,
+    {
+        self.storage_factory = Some(Box::new(factory));
         self
     }
 
@@ -77,9 +82,12 @@ impl SessionBuilder {
         let (tx, rx) = mpsc::unbounded_channel();
         let event_bus = crate::events::EventBus::new();
 
-        let storage = self.storage.unwrap_or_else(|| Arc::new(DiskStorage::new()));
+        let (storage, storage_runtime) = self
+            .storage_factory
+            .map_or_else(disk_storage_factory, |f| f());
 
-        let manager = SessionManager::new(self.config, rx, storage, event_bus.clone());
+        let manager =
+            SessionManager::new(self.config, rx, storage, storage_runtime, event_bus.clone());
 
         let handle = tokio::task::spawn(async move { manager.start().await });
 
@@ -389,7 +397,8 @@ struct SessionManager {
     event_bus: crate::events::EventBus,
     rx: mpsc::UnboundedReceiver<SessionCommand>,
     sessions: Arc<RwLock<HashMap<InfoHash, TorrentEntry>>>,
-    storage: Arc<dyn StorageBackend>,
+    storage: Option<DiskStorage>,
+    storage_runtime: Option<DiskStorageRuntime>,
     torrent_root_token: CancellationToken,
     tcp_listener_handle: Option<JoinHandle<()>>,
 }
@@ -398,7 +407,8 @@ impl SessionManager {
     pub fn new(
         config: SessionConfig,
         rx: mpsc::UnboundedReceiver<SessionCommand>,
-        storage: Arc<dyn StorageBackend>,
+        storage: DiskStorage,
+        storage_runtime: DiskStorageRuntime,
         event_bus: crate::events::EventBus,
     ) -> Self {
         let peer_id = config.peer_id.unwrap_or(*CLIENT_ID);
@@ -408,7 +418,8 @@ impl SessionManager {
             event_bus,
             rx,
             sessions: Arc::new(RwLock::new(HashMap::new())),
-            storage,
+            storage: Some(storage),
+            storage_runtime: Some(storage_runtime),
             torrent_root_token: CancellationToken::new(),
             tcp_listener_handle: None,
         }
@@ -615,7 +626,7 @@ impl SessionManager {
             peer_id: self.peer_id,
             tracker_client: tracker.clone(),
             dht_client: dht.cloned(),
-            storage: self.storage.clone(),
+            storage: self.storage.as_ref().unwrap().clone(),
             torrents_dir: self.config.torrents_dir.clone(),
             event_bus: self.event_bus.clone(),
             unchoke_slots: self.config.unchoke_slots_limit as usize,
@@ -682,7 +693,7 @@ impl SessionManager {
             peer_id: self.peer_id,
             tracker_client: tracker.clone(),
             dht_client: dht.cloned(),
-            storage: self.storage.clone(),
+            storage: self.storage.as_ref().unwrap().clone(),
             torrents_dir: self.config.torrents_dir.clone(),
             event_bus: self.event_bus.clone(),
             unchoke_slots: self.config.unchoke_slots_limit as usize,
@@ -755,7 +766,7 @@ impl SessionManager {
             peer_id: self.peer_id,
             tracker_client: tracker.clone(),
             dht_client: dht.cloned(),
-            storage: self.storage.clone(),
+            storage: self.storage.as_ref().unwrap().clone(),
             torrents_dir: self.config.torrents_dir.clone(),
             event_bus: self.event_bus.clone(),
             unchoke_slots: self.config.unchoke_slots_limit as usize,
@@ -849,6 +860,14 @@ impl SessionManager {
             } else {
                 tracing::info!("DHT shutdown complete");
             }
+        }
+
+        // Drop storage handle to close the channel, then wait for actor to finish
+        tracing::info!("Shutting down storage...");
+        self.storage.take();
+        if let Some(runtime) = self.storage_runtime.take() {
+            runtime.shutdown().await;
+            tracing::info!("Storage shutdown complete");
         }
 
         Ok(())
