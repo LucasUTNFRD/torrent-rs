@@ -690,7 +690,11 @@ impl PeerConnection {
             })
             .await;
 
-        let blocks = rx.await.expect("TorrentSession dropped oneshot sender");
+        let Ok(blocks) = rx.await else {
+            tracing::debug!("Torrent shutting down, aborting request");
+            return Ok(());
+        };
+
         let received = blocks.len();
         self.request_queue.extend(blocks);
         tracing::debug!(
@@ -736,7 +740,10 @@ impl PeerConnection {
             })
             .await;
 
-        let interested = rx.await.expect("sender dropped");
+        let Ok(interested) = rx.await else {
+            tracing::debug!("Torrent shutting down, aborting interest update");
+            return Ok(());
+        };
         self.set_am_interested(interested);
 
         if interested {
@@ -919,7 +926,11 @@ impl PeerConnection {
             .torrent_tx
             .send(TorrentMessage::ValidMetadata { resp: tx })
             .await;
-        self.metadata = rx.await.unwrap();
+
+        let Ok(metadata) = rx.await else {
+            return;
+        };
+        self.metadata = metadata;
     }
 }
 
