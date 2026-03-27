@@ -12,6 +12,7 @@ ratatui = "0.30.0"
 crossterm = { version = "0.28.0", features = ["event-stream"] }
 bittorrent-core = { path = "../bittorrent-core/" }
 futures-util = "0.3"
+indicatif.workspace = true
 
 [lints]
 workspace = true

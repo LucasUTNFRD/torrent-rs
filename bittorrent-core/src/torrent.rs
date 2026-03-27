@@ -678,7 +678,7 @@ impl Torrent {
             PeerOrigin::Inbound { .. } => crate::events::peer::Direction::Inbound,
             PeerOrigin::Outbound(_) => crate::events::peer::Direction::Outbound,
         };
-        let peer_token = self.peer_cancel_token.clone();
+        let peer_token = self.peer_cancel_token.child_token();
         let (jh, peer_handle) = match peer {
             PeerOrigin::Inbound {
                 peer_id: remote_peer_id,

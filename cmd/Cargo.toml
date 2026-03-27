@@ -15,6 +15,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 bittorrent-core = { path = "../bittorrent-core/" }
 console-subscriber.workspace = true
+indicatif.workspace = true
 
 [lints]
 workspace = true

@@ -308,8 +308,8 @@ impl PeerConnection {
                         counters::on_read_counter();
                         self.handle_msg(msg).await?
                     },
-                    Some(Err(e)) => {
-                        // TODO?
+                    Some(Err(_e)) => {
+                        // Network error - connection will close
                     }
                     _ => break, // Remote closed the connection
                 },
@@ -489,7 +489,6 @@ impl PeerConnection {
             PeerMessage::SendMessage(msg) => {
                 self.sink.send(msg).await?;
             }
-            PeerMessage::Disconnect => { /* TODO: graceful shutdown */ }
         }
         Ok(())
     }
