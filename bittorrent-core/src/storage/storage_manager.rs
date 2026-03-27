@@ -5,6 +5,7 @@ use std::{
     os::unix::fs::FileExt,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, RwLock},
+    time::Duration,
 };
 
 use crate::{
@@ -20,11 +21,12 @@ use bittorrent_common::{
 use bytes::BytesMut;
 
 use sha1::{Digest, Sha1};
-use tokio::sync::mpsc;
+use tokio::{sync::mpsc, task::JoinSet, time::timeout};
 
 pub struct StorageManager {
     storage: Arc<StorageState>,
     pub rx: mpsc::Receiver<StorageMessage>,
+    tasks: JoinSet<()>,
 }
 
 pub(crate) struct StorageState {
@@ -245,6 +247,7 @@ impl StorageManager {
         Self {
             rx,
             storage: Arc::new(StorageState::new(download_dir)),
+            tasks: JoinSet::new(),
         }
     }
 
@@ -292,7 +295,7 @@ impl StorageManager {
                         continue;
                     };
                     let storage = self.storage.clone();
-                    tokio::task::spawn_blocking(move || {
+                    self.tasks.spawn_blocking(move || {
                         let start = tokio::time::Instant::now();
                         let result = storage
                             .read(&cache, piece_index, begin, length)
@@ -313,7 +316,7 @@ impl StorageManager {
                     };
                     let storage = self.storage.clone();
                     let byte_count = data.len() as u64;
-                    tokio::task::spawn_blocking(move || {
+                    self.tasks.spawn_blocking(move || {
                         let start = tokio::time::Instant::now();
                         let result = storage
                             .write(&cache, piece, &data)
@@ -340,7 +343,7 @@ impl StorageManager {
                         cache.metainfo.get_piece_hash(piece as usize).copied();
 
                     // Move CPU-intensive SHA1 computation to spawn_blocking
-                    tokio::task::spawn_blocking(move || {
+                    self.tasks.spawn_blocking(move || {
                         let result = expected_piece_hash.map_or(
                             Err(StorageError::PieceNotFound(piece)),
                             |expected| {
@@ -355,6 +358,13 @@ impl StorageManager {
                     });
                 }
             }
+        }
+
+        match timeout(Duration::from_secs(5), self.tasks.join_all()).await {
+            Ok(_) => tracing::debug!("All storage tasks completed"),
+            Err(_) => tracing::warn!(
+                "Timeout waiting for storage tasks to complete , storage tasks may still be running",
+            ),
         }
     }
 }

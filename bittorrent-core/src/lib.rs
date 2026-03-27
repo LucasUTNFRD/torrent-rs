@@ -63,6 +63,7 @@ pub use events::SessionEvent;
 pub use metrics::progress::{TorrentProgress, TorrentState};
 pub use session::{Session, SessionBuilder, SessionError};
 pub use session_config::SessionConfig;
-pub use storage::StorageBackend;
+pub use storage::{DiskStorage, DiskStorageRuntime, StorageBackend};
+pub use storage::{disk_storage_factory, disk_storage_with_dir};
 // pub use torrent::TorrentState as InternalTorrentState;
 pub use types::TorrentId;
