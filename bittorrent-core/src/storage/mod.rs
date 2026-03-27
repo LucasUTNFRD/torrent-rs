@@ -11,7 +11,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use tokio::sync::{mpsc, oneshot};
+use tokio::{sync::{mpsc, oneshot}, task::JoinHandle};
 
 mod storage_manager;
 
@@ -106,6 +106,7 @@ pub trait StorageBackend: Send + Sync {
 
 pub struct DiskStorage {
     tx: mpsc::Sender<StorageMessage>,
+    jh: JoinHandle<()>,
 }
 
 fn get_download_dir() -> PathBuf {
@@ -136,9 +137,16 @@ impl DiskStorage {
         let (tx, rx) = mpsc::channel(1024);
 
         let manager = StorageManager::new(download_dir, rx);
-        tokio::spawn(manager.start());
+        let jh = tokio::spawn(manager.start());
 
-        Self { tx }
+        Self { tx, jh }
+    }
+
+    /// Gracefully shutdown the storage backend.
+    /// Drops the sender channel and waits for the storage manager to drain and exit.
+    pub async fn shutdown(self) {
+        drop(self.tx);
+        let _ = self.jh.await;
     }
 }
 

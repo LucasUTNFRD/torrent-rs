@@ -371,6 +371,7 @@ struct TorrentEntry {
     tx: mpsc::Sender<TorrentMessage>,
     /// Handle to the torrent task
     handle: JoinHandle<Result<(), TorrentError>>,
+    torrent_token: CancellationToken,
     /// Metrics receiver for the torrent
     progress_rx: watch::Receiver<TorrentProgress>,
     /// Display name of the torrent
@@ -389,6 +390,8 @@ struct SessionManager {
     rx: mpsc::UnboundedReceiver<SessionCommand>,
     sessions: Arc<RwLock<HashMap<InfoHash, TorrentEntry>>>,
     storage: Arc<dyn StorageBackend>,
+    torrent_root_token: CancellationToken,
+    tcp_listener_handle: Option<JoinHandle<()>>,
 }
 
 impl SessionManager {
@@ -406,6 +409,8 @@ impl SessionManager {
             rx,
             sessions: Arc::new(RwLock::new(HashMap::new())),
             storage,
+            torrent_root_token: CancellationToken::new(),
+            tcp_listener_handle: None,
         }
     }
 
@@ -429,27 +434,16 @@ impl SessionManager {
             );
         }
 
-        let torrent_token = CancellationToken::new();
-        self.spawn_tcp_listener();
+        self.tcp_listener_handle = Some(self.spawn_tcp_listener());
 
         while let Some(cmd) = self.rx.recv().await {
             match cmd {
                 SessionCommand::AddTorrent { info, resp } => {
-                    let result = self.handle_add_torrent(
-                        info,
-                        &tracker,
-                        dht.as_ref(),
-                        torrent_token.clone(),
-                    );
+                    let result = self.handle_add_torrent(info, &tracker, dht.as_ref());
                     let _ = resp.send(result);
                 }
                 SessionCommand::AddMagnet { magnet, resp } => {
-                    let result = self.handle_add_magnet(
-                        magnet,
-                        &tracker,
-                        dht.as_ref(),
-                        torrent_token.clone(),
-                    );
+                    let result = self.handle_add_magnet(magnet, &tracker, dht.as_ref());
                     let _ = resp.send(result);
                 }
                 SessionCommand::SeedFile {
@@ -468,14 +462,8 @@ impl SessionManager {
                     .unwrap_or(false);
 
                     let result = if is_valid {
-                        self.handle_seed_torrent(
-                            info,
-                            content_dir,
-                            &tracker,
-                            dht.as_ref(),
-                            torrent_token.clone(),
-                        )
-                        .await
+                        self.handle_seed_torrent(info, content_dir, &tracker, dht.as_ref())
+                            .await
                     } else {
                         // TODO: Given metadata did not match with contents
                         todo!("Return a proper session error");
@@ -486,13 +474,7 @@ impl SessionManager {
                 SessionCommand::SeedTorrentUnchecked { info, resp } => {
                     // Skip verify_content — used for simulation with mock storage
                     let result = self
-                        .handle_seed_torrent(
-                            info,
-                            PathBuf::new(),
-                            &tracker,
-                            dht.as_ref(),
-                            torrent_token.clone(),
-                        )
+                        .handle_seed_torrent(info, PathBuf::new(), &tracker, dht.as_ref())
                         .await;
                     let _ = resp.send(result);
                 }
@@ -512,7 +494,7 @@ impl SessionManager {
                 }
 
                 SessionCommand::Shutdown { resp } => {
-                    let result = self.handle_shutdown(dht.as_ref(), torrent_token).await;
+                    let result = self.handle_shutdown(dht.as_ref()).await;
                     let _ = resp.send(result);
                     break;
                 }
@@ -613,7 +595,6 @@ impl SessionManager {
         content_dir: PathBuf,
         tracker: &Arc<TrackerHandler>,
         dht: Option<&Arc<DhtHandler>>,
-        cancellation_token: CancellationToken,
     ) -> Result<TorrentId, SessionError> {
         let info_hash = metainfo.info_hash;
 
@@ -648,11 +629,15 @@ impl SessionManager {
             },
         );
 
-        let handle = tokio::spawn(async move { torrent.start_session(cancellation_token).await });
+        let torrent_child_token = self.torrent_root_token.child_token();
+        let torrent_token_for_entry = torrent_child_token.clone();
+
+        let handle = tokio::spawn(async move { torrent.start_session(torrent_child_token).await });
 
         let entry = TorrentEntry {
             tx,
             handle,
+            torrent_token: torrent_token_for_entry,
             progress_rx: progress_rx.clone(),
             name: name.clone(),
             size_bytes,
@@ -677,7 +662,6 @@ impl SessionManager {
         metainfo: TorrentInfo,
         tracker: &Arc<TrackerHandler>,
         dht: Option<&Arc<DhtHandler>>,
-        cancellation_token: CancellationToken,
     ) -> Result<TorrentId, SessionError> {
         let info_hash = metainfo.info_hash;
 
@@ -707,11 +691,15 @@ impl SessionManager {
         let (torrent, tx, progress_rx) =
             Torrent::new(ctx, TorrentSource::Torrent(metainfo.clone()));
 
-        let handle = tokio::spawn(async move { torrent.start_session(cancellation_token).await });
+        let torrent_child_token = self.torrent_root_token.child_token();
+        let torrent_token_for_entry = torrent_child_token.clone();
+
+        let handle = tokio::spawn(async move { torrent.start_session(torrent_child_token).await });
 
         let entry = TorrentEntry {
             tx,
             handle,
+            torrent_token: torrent_token_for_entry,
             progress_rx: progress_rx.clone(),
             name: name.clone(),
             size_bytes,
@@ -736,7 +724,6 @@ impl SessionManager {
         magnet: Magnet,
         tracker: &Arc<TrackerHandler>,
         dht: Option<&Arc<DhtHandler>>,
-        cancellation_token: CancellationToken,
     ) -> Result<TorrentId, SessionError> {
         let info_hash = magnet.info_hash().ok_or(SessionError::InvalidMagnet)?;
 
@@ -776,15 +763,19 @@ impl SessionManager {
 
         let (torrent, tx, progress_rx) = Torrent::new(ctx, TorrentSource::Magnet(magnet));
 
-        let handle = tokio::spawn(async move { torrent.start_session(cancellation_token).await });
+        let torrent_child_token = self.torrent_root_token.child_token();
+        let torrent_token_for_entry = torrent_child_token.clone();
+
+        let handle = tokio::spawn(async move { torrent.start_session(torrent_child_token).await });
 
         let entry = TorrentEntry {
             tx,
             handle,
+            torrent_token: torrent_token_for_entry,
             progress_rx,
             name,
-            size_bytes: 0,  // Unknown until metadata is fetched
-            metainfo: None, // Will be populated when metadata is fetched
+            size_bytes: 0,
+            metainfo: None,
         };
 
         {
@@ -808,9 +799,7 @@ impl SessionManager {
 
         match entry {
             Some(entry) => {
-                // The torrent task should exit when its channel is dropped
-                drop(entry.tx);
-                // Wait for it to finish
+                entry.torrent_token.cancel();
                 match entry.handle.await {
                     Ok(Ok(())) => tracing::info!("Torrent {} removed cleanly", id),
                     Ok(Err(e)) => tracing::warn!("Torrent {} error on removal: {:?}", id, e),
@@ -826,16 +815,18 @@ impl SessionManager {
         }
     }
 
-    async fn handle_shutdown(
-        &self,
-        dht: Option<&Arc<DhtHandler>>,
-        torrent_token: CancellationToken,
-    ) -> Result<(), SessionError> {
+    async fn handle_shutdown(&mut self, dht: Option<&Arc<DhtHandler>>) -> Result<(), SessionError> {
         // Signal all torrents to stop. Each Torrent internally
         // cancels its peer tokens and awaits its peer JoinSet
         // before returning — so by the time join_all() resolves,
         // zero PeerConnection tasks are alive.
-        torrent_token.cancel();
+        self.torrent_root_token.cancel();
+
+        // Shutdown TCP listener
+        if let Some(handle) = self.tcp_listener_handle.take() {
+            handle.await.ok();
+        }
+
         // Collect and wait for all torrent handles
         let handles: Vec<_> = {
             let mut sessions = self.sessions.write().unwrap();
@@ -863,101 +854,122 @@ impl SessionManager {
         Ok(())
     }
 
-    fn spawn_tcp_listener(&self) {
+    fn spawn_tcp_listener(&self) -> JoinHandle<()> {
         let sessions = self.sessions.clone();
         let listen_addr = self.config.listen_addr;
         let peer_id = self.peer_id;
+        let cancel_token = self.torrent_root_token.clone();
 
         tokio::spawn(async move {
-            let listener = TcpListener::bind(listen_addr)
-                .await
-                .expect("failed to bind tcp listener");
+            let listener = match TcpListener::bind(listen_addr).await {
+                Ok(l) => l,
+                Err(e) => {
+                    tracing::error!("Failed to bind TCP listener: {}", e);
+                    return;
+                }
+            };
             tracing::info!("Listening on {:?}", listener.local_addr());
 
-            while let Ok((mut stream, remote_addr)) = listener.accept().await {
-                tracing::debug!("Accepted connection from {:?}", remote_addr);
-                counters::incoming_connections();
-                let sessions = sessions.clone();
-                let peer_id = peer_id;
-
-                tokio::spawn(async move {
-                    let mut buf = BytesMut::zeroed(Handshake::HANDSHAKE_LEN);
-
-                    if let Err(e) = stream.read_exact(&mut buf).await {
-                        tracing::debug!(
-                            error = ?e,
-                            "Failed to read handshake from {:?}",
-                            remote_addr
-                        );
-                        return;
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = cancel_token.cancelled() => {
+                        tracing::info!("TCP listener shutting down");
+                        break;
                     }
+                    result = listener.accept() => {
+                        match result {
+                            Ok((mut stream, remote_addr)) => {
+                                tracing::debug!("Accepted connection from {:?}", remote_addr);
+                                counters::incoming_connections();
+                                let sessions = sessions.clone();
+                                let peer_id = peer_id;
 
-                    let Some(remote_handshake) = Handshake::from_bytes(&buf) else {
-                        tracing::debug!("Failed to parse handshake from {:?}", remote_addr);
-                        return;
-                    };
+                                tokio::spawn(async move {
+                                    let mut buf = BytesMut::zeroed(Handshake::HANDSHAKE_LEN);
 
-                    let have_torrent = {
-                        sessions
-                            .read()
-                            .unwrap()
-                            .contains_key(&remote_handshake.info_hash)
-                    };
+                                    if let Err(e) = stream.read_exact(&mut buf).await {
+                                        tracing::debug!(
+                                            error = ?e,
+                                            "Failed to read handshake from {:?}",
+                                            remote_addr
+                                        );
+                                        return;
+                                    }
 
-                    if !have_torrent {
-                        tracing::debug!(
-                            "Rejecting connection for unknown torrent {:?}",
-                            remote_handshake.info_hash
-                        );
-                        return;
+                                    let Some(remote_handshake) = Handshake::from_bytes(&buf) else {
+                                        tracing::debug!("Failed to parse handshake from {:?}", remote_addr);
+                                        return;
+                                    };
+
+                                    let have_torrent = {
+                                        sessions
+                                            .read()
+                                            .unwrap()
+                                            .contains_key(&remote_handshake.info_hash)
+                                    };
+
+                                    if !have_torrent {
+                                        tracing::debug!(
+                                            "Rejecting connection for unknown torrent {:?}",
+                                            remote_handshake.info_hash
+                                        );
+                                        return;
+                                    }
+
+                                    if remote_handshake.peer_id == peer_id {
+                                        tracing::debug!("Rejecting self-connection from {:?}", remote_addr);
+                                        return;
+                                    }
+
+                                    let handshake = Handshake::new(peer_id, remote_handshake.info_hash);
+                                    if let Err(e) = stream.write_all(&handshake.to_bytes()).await {
+                                        tracing::debug!(
+                                            error = ?e,
+                                            "Failed to send handshake to {:?}",
+                                            remote_addr
+                                        );
+                                        return;
+                                    }
+
+                                    let supports_ext = remote_handshake.support_extended_message();
+                                    let dht_enabled = remote_handshake.support_dht();
+
+                                    tracing::info!(
+                                        "Incoming peer connection from {:?} for {:?}",
+                                        remote_addr,
+                                        remote_handshake.info_hash
+                                    );
+
+                                    // Forward connection to the appropriate torrent
+                                    let torrent_tx = {
+                                        sessions
+                                            .read()
+                                            .unwrap()
+                                            .get(&remote_handshake.info_hash)
+                                            .map(|entry| entry.tx.clone())
+                                    };
+
+                                    if let Some(tx) = torrent_tx {
+                                        let _ = tx
+                                            .send(TorrentMessage::InboundPeer {
+                                                stream,
+                                                remote_addr,
+                                                supports_ext,
+                                                peer_id: remote_handshake.peer_id,
+                                                dht_enabled,
+                                            })
+                                            .await;
+                                    }
+                                });
+                            }
+                            Err(e) => {
+                                tracing::warn!("TCP accept error: {}", e);
+                            }
+                        }
                     }
-
-                    if remote_handshake.peer_id == peer_id {
-                        tracing::debug!("Rejecting self-connection from {:?}", remote_addr);
-                        return;
-                    }
-
-                    let handshake = Handshake::new(peer_id, remote_handshake.info_hash);
-                    if let Err(e) = stream.write_all(&handshake.to_bytes()).await {
-                        tracing::debug!(
-                            error = ?e,
-                            "Failed to send handshake to {:?}",
-                            remote_addr
-                        );
-                        return;
-                    }
-
-                    let supports_ext = remote_handshake.support_extended_message();
-                    let dht_enabled = remote_handshake.support_dht();
-
-                    tracing::info!(
-                        "Incoming peer connection from {:?} for {:?}",
-                        remote_addr,
-                        remote_handshake.info_hash
-                    );
-
-                    // Forward connection to the appropriate torrent
-                    let torrent_tx = {
-                        sessions
-                            .read()
-                            .unwrap()
-                            .get(&remote_handshake.info_hash)
-                            .map(|entry| entry.tx.clone())
-                    };
-
-                    if let Some(tx) = torrent_tx {
-                        let _ = tx
-                            .send(TorrentMessage::InboundPeer {
-                                stream,
-                                remote_addr,
-                                supports_ext,
-                                peer_id: remote_handshake.peer_id,
-                                dht_enabled,
-                            })
-                            .await;
-                    }
-                });
+                }
             }
-        });
+        })
     }
 }
