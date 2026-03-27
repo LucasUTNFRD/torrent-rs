@@ -1534,11 +1534,12 @@ impl Torrent {
                             })
                             .await;
 
-                        let _ = event_bus_tx.send(crate::events::torrent::TorrentEvent::TrackerError {
-                            url: announce.clone(),
-                            error: format!("{:?}", e),
-                            times_in_row: retry_count + 1,
-                        });
+                        let _ =
+                            event_bus_tx.send(crate::events::torrent::TorrentEvent::TrackerError {
+                                url: announce.clone(),
+                                error: format!("{:?}", e),
+                                times_in_row: retry_count + 1,
+                            });
 
                         if is_permanent {
                             tracing::warn!("Tracker {} has permanent error, stopping", announce);
@@ -1570,10 +1571,11 @@ impl Torrent {
                         })
                         .await;
 
-                    let _ = event_bus_tx.send(crate::events::torrent::TorrentEvent::TrackerAnnounced {
-                        url: announce.clone(),
-                        peers_received: peers_count,
-                    });
+                    let _ =
+                        event_bus_tx.send(crate::events::torrent::TorrentEvent::TrackerAnnounced {
+                            url: announce.clone(),
+                            peers_received: peers_count,
+                        });
 
                     if !seed {
                         let _ = discovered_peers_tx.send(response.peers).await;
