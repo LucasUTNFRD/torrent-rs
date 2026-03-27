@@ -562,7 +562,10 @@ impl Torrent {
         }
 
         match timeout(duration, self.background_tasks.join_all()).await {
-            Ok(_) => tracing::debug!("All background tasks completed for torrent {}", self.info_hash),
+            Ok(_) => tracing::debug!(
+                "All background tasks completed for torrent {}",
+                self.info_hash
+            ),
             Err(_) => tracing::warn!(
                 "Timeout waiting for background tasks to complete for torrent {}, tasks may still be running",
                 self.info_hash
@@ -1528,12 +1531,13 @@ impl Torrent {
                                     error: Some(format!("{:?}", e)),
                                 })
                                 .await;
-                            let _ =
-                                event_bus_tx.send(crate::events::torrent::TorrentEvent::TrackerError {
+                            let _ = event_bus_tx.send(
+                                crate::events::torrent::TorrentEvent::TrackerError {
                                     url: announce.clone(),
                                     error: format!("{:?}", e),
                                     times_in_row: 1,
-                                });
+                                },
+                            );
                         }
                         Ok(response) => {
                             let peers_count = response.peers.len() as u32;
