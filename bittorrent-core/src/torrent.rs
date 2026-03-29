@@ -14,6 +14,7 @@ use crate::{
     },
     piece_picker::{AvailabilityUpdate, BlockRequest, PieceManager, PieceState},
     protocol::peer_wire::{Block, BlockInfo, Message},
+    storage::DiskStorage,
 };
 use bittorrent_common::{
     metainfo::{Info, TorrentInfo},
@@ -35,14 +36,16 @@ use std::{
 use thiserror::Error;
 use tokio::{
     sync::{mpsc, oneshot, watch},
-    time::sleep,
+    task::JoinSet,
+    time::{sleep, timeout},
 };
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument, warn};
 use tracker_client::{ClientState, Events, TrackerError, TrackerHandler};
 use url::Url;
 
 // TODO: Use a criteria for this, this is so harcoded lol
-const CHANNEL_SIZE: usize = 1000;
+const CHANNEL_SIZE: usize = 1024;
 
 /// Session-level context shared across all torrents.
 /// Contains resources and configuration that are identical for every torrent in a session.
@@ -50,8 +53,7 @@ pub struct TorrentContext {
     pub peer_id: PeerID,
     pub tracker_client: Arc<TrackerHandler>,
     pub dht_client: Option<Arc<DhtHandler>>,
-    pub storage: Arc<dyn StorageBackend>,
-    pub shutdown_rx: watch::Receiver<()>,
+    pub storage: DiskStorage,
     pub torrents_dir: PathBuf,
     pub event_bus: EventBus,
     pub unchoke_slots: usize,
@@ -244,10 +246,13 @@ pub struct Torrent {
 
     tracker_client: Arc<TrackerHandler>,
     dht_client: Option<Arc<DhtHandler>>,
-    storage: Arc<dyn StorageBackend>,
+    storage: DiskStorage,
 
     metrics: Arc<Metrics>,
     peers: HashMap<Pid, PeerHandle>,
+    peer_tasks: JoinSet<()>,
+    peer_cancel_token: CancellationToken,
+
     // Torrent-local per-peer state that PeerHandle no longer holds
     pending_requests: HashMap<Pid, Vec<BlockInfo>>,
 
@@ -258,8 +263,6 @@ pub struct Torrent {
     // Download related
     piece_mananger: Option<PieceManager>,
     choker: Choker,
-    //
-    shutdown_rx: watch::Receiver<()>,
 
     bitfield: Bitfield,
 
@@ -275,6 +278,11 @@ pub struct Torrent {
     progress_tx: watch::Sender<TorrentProgress>,
     /// Event sender for lifecycle changes
     event_bus: EventBus,
+
+    /// Cancellation token for the torrent (from session)
+    cancel_token: CancellationToken,
+    /// Background tasks (tracker announce, DHT discovery)
+    background_tasks: JoinSet<()>,
 }
 
 const ALPHA: f64 = 0.5;
@@ -457,7 +465,6 @@ impl Torrent {
                 storage: ctx.storage,
                 metrics: Arc::new(Metrics::default()),
                 peers: HashMap::default(),
-                shutdown_rx: ctx.shutdown_rx,
                 tx: tx.clone(),
                 rx,
                 bitfield,
@@ -470,6 +477,10 @@ impl Torrent {
                 pending_requests: HashMap::new(),
                 ul_rate: EmaRate::new(ALPHA),
                 dl_rate: EmaRate::new(ALPHA),
+                peer_tasks: JoinSet::new(),
+                peer_cancel_token: CancellationToken::new(),
+                cancel_token: CancellationToken::new(),
+                background_tasks: JoinSet::new(),
             },
             tx,
             progress_rx,
@@ -479,7 +490,12 @@ impl Torrent {
     #[instrument(skip(self), name = "torrent", fields(
     info_hash=%self.info_hash,
     ))]
-    pub async fn start_session(mut self) -> Result<(), TorrentError> {
+    pub async fn start_session(
+        mut self,
+        cancelation_token: CancellationToken,
+    ) -> Result<(), TorrentError> {
+        self.cancel_token = cancelation_token.clone();
+
         match self.state {
             TorrentState::Downloading | TorrentState::Checking | TorrentState::FetchingMetadata => {
                 self.init_interal().await
@@ -487,7 +503,8 @@ impl Torrent {
             TorrentState::Seeding => self.init_seed().await,
             TorrentState::Paused | TorrentState::Error(_) | TorrentState::Finished => {}
         }
-        // Star announcing to Trackers/DHT
+
+        // Start announcing to Trackers/DHT
         let (discovered_peers_tx, mut discovered_peers_rx) = mpsc::channel(64);
         self.announce(&discovered_peers_tx);
 
@@ -501,14 +518,15 @@ impl Torrent {
 
         loop {
             tokio::select! {
-                Ok(()) = self.shutdown_rx.changed() => {
-                    tracing::info!("Shutting down...");
-                    break;
+                biased;
+                _ = cancelation_token.cancelled() => {
+                    self.shutdown().await;
+                    break Ok(());
                 }
                 maybe_msg = self.rx.recv() => {
                     match maybe_msg{
                         Some(msg) => self.handle_message(msg).await?,
-                        None => break,
+                        None => break Ok(()),
                     }
                 }
                 Some(discovered_peers) = discovered_peers_rx.recv() => {
@@ -529,8 +547,31 @@ impl Torrent {
                 }
             }
         }
+    }
 
-        Ok(())
+    async fn shutdown(mut self) {
+        self.peer_cancel_token.cancel();
+        self.peers.clear();
+        let duration = Duration::from_secs(10);
+
+        match timeout(duration, self.peer_tasks.join_all()).await {
+            Ok(_) => tracing::debug!("All peer tasks completed for torrent {}", self.info_hash),
+            Err(_) => tracing::warn!(
+                "Timeout waiting for peer tasks to complete for torrent {}, peer tasks may still be running",
+                self.info_hash
+            ),
+        }
+
+        match timeout(duration, self.background_tasks.join_all()).await {
+            Ok(_) => tracing::debug!(
+                "All background tasks completed for torrent {}",
+                self.info_hash
+            ),
+            Err(_) => tracing::warn!(
+                "Timeout waiting for background tasks to complete for torrent {}, tasks may still be running",
+                self.info_hash
+            ),
+        }
     }
 
     // init bitfield
@@ -637,7 +678,8 @@ impl Torrent {
             PeerOrigin::Inbound { .. } => crate::events::peer::Direction::Inbound,
             PeerOrigin::Outbound(_) => crate::events::peer::Direction::Outbound,
         };
-        let peer_handle = match peer {
+        let peer_token = self.peer_cancel_token.child_token();
+        let (jh, peer_handle) = match peer {
             PeerOrigin::Inbound {
                 peer_id: remote_peer_id,
                 stream,
@@ -653,6 +695,7 @@ impl Torrent {
                 remote_peer_id,
                 supports_ext,
                 dht_enabled,
+                peer_token,
             ),
             PeerOrigin::Outbound(remote_addr) => spawn_outbound(
                 pid,
@@ -660,8 +703,13 @@ impl Torrent {
                 self.info_hash,
                 self.peer_id,
                 self.tx.clone(),
+                peer_token,
             ),
         };
+
+        self.peer_tasks.spawn(async move {
+            jh.await.ok();
+        });
 
         // Send our bitfield if we have any pieces
         if self.bitfield.size() > 0 && self.bitfield.iter_set().next().is_some() {
@@ -675,12 +723,13 @@ impl Torrent {
         }
 
         self.pending_requests.insert(pid, Vec::new());
-        self.peers.insert(pid, peer_handle.clone());
+        let peer_addr = peer_handle.peer_addr;
+        self.peers.insert(pid, peer_handle);
         let _ = self
             .event_bus
             .peer_tx
             .send(crate::events::peer::PeerEvent::Connected {
-                addr: peer_handle.peer_addr,
+                addr: peer_addr,
                 direction,
             });
     }
@@ -879,7 +928,7 @@ impl Torrent {
             TorrentMessage::DhtAddNode { node_addr } => {
                 if let Some(dht_client) = self.dht_client.as_ref() {
                     let dht_client = dht_client.clone();
-                    tokio::task::spawn(async move {
+                    self.background_tasks.spawn(async move {
                         if let Err(e) = dht_client.try_add_node(node_addr).await {
                             warn!(?e);
                         }
@@ -1073,7 +1122,6 @@ impl Torrent {
 
         // Decrement heat
         if let Some(p) = self.piece_mananger.as_mut() {
-            info!("DELETING REQUESTS");
             p.delete_request(request);
         }
 
@@ -1088,30 +1136,24 @@ impl Torrent {
             .map(|(p, _)| *p)
             .collect();
 
-        info!("SEND CANCELS");
         for cancel_pid in pids_to_cancel {
             self.send_to_peer(
                 cancel_pid,
                 PeerMessage::SendMessage(Message::Cancel(BlockInfo::from(request))),
             )
         }
-        info!("END OF SEND CANCELS");
-
         if let Some(piece) = self
             .piece_mananger
             .as_mut()
             .expect("state initializated")
             .add_block(block)
         {
-            info!("CALLING ON COMPLETE PIECE");
             self.on_complete_piece(request.piece_index, piece).await;
-            info!("RETURN FROM COMPLETE PIECE");
         }
     }
 
     async fn on_complete_piece(&mut self, piece_index: u32, piece: Box<[u8]>) {
         // Mark piece as downloaded first
-        debug!("MARKING PIECE AS DOWNLOADED");
         self.piece_mananger
             .as_mut()
             .expect("initialized")
@@ -1120,7 +1162,6 @@ impl Torrent {
         let torrent_id = self.info_hash;
         let piece: Arc<[u8]> = piece.into();
 
-        debug!("STARTING VERIFICATION");
         // Verify piece hash
         let valid = match self
             .storage
@@ -1420,7 +1461,7 @@ impl Torrent {
     }
 
     // If we are seeding a file we are not interest in receiving peers
-    fn announce(&self, discovered_peers_tx: &mpsc::Sender<Vec<SocketAddr>>) {
+    fn announce(&mut self, discovered_peers_tx: &mpsc::Sender<Vec<SocketAddr>>) {
         let client_state = self.metadata.info().map_or_else(
             || ClientState::new(0, 0, 0, Events::Started),
             |info| {
@@ -1450,29 +1491,41 @@ impl Torrent {
             let discovered_peers_tx = discovered_peers_tx.clone();
             let torrent_tx = self.tx.clone();
             let event_bus_tx = self.event_bus.torrent_tx.clone();
-            tokio::spawn(async move {
-                // Signal that we're starting to announce
-                let _ = torrent_tx
-                    .send(TorrentMessage::TrackerUpdate {
-                        url: announce_url.clone(),
-                        status: TrackerState::Announcing,
-                        seeder_count: None,
-                        leecher_count: None,
-                        peers_received: 0,
-                        error: None,
-                    })
-                    .await;
+            let cancel_token = self.cancel_token.clone();
 
-                let response = tracker_client
-                    .announce(info_hash, announce.clone(), client_state)
-                    .await;
+            self.background_tasks.spawn(async move {
+                let mut retry_count: u32 = 0;
 
-                match response {
-                    Err(e) => {
+                loop {
+                    let _ = torrent_tx
+                        .send(TorrentMessage::TrackerUpdate {
+                            url: announce_url.clone(),
+                            status: TrackerState::Announcing,
+                            seeder_count: None,
+                            leecher_count: None,
+                            peers_received: 0,
+                            error: None,
+                        })
+                        .await;
+
+                    let result = tracker_client
+                        .announce(info_hash, announce.clone(), client_state)
+                        .await;
+
+                    let Ok(response) = result else {
+                        let e = result.unwrap_err();
+                        let is_permanent = matches!(
+                            e,
+                            TrackerError::InvalidScheme(_)
+                                | TrackerError::InvalidUrl(_)
+                                | TrackerError::UrlParse(_)
+                        );
+
                         tracing::warn!("Failed to announce to tracker {}: {}", announce, e);
+
                         let _ = torrent_tx
                             .send(TorrentMessage::TrackerUpdate {
-                                url: announce_url,
+                                url: announce_url.clone(),
                                 status: TrackerState::Error,
                                 seeder_count: None,
                                 leecher_count: None,
@@ -1480,43 +1533,58 @@ impl Torrent {
                                 error: Some(format!("{:?}", e)),
                             })
                             .await;
+
                         let _ =
                             event_bus_tx.send(crate::events::torrent::TorrentEvent::TrackerError {
                                 url: announce.clone(),
                                 error: format!("{:?}", e),
-                                times_in_row: 1,
+                                times_in_row: retry_count + 1,
                             });
-                    }
-                    Ok(response) => {
-                        let peers_count = response.peers.len() as u32;
-                        let _ = torrent_tx
-                            .send(TorrentMessage::TrackerUpdate {
-                                url: announce_url,
-                                status: TrackerState::Ok,
-                                seeder_count: Some(response.seeders as u32),
-                                leecher_count: Some(response.leechers as u32),
-                                peers_received: peers_count,
-                                error: None,
-                            })
-                            .await;
-                        let _ = event_bus_tx.send(
-                            crate::events::torrent::TorrentEvent::TrackerAnnounced {
-                                url: announce.clone(),
-                                peers_received: peers_count,
-                            },
-                        );
 
-                        if !seed {
-                            let _ = discovered_peers_tx.send(response.peers).await;
+                        if is_permanent {
+                            tracing::warn!("Tracker {} has permanent error, stopping", announce);
+                            return;
                         }
 
-                        // Sleep for the interval then loop back to announce again
-                        let sleep_duration = response.interval;
-                        sleep(Duration::from_secs(
-                            u64::try_from(sleep_duration)
-                                .expect("tracker interval must be non-negative"),
-                        ))
+                        // Exponential backoff: 5s, 10s, 15s... max 60s
+                        let backoff_secs = (5 * (1 + retry_count)).min(60);
+                        retry_count += 1;
+
+                        tokio::select! {
+                            _ = cancel_token.cancelled() => return,
+                            _ = sleep(Duration::from_secs(u64::from(backoff_secs))) => continue,
+                        }
+                    };
+
+                    // Success - reset retry count
+                    retry_count = 0;
+
+                    let peers_count = response.peers.len() as u32;
+                    let _ = torrent_tx
+                        .send(TorrentMessage::TrackerUpdate {
+                            url: announce_url.clone(),
+                            status: TrackerState::Ok,
+                            seeder_count: Some(response.seeders as u32),
+                            leecher_count: Some(response.leechers as u32),
+                            peers_received: peers_count,
+                            error: None,
+                        })
                         .await;
+
+                    let _ =
+                        event_bus_tx.send(crate::events::torrent::TorrentEvent::TrackerAnnounced {
+                            url: announce.clone(),
+                            peers_received: peers_count,
+                        });
+
+                    if !seed {
+                        let _ = discovered_peers_tx.send(response.peers).await;
+                    }
+
+                    let sleep_duration = u64::try_from(response.interval).unwrap_or(1800).max(60);
+                    tokio::select! {
+                        _ = cancel_token.cancelled() => return,
+                        _ = sleep(Duration::from_secs(sleep_duration)) => {}
                     }
                 }
             });
@@ -1531,8 +1599,9 @@ impl Torrent {
             let info_hash = self.info_hash;
             let discovered_peers_tx = discovered_peers_tx.clone();
             let port = 6881_u16; // TODO: Use actual listening port from session
+            let cancel_token = self.cancel_token.clone();
 
-            tokio::spawn(async move {
+            self.background_tasks.spawn(async move {
                 // DHT re-announce interval (15 minutes as per BEP 5 recommendation)
                 const DHT_ANNOUNCE_INTERVAL: Duration = Duration::from_secs(15 * 60);
 
@@ -1541,19 +1610,36 @@ impl Torrent {
                 let _ = dht.announce_peer(info_hash, port).await;
 
                 loop {
-                    let mut discovered_peers_stream = dht.get_peers(info_hash).await;
-                    let mut response_count = 0;
+                    tokio::select! {
+                        _ = cancel_token.cancelled() => return,
+                        mut discovered_peers_stream = dht.get_peers(info_hash) => {
+                            let mut response_count = 0;
 
-                    while let Some(peers) = discovered_peers_stream.recv().await {
-                        let _ = discovered_peers_tx.send(peers).await;
-                        response_count += 1;
-                        if response_count >= MAX_RESPONSES {
-                            break;
+                            loop {
+                                tokio::select! {
+                                    _ = cancel_token.cancelled() => return,
+                                    peers_opt = discovered_peers_stream.recv() => {
+                                        match peers_opt {
+                                            Some(peers) => {
+                                                let _ = discovered_peers_tx.send(peers).await;
+                                                response_count += 1;
+                                                if response_count >= MAX_RESPONSES {
+                                                    break;
+                                                }
+                                            }
+                                            None => break,
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
 
-                    // Wait before next DHT announce
-                    sleep(DHT_ANNOUNCE_INTERVAL).await;
+                    // Wait before next DHT announce with cancellation check
+                    tokio::select! {
+                        _ = cancel_token.cancelled() => return,
+                        _ = sleep(DHT_ANNOUNCE_INTERVAL) => {}
+                    }
                 }
             });
         }

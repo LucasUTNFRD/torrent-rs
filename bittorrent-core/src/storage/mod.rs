@@ -11,7 +11,10 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use tokio::sync::{mpsc, oneshot};
+use tokio::{
+    sync::{mpsc, oneshot},
+    task::JoinHandle,
+};
 
 mod storage_manager;
 
@@ -104,8 +107,27 @@ pub trait StorageBackend: Send + Sync {
     ) -> Result<Block, StorageError>;
 }
 
+/// Handle for sending storage operations.
+/// Cheaply cloneable - can be shared across torrents.
+#[derive(Clone)]
 pub struct DiskStorage {
     tx: mpsc::Sender<StorageMessage>,
+}
+
+/// Runtime that owns the storage actor lifecycle.
+/// Single owner - responsible for graceful shutdown.
+pub struct DiskStorageRuntime {
+    jh: JoinHandle<()>,
+}
+
+impl DiskStorageRuntime {
+    /// Gracefully shutdown the storage actor.
+    /// Waits for in-flight operations to complete.
+    pub async fn shutdown(self) {
+        // Drop happens implicitly when self is consumed
+        // Channel closes, actor exits
+        let _ = self.jh.await;
+    }
 }
 
 fn get_download_dir() -> PathBuf {
@@ -120,26 +142,22 @@ fn get_download_dir() -> PathBuf {
     )
 }
 
-impl Default for DiskStorage {
-    fn default() -> Self {
-        Self::new()
-    }
+/// Factory for creating a storage handle and runtime pair.
+/// Returns (handle, runtime) where handle is cloneable and runtime owns lifecycle.
+#[must_use]
+pub fn disk_storage_factory() -> (DiskStorage, DiskStorageRuntime) {
+    disk_storage_with_dir(get_download_dir())
 }
 
-impl DiskStorage {
-    #[must_use]
-    pub fn new() -> Self {
-        Self::with_download_dir(get_download_dir())
-    }
+/// Factory for creating a storage handle and runtime pair with a custom download directory.
+#[must_use]
+pub fn disk_storage_with_dir(download_dir: PathBuf) -> (DiskStorage, DiskStorageRuntime) {
+    let (tx, rx) = mpsc::channel(1024);
 
-    pub fn with_download_dir(download_dir: PathBuf) -> Self {
-        let (tx, rx) = mpsc::channel(1024);
+    let manager = StorageManager::new(download_dir, rx);
+    let jh = tokio::spawn(manager.start());
 
-        let manager = StorageManager::new(download_dir, rx);
-        tokio::spawn(manager.start());
-
-        Self { tx }
-    }
+    (DiskStorage { tx }, DiskStorageRuntime { jh })
 }
 
 #[async_trait]

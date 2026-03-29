@@ -29,9 +29,10 @@ use thiserror::Error;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     sync::{mpsc, oneshot},
+    task::JoinHandle,
     time::{Instant, interval},
 };
-use tokio_util::codec::Framed;
+use tokio_util::{codec::Framed, sync::CancellationToken};
 use tracing::debug;
 
 use crate::{
@@ -278,14 +279,13 @@ impl PeerConnection {
     }
 
     // ── Event loop ────────────────────────────────────────────────────────────
-    async fn run(mut self) -> Result<(), ConnectionError> {
+    async fn run(mut self, peer_token: CancellationToken) -> Result<(), ConnectionError> {
         self.have_valid_metadata().await;
 
         if self.supports_extended {
             self.send_extended_handshake().await?;
         }
         if self.dht_enabled {
-            // TODO: send real port
             self.sink.send(Message::Port { port: 6881 }).await?;
         }
 
@@ -298,12 +298,20 @@ impl PeerConnection {
             self.maybe_request_metadata().await?;
 
             tokio::select! {
+                biased;
+                _ = peer_token.cancelled() => {
+                    tracing::info!("TOken Cancel Received");
+                    break;
+                }
                 maybe_msg = self.stream.next() => match maybe_msg {
                     Some(Ok(msg)) => {
                         counters::on_read_counter();
                         self.handle_msg(msg).await?
                     },
-                    _ => break,
+                    Some(Err(_e)) => {
+                        // Network error - connection will close
+                    }
+                    _ => break, // Remote closed the connection
                 },
                 maybe_cmd = self.cmd_rx.recv() => match maybe_cmd {
                     Some(cmd) => self.handle_cmd(cmd).await?,
@@ -481,7 +489,6 @@ impl PeerConnection {
             PeerMessage::SendMessage(msg) => {
                 self.sink.send(msg).await?;
             }
-            PeerMessage::Disconnect => { /* TODO: graceful shutdown */ }
         }
         Ok(())
     }
@@ -682,7 +689,11 @@ impl PeerConnection {
             })
             .await;
 
-        let blocks = rx.await.expect("TorrentSession dropped oneshot sender");
+        let Ok(blocks) = rx.await else {
+            tracing::debug!("Torrent shutting down, aborting request");
+            return Ok(());
+        };
+
         let received = blocks.len();
         self.request_queue.extend(blocks);
         tracing::debug!(
@@ -728,7 +739,10 @@ impl PeerConnection {
             })
             .await;
 
-        let interested = rx.await.expect("sender dropped");
+        let Ok(interested) = rx.await else {
+            tracing::debug!("Torrent shutting down, aborting interest update");
+            return Ok(());
+        };
         self.set_am_interested(interested);
 
         if interested {
@@ -911,7 +925,11 @@ impl PeerConnection {
             .torrent_tx
             .send(TorrentMessage::ValidMetadata { resp: tx })
             .await;
-        self.metadata = rx.await.unwrap();
+
+        let Ok(metadata) = rx.await else {
+            return;
+        };
+        self.metadata = metadata;
     }
 }
 
@@ -919,10 +937,10 @@ impl PeerConnection {
 //
 // Clone-able. The info Arc lets the choker read state without a message round
 // trip. The tx channel is for sending commands into the peer task.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 #[allow(dead_code)]
 pub struct PeerHandle {
-    pub pid: Pid,
+    pid: Pid,
     pub peer_addr: SocketAddr,
     pub info: Arc<RwLock<PeerInfo>>,
     pub tx: mpsc::Sender<PeerMessage>,
@@ -941,20 +959,15 @@ pub fn spawn_outbound(
     info_hash: InfoHash,
     local_peer_id: PeerID,
     torrent_tx: mpsc::Sender<TorrentMessage>,
-) -> PeerHandle {
+    peer_token: CancellationToken,
+) -> (JoinHandle<()>, PeerHandle) {
     let (tx, rx) = mpsc::channel(256);
     // PeerInfo initialised with a placeholder peer_id; updated after handshake
     let info = Arc::new(RwLock::new(PeerInfo::new(*CLIENT_ID, Direction::Outbound)));
-
-    let handle = PeerHandle {
-        pid,
-        peer_addr: addr,
-        info: Arc::clone(&info),
-        tx,
-    };
+    let info_clone = info.clone();
 
     let tx_err = torrent_tx.clone();
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         let result: Result<(), ConnectionError> = async {
             let mut stream = TcpStream::connect_timeout(&addr, CONNECTION_TIMEOUT).await?;
             let (remote_peer_id, supports_extended, dht_enabled) =
@@ -963,7 +976,7 @@ pub fn spawn_outbound(
 
             // Update peer info with handshake results
             {
-                let mut info_guard = info.write().unwrap();
+                let mut info_guard = info_clone.write().unwrap();
                 info_guard.peer_id = remote_peer_id;
                 info_guard.supports_extended = supports_extended;
                 info_guard.dht_enabled = dht_enabled;
@@ -973,24 +986,33 @@ pub fn spawn_outbound(
                 pid,
                 stream,
                 addr,
-                Arc::clone(&info),
+                Arc::clone(&info_clone),
                 torrent_tx,
                 rx,
                 supports_extended,
                 dht_enabled,
             )
-            .run()
+            .run(peer_token)
             .await
         }
         .await;
 
         if let Err(e) = result {
+            // TODO: Improve Error Handling
             debug!(peer = %addr, error = %e, "Outbound peer failed");
             let _ = tx_err.send(TorrentMessage::PeerError(pid, e, None)).await;
         }
     });
 
-    handle
+    (
+        handle,
+        PeerHandle {
+            pid,
+            peer_addr: addr,
+            info: Arc::clone(&info),
+            tx,
+        },
+    )
 }
 
 /// Spawn an inbound connection. The caller has already performed the TCP handshake
@@ -1005,26 +1027,18 @@ pub fn spawn_inbound(
     remote_peer_id: PeerID,
     supports_ext: bool,
     dht_enabled: bool,
-) -> PeerHandle {
+    peer_token: CancellationToken,
+) -> (JoinHandle<()>, PeerHandle) {
     let (tx, rx) = mpsc::channel(256);
     let info = Arc::new(RwLock::new(PeerInfo::new(*CLIENT_ID, Direction::Inbound)));
-
-    let handle = PeerHandle {
-        pid,
-        peer_addr: addr,
-        info: Arc::clone(&info),
-        tx,
-    };
+    let info_clone = info.clone();
 
     let tx_err = torrent_tx.clone();
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         let result: Result<(), ConnectionError> = async {
-            // let (remote_peer_id, supports_extended) =
-            //     PeerConnection::handshake(&mut stream, local_peer_id, info_hash).await?;
-
             inc_connected();
             {
-                let mut info_guard = info.write().unwrap();
+                let mut info_guard = info_clone.write().unwrap();
                 info_guard.peer_id = remote_peer_id;
                 info_guard.supports_extended = supports_ext;
                 info_guard.dht_enabled = dht_enabled;
@@ -1034,13 +1048,13 @@ pub fn spawn_inbound(
                 pid,
                 stream,
                 addr,
-                Arc::clone(&info),
+                Arc::clone(&info_clone),
                 torrent_tx,
                 rx,
                 supports_ext,
                 dht_enabled,
             )
-            .run()
+            .run(peer_token)
             .await
         }
         .await;
@@ -1051,5 +1065,13 @@ pub fn spawn_inbound(
         }
     });
 
-    handle
+    (
+        handle,
+        PeerHandle {
+            pid,
+            peer_addr: addr,
+            info: Arc::clone(&info),
+            tx,
+        },
+    )
 }

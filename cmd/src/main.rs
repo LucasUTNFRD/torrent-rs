@@ -1,7 +1,7 @@
 use bittorrent_core::{Session, SessionConfig, SessionEvent, utils::format_speed};
 use clap::{Parser, Subcommand};
+use indicatif::{ProgressBar, ProgressStyle};
 use std::time::Duration;
-use tokio::time::interval;
 
 #[derive(Parser)]
 #[command(name = "torrent-rs")]
@@ -61,8 +61,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn download_torrent(input: String) -> Result<(), Box<dyn std::error::Error>> {
-    use std::io::{self, Write};
-
     let config = SessionConfig::default();
     let session = Session::new(config);
 
@@ -72,19 +70,19 @@ async fn download_torrent(input: String) -> Result<(), Box<dyn std::error::Error
         session.add_torrent(&input).await?
     };
 
-    println!("Added torrent: {torrent_id}");
-
     let mut metrics_rx = session.subscribe_torrent(torrent_id).await?;
     let mut event_rx = session.subscribe();
 
-    println!("Starting download loop...");
-    println!(
-        "{:<20} | {:<10} | {:<10} | {:<10} | {:<10}",
-        "Name", "Progress", "Down", "Up", "Peers"
+    let progress_bar = ProgressBar::new(100);
+    progress_bar.set_style(
+        ProgressStyle::with_template(
+            "{spinner:.green} [{elapsed_precise}] {msg} {wide_bar:.cyan/blue} {pos}/{len}% ({eta})",
+        )
+        .unwrap()
+        .progress_chars("#>-"),
     );
-    println!("{}", "-".repeat(70));
 
-    let mut ticker = interval(Duration::from_millis(500));
+    let mut ticker = tokio::time::interval(Duration::from_millis(100));
 
     loop {
         tokio::select! {
@@ -101,24 +99,26 @@ async fn download_torrent(input: String) -> Result<(), Box<dyn std::error::Error
                 #[allow(clippy::cast_sign_loss)]
                 #[allow(clippy::cast_possible_truncation)]
                 let upload_rate = m.upload_rate as u64;
-                print!("{:<20} | {:>8.2}% | {:>10} | {:>10} | {:>5}",
+
+                let progress_percent = (progress * 100.0) as u64;
+                progress_bar.set_position(progress_percent);
+                progress_bar.set_message(format!(
+                    "{:<20} | D: {:>10}/s | U: {:>10}/s | Peers: {:>3}",
                     truncate(&m.name, 20),
-                    progress * 100.0,
                     format_speed(download_rate),
                     format_speed(upload_rate),
                     m.connected_peers
-                );
-                io::stdout().flush().unwrap();
+                ));
             }
 
             Ok(event) = event_rx.recv() => {
                 match event {
                     SessionEvent::TorrentCompleted(id) if id == torrent_id => {
-                        println!("\n\nTorrent {id} completed!");
+                        progress_bar.finish_with_message("Download completed!");
                         break;
                     }
                     SessionEvent::TorrentError(id, err) if id == torrent_id => {
-                        eprintln!("\n\nError in torrent {id}: {err}");
+                        progress_bar.finish_with_message(format!("Error: {err}"));
                         break;
                     }
                     _ => {}
@@ -129,6 +129,7 @@ async fn download_torrent(input: String) -> Result<(), Box<dyn std::error::Error
         }
     }
 
+    progress_bar.finish();
     println!("Shutting down session...");
     session.shutdown().await?;
 

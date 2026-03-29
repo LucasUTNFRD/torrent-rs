@@ -25,6 +25,7 @@ use tokio::{
 };
 
 use mainline_dht::{DhtConfig, DhtHandler};
+use tokio_util::sync::CancellationToken;
 use tracker_client::TrackerHandler;
 
 use crate::{
@@ -33,7 +34,7 @@ use crate::{
     metrics::counters::{self},
     net::TcpListener,
     protocol::peer_wire::Handshake,
-    storage::{DiskStorage, StorageBackend},
+    storage::{DiskStorage, DiskStorageRuntime, disk_storage_factory},
     torrent::{Torrent, TorrentContext, TorrentError, TorrentMessage, TorrentSource},
     types::TorrentId,
     verify_torrent_file::verify_content,
@@ -54,21 +55,26 @@ pub struct Session {
     tx: UnboundedSender<SessionCommand>,
 }
 
+type StorageFactory = Box<dyn FnOnce() -> (DiskStorage, DiskStorageRuntime) + Send>;
+
 pub struct SessionBuilder {
     config: SessionConfig,
-    storage: Option<Arc<dyn StorageBackend>>,
+    storage_factory: Option<StorageFactory>,
 }
 
 impl SessionBuilder {
     pub fn new(config: SessionConfig) -> Self {
         Self {
             config,
-            storage: None,
+            storage_factory: None,
         }
     }
 
-    pub fn with_storage(mut self, storage: Arc<dyn StorageBackend>) -> Self {
-        self.storage = Some(storage);
+    pub fn with_storage_factory<F>(mut self, factory: F) -> Self
+    where
+        F: FnOnce() -> (DiskStorage, DiskStorageRuntime) + Send + 'static,
+    {
+        self.storage_factory = Some(Box::new(factory));
         self
     }
 
@@ -76,9 +82,12 @@ impl SessionBuilder {
         let (tx, rx) = mpsc::unbounded_channel();
         let event_bus = crate::events::EventBus::new();
 
-        let storage = self.storage.unwrap_or_else(|| Arc::new(DiskStorage::new()));
+        let (storage, storage_runtime) = self
+            .storage_factory
+            .map_or_else(disk_storage_factory, |f| f());
 
-        let manager = SessionManager::new(self.config, rx, storage, event_bus.clone());
+        let manager =
+            SessionManager::new(self.config, rx, storage, storage_runtime, event_bus.clone());
 
         let handle = tokio::task::spawn(async move { manager.start().await });
 
@@ -370,6 +379,7 @@ struct TorrentEntry {
     tx: mpsc::Sender<TorrentMessage>,
     /// Handle to the torrent task
     handle: JoinHandle<Result<(), TorrentError>>,
+    torrent_token: CancellationToken,
     /// Metrics receiver for the torrent
     progress_rx: watch::Receiver<TorrentProgress>,
     /// Display name of the torrent
@@ -387,14 +397,18 @@ struct SessionManager {
     event_bus: crate::events::EventBus,
     rx: mpsc::UnboundedReceiver<SessionCommand>,
     sessions: Arc<RwLock<HashMap<InfoHash, TorrentEntry>>>,
-    storage: Arc<dyn StorageBackend>,
+    storage: Option<DiskStorage>,
+    storage_runtime: Option<DiskStorageRuntime>,
+    torrent_root_token: CancellationToken,
+    tcp_listener_handle: Option<JoinHandle<()>>,
 }
 
 impl SessionManager {
     pub fn new(
         config: SessionConfig,
         rx: mpsc::UnboundedReceiver<SessionCommand>,
-        storage: Arc<dyn StorageBackend>,
+        storage: DiskStorage,
+        storage_runtime: DiskStorageRuntime,
         event_bus: crate::events::EventBus,
     ) -> Self {
         let peer_id = config.peer_id.unwrap_or(*CLIENT_ID);
@@ -404,7 +418,10 @@ impl SessionManager {
             event_bus,
             rx,
             sessions: Arc::new(RwLock::new(HashMap::new())),
-            storage,
+            storage: Some(storage),
+            storage_runtime: Some(storage_runtime),
+            torrent_root_token: CancellationToken::new(),
+            tcp_listener_handle: None,
         }
     }
 
@@ -428,20 +445,16 @@ impl SessionManager {
             );
         }
 
-        let (shutdown_tx, shutdown_rx) = watch::channel(());
-
-        self.spawn_tcp_listener();
+        self.tcp_listener_handle = Some(self.spawn_tcp_listener());
 
         while let Some(cmd) = self.rx.recv().await {
             match cmd {
                 SessionCommand::AddTorrent { info, resp } => {
-                    let result =
-                        self.handle_add_torrent(info, &tracker, dht.as_ref(), &shutdown_rx);
+                    let result = self.handle_add_torrent(info, &tracker, dht.as_ref());
                     let _ = resp.send(result);
                 }
                 SessionCommand::AddMagnet { magnet, resp } => {
-                    let result =
-                        self.handle_add_magnet(magnet, &tracker, dht.as_ref(), &shutdown_rx);
+                    let result = self.handle_add_magnet(magnet, &tracker, dht.as_ref());
                     let _ = resp.send(result);
                 }
                 SessionCommand::SeedFile {
@@ -460,14 +473,8 @@ impl SessionManager {
                     .unwrap_or(false);
 
                     let result = if is_valid {
-                        self.handle_seed_torrent(
-                            info,
-                            content_dir,
-                            &tracker,
-                            dht.as_ref(),
-                            &shutdown_rx,
-                        )
-                        .await
+                        self.handle_seed_torrent(info, content_dir, &tracker, dht.as_ref())
+                            .await
                     } else {
                         // TODO: Given metadata did not match with contents
                         todo!("Return a proper session error");
@@ -478,13 +485,7 @@ impl SessionManager {
                 SessionCommand::SeedTorrentUnchecked { info, resp } => {
                     // Skip verify_content — used for simulation with mock storage
                     let result = self
-                        .handle_seed_torrent(
-                            info,
-                            PathBuf::new(),
-                            &tracker,
-                            dht.as_ref(),
-                            &shutdown_rx,
-                        )
+                        .handle_seed_torrent(info, PathBuf::new(), &tracker, dht.as_ref())
                         .await;
                     let _ = resp.send(result);
                 }
@@ -504,7 +505,7 @@ impl SessionManager {
                 }
 
                 SessionCommand::Shutdown { resp } => {
-                    let result = self.handle_shutdown(&shutdown_tx, dht.as_ref()).await;
+                    let result = self.handle_shutdown(dht.as_ref()).await;
                     let _ = resp.send(result);
                     break;
                 }
@@ -605,7 +606,6 @@ impl SessionManager {
         content_dir: PathBuf,
         tracker: &Arc<TrackerHandler>,
         dht: Option<&Arc<DhtHandler>>,
-        shutdown_rx: &watch::Receiver<()>,
     ) -> Result<TorrentId, SessionError> {
         let info_hash = metainfo.info_hash;
 
@@ -626,8 +626,7 @@ impl SessionManager {
             peer_id: self.peer_id,
             tracker_client: tracker.clone(),
             dht_client: dht.cloned(),
-            storage: self.storage.clone(),
-            shutdown_rx: shutdown_rx.clone(),
+            storage: self.storage.as_ref().unwrap().clone(),
             torrents_dir: self.config.torrents_dir.clone(),
             event_bus: self.event_bus.clone(),
             unchoke_slots: self.config.unchoke_slots_limit as usize,
@@ -641,11 +640,15 @@ impl SessionManager {
             },
         );
 
-        let handle = tokio::spawn(async move { torrent.start_session().await });
+        let torrent_child_token = self.torrent_root_token.child_token();
+        let torrent_token_for_entry = torrent_child_token.clone();
+
+        let handle = tokio::spawn(async move { torrent.start_session(torrent_child_token).await });
 
         let entry = TorrentEntry {
             tx,
             handle,
+            torrent_token: torrent_token_for_entry,
             progress_rx: progress_rx.clone(),
             name: name.clone(),
             size_bytes,
@@ -670,7 +673,6 @@ impl SessionManager {
         metainfo: TorrentInfo,
         tracker: &Arc<TrackerHandler>,
         dht: Option<&Arc<DhtHandler>>,
-        shutdown_rx: &watch::Receiver<()>,
     ) -> Result<TorrentId, SessionError> {
         let info_hash = metainfo.info_hash;
 
@@ -691,8 +693,7 @@ impl SessionManager {
             peer_id: self.peer_id,
             tracker_client: tracker.clone(),
             dht_client: dht.cloned(),
-            storage: self.storage.clone(),
-            shutdown_rx: shutdown_rx.clone(),
+            storage: self.storage.as_ref().unwrap().clone(),
             torrents_dir: self.config.torrents_dir.clone(),
             event_bus: self.event_bus.clone(),
             unchoke_slots: self.config.unchoke_slots_limit as usize,
@@ -701,11 +702,15 @@ impl SessionManager {
         let (torrent, tx, progress_rx) =
             Torrent::new(ctx, TorrentSource::Torrent(metainfo.clone()));
 
-        let handle = tokio::spawn(async move { torrent.start_session().await });
+        let torrent_child_token = self.torrent_root_token.child_token();
+        let torrent_token_for_entry = torrent_child_token.clone();
+
+        let handle = tokio::spawn(async move { torrent.start_session(torrent_child_token).await });
 
         let entry = TorrentEntry {
             tx,
             handle,
+            torrent_token: torrent_token_for_entry,
             progress_rx: progress_rx.clone(),
             name: name.clone(),
             size_bytes,
@@ -730,7 +735,6 @@ impl SessionManager {
         magnet: Magnet,
         tracker: &Arc<TrackerHandler>,
         dht: Option<&Arc<DhtHandler>>,
-        shutdown_rx: &watch::Receiver<()>,
     ) -> Result<TorrentId, SessionError> {
         let info_hash = magnet.info_hash().ok_or(SessionError::InvalidMagnet)?;
 
@@ -762,8 +766,7 @@ impl SessionManager {
             peer_id: self.peer_id,
             tracker_client: tracker.clone(),
             dht_client: dht.cloned(),
-            storage: self.storage.clone(),
-            shutdown_rx: shutdown_rx.clone(),
+            storage: self.storage.as_ref().unwrap().clone(),
             torrents_dir: self.config.torrents_dir.clone(),
             event_bus: self.event_bus.clone(),
             unchoke_slots: self.config.unchoke_slots_limit as usize,
@@ -771,15 +774,19 @@ impl SessionManager {
 
         let (torrent, tx, progress_rx) = Torrent::new(ctx, TorrentSource::Magnet(magnet));
 
-        let handle = tokio::spawn(async move { torrent.start_session().await });
+        let torrent_child_token = self.torrent_root_token.child_token();
+        let torrent_token_for_entry = torrent_child_token.clone();
+
+        let handle = tokio::spawn(async move { torrent.start_session(torrent_child_token).await });
 
         let entry = TorrentEntry {
             tx,
             handle,
+            torrent_token: torrent_token_for_entry,
             progress_rx,
             name,
-            size_bytes: 0,  // Unknown until metadata is fetched
-            metainfo: None, // Will be populated when metadata is fetched
+            size_bytes: 0,
+            metainfo: None,
         };
 
         {
@@ -803,9 +810,7 @@ impl SessionManager {
 
         match entry {
             Some(entry) => {
-                // The torrent task should exit when its channel is dropped
-                drop(entry.tx);
-                // Wait for it to finish
+                entry.torrent_token.cancel();
                 match entry.handle.await {
                     Ok(Ok(())) => tracing::info!("Torrent {} removed cleanly", id),
                     Ok(Err(e)) => tracing::warn!("Torrent {} error on removal: {:?}", id, e),
@@ -821,14 +826,16 @@ impl SessionManager {
         }
     }
 
-    async fn handle_shutdown(
-        &self,
-        shutdown_tx: &watch::Sender<()>,
-        dht: Option<&Arc<DhtHandler>>,
-    ) -> Result<(), SessionError> {
-        // Signal shutdown to all torrents
-        if shutdown_tx.send(()).is_err() {
-            tracing::warn!("No receivers for shutdown signal");
+    async fn handle_shutdown(&mut self, dht: Option<&Arc<DhtHandler>>) -> Result<(), SessionError> {
+        // Signal all torrents to stop. Each Torrent internally
+        // cancels its peer tokens and awaits its peer JoinSet
+        // before returning — so by the time join_all() resolves,
+        // zero PeerConnection tasks are alive.
+        self.torrent_root_token.cancel();
+
+        // Shutdown TCP listener
+        if let Some(handle) = self.tcp_listener_handle.take() {
+            handle.await.ok();
         }
 
         // Collect and wait for all torrent handles
@@ -855,104 +862,133 @@ impl SessionManager {
             }
         }
 
+        // Drop storage handle to close the channel, then wait for actor to finish
+        tracing::info!("Shutting down storage...");
+        self.storage.take();
+        if let Some(runtime) = self.storage_runtime.take() {
+            runtime.shutdown().await;
+            tracing::info!("Storage shutdown complete");
+        }
+
         Ok(())
     }
 
-    fn spawn_tcp_listener(&self) {
+    fn spawn_tcp_listener(&self) -> JoinHandle<()> {
         let sessions = self.sessions.clone();
         let listen_addr = self.config.listen_addr;
         let peer_id = self.peer_id;
+        let cancel_token = self.torrent_root_token.clone();
 
         tokio::spawn(async move {
-            let listener = TcpListener::bind(listen_addr)
-                .await
-                .expect("failed to bind tcp listener");
+            let listener = match TcpListener::bind(listen_addr).await {
+                Ok(l) => l,
+                Err(e) => {
+                    tracing::error!("Failed to bind TCP listener: {}", e);
+                    return;
+                }
+            };
             tracing::info!("Listening on {:?}", listener.local_addr());
 
-            while let Ok((mut stream, remote_addr)) = listener.accept().await {
-                tracing::debug!("Accepted connection from {:?}", remote_addr);
-                counters::incoming_connections();
-                let sessions = sessions.clone();
-                let peer_id = peer_id;
-
-                tokio::spawn(async move {
-                    let mut buf = BytesMut::zeroed(Handshake::HANDSHAKE_LEN);
-
-                    if let Err(e) = stream.read_exact(&mut buf).await {
-                        tracing::debug!(
-                            error = ?e,
-                            "Failed to read handshake from {:?}",
-                            remote_addr
-                        );
-                        return;
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = cancel_token.cancelled() => {
+                        tracing::info!("TCP listener shutting down");
+                        break;
                     }
+                    result = listener.accept() => {
+                        match result {
+                            Ok((mut stream, remote_addr)) => {
+                                tracing::debug!("Accepted connection from {:?}", remote_addr);
+                                counters::incoming_connections();
+                                let sessions = sessions.clone();
+                                let peer_id = peer_id;
 
-                    let Some(remote_handshake) = Handshake::from_bytes(&buf) else {
-                        tracing::debug!("Failed to parse handshake from {:?}", remote_addr);
-                        return;
-                    };
+                                tokio::spawn(async move {
+                                    let mut buf = BytesMut::zeroed(Handshake::HANDSHAKE_LEN);
 
-                    let have_torrent = {
-                        sessions
-                            .read()
-                            .unwrap()
-                            .contains_key(&remote_handshake.info_hash)
-                    };
+                                    if let Err(e) = stream.read_exact(&mut buf).await {
+                                        tracing::debug!(
+                                            error = ?e,
+                                            "Failed to read handshake from {:?}",
+                                            remote_addr
+                                        );
+                                        return;
+                                    }
 
-                    if !have_torrent {
-                        tracing::debug!(
-                            "Rejecting connection for unknown torrent {:?}",
-                            remote_handshake.info_hash
-                        );
-                        return;
+                                    let Some(remote_handshake) = Handshake::from_bytes(&buf) else {
+                                        tracing::debug!("Failed to parse handshake from {:?}", remote_addr);
+                                        return;
+                                    };
+
+                                    let have_torrent = {
+                                        sessions
+                                            .read()
+                                            .unwrap()
+                                            .contains_key(&remote_handshake.info_hash)
+                                    };
+
+                                    if !have_torrent {
+                                        tracing::debug!(
+                                            "Rejecting connection for unknown torrent {:?}",
+                                            remote_handshake.info_hash
+                                        );
+                                        return;
+                                    }
+
+                                    if remote_handshake.peer_id == peer_id {
+                                        tracing::debug!("Rejecting self-connection from {:?}", remote_addr);
+                                        return;
+                                    }
+
+                                    let handshake = Handshake::new(peer_id, remote_handshake.info_hash);
+                                    if let Err(e) = stream.write_all(&handshake.to_bytes()).await {
+                                        tracing::debug!(
+                                            error = ?e,
+                                            "Failed to send handshake to {:?}",
+                                            remote_addr
+                                        );
+                                        return;
+                                    }
+
+                                    let supports_ext = remote_handshake.support_extended_message();
+                                    let dht_enabled = remote_handshake.support_dht();
+
+                                    tracing::info!(
+                                        "Incoming peer connection from {:?} for {:?}",
+                                        remote_addr,
+                                        remote_handshake.info_hash
+                                    );
+
+                                    // Forward connection to the appropriate torrent
+                                    let torrent_tx = {
+                                        sessions
+                                            .read()
+                                            .unwrap()
+                                            .get(&remote_handshake.info_hash)
+                                            .map(|entry| entry.tx.clone())
+                                    };
+
+                                    if let Some(tx) = torrent_tx {
+                                        let _ = tx
+                                            .send(TorrentMessage::InboundPeer {
+                                                stream,
+                                                remote_addr,
+                                                supports_ext,
+                                                peer_id: remote_handshake.peer_id,
+                                                dht_enabled,
+                                            })
+                                            .await;
+                                    }
+                                });
+                            }
+                            Err(e) => {
+                                tracing::warn!("TCP accept error: {}", e);
+                            }
+                        }
                     }
-
-                    if remote_handshake.peer_id == peer_id {
-                        tracing::debug!("Rejecting self-connection from {:?}", remote_addr);
-                        return;
-                    }
-
-                    let handshake = Handshake::new(peer_id, remote_handshake.info_hash);
-                    if let Err(e) = stream.write_all(&handshake.to_bytes()).await {
-                        tracing::debug!(
-                            error = ?e,
-                            "Failed to send handshake to {:?}",
-                            remote_addr
-                        );
-                        return;
-                    }
-
-                    let supports_ext = remote_handshake.support_extended_message();
-                    let dht_enabled = remote_handshake.support_dht();
-
-                    tracing::info!(
-                        "Incoming peer connection from {:?} for {:?}",
-                        remote_addr,
-                        remote_handshake.info_hash
-                    );
-
-                    // Forward connection to the appropriate torrent
-                    let torrent_tx = {
-                        sessions
-                            .read()
-                            .unwrap()
-                            .get(&remote_handshake.info_hash)
-                            .map(|entry| entry.tx.clone())
-                    };
-
-                    if let Some(tx) = torrent_tx {
-                        let _ = tx
-                            .send(TorrentMessage::InboundPeer {
-                                stream,
-                                remote_addr,
-                                supports_ext,
-                                peer_id: remote_handshake.peer_id,
-                                dht_enabled,
-                            })
-                            .await;
-                    }
-                });
+                }
             }
-        });
+        })
     }
 }
