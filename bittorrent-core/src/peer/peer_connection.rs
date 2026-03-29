@@ -30,7 +30,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     sync::{mpsc, oneshot},
     task::JoinHandle,
-    time::{Instant, interval},
+    time::{Instant, interval, timeout},
 };
 use tokio_util::{codec::Framed, sync::CancellationToken};
 use tracing::debug;
@@ -101,7 +101,6 @@ impl BitfieldState {
     }
 }
 
-#[allow(dead_code)]
 pub const EXTENSION_NAME_METADATA: &str = "ut_metadata";
 #[allow(dead_code)]
 pub const EXTENSION_NAME_PEX: &str = "ut_pex";
@@ -234,8 +233,32 @@ impl PeerConnection {
         local_peer_id: PeerID,
         info_hash: InfoHash,
     ) -> Result<(PeerID, bool, bool), ConnectionError> /* (peer_id, ext, dht)*/ {
-        const WRITE_TIMEOUT = Duration::from_secs(15);
-        timeout(duration, future)
+        const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+        timeout(HANDSHAKE_TIMEOUT, async {
+            let handshake = Handshake::new(local_peer_id, info_hash);
+            stream.write_all(&handshake.to_bytes()).await?;
+
+            let mut buf = BytesMut::zeroed(Handshake::HANDSHAKE_LEN);
+            stream.read_exact(&mut buf).await?;
+
+            let remote = Handshake::from_bytes(&buf)
+                .ok_or(ConnectionError::Handshake(HandshakeError::ParseFailure))?;
+
+            if remote.info_hash != info_hash {
+                return Err(ConnectionError::Handshake(HandshakeError::InfoHashMismatch));
+            }
+            if remote.peer_id == local_peer_id {
+                return Err(ConnectionError::SelfConnection);
+            }
+
+            Ok((
+                remote.peer_id,
+                remote.support_extended_message(),
+                remote.support_dht(),
+            ))
+        })
+        .await
+        .map_err(|_| ConnectionError::HandshakeTimeout)?
     }
 
     // ── Event loop ────────────────────────────────────────────────────────────
