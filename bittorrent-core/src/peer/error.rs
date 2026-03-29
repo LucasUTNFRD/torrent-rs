@@ -7,9 +7,6 @@ pub enum ConnectionError {
     #[error("I/O error: {0}")]
     Io(#[from] tokio::io::Error),
 
-    #[error("Connect timed out")]
-    ConnectTimeout,
-
     #[error("Handshake timed out")]
     HandshakeTimeout,
 

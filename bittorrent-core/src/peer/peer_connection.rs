@@ -277,28 +277,37 @@ impl PeerConnection {
         heartbeat.tick().await;
         metric_tick.tick().await;
 
-        loop {
+        let result = loop {
             self.maybe_request_metadata().await?;
 
             tokio::select! {
                 biased;
                 _ = peer_token.cancelled() => {
-                    tracing::info!("TOken Cancel Received");
-                    break;
+                    self.drain().await;
+                    break Ok(());
                 }
                 maybe_msg = self.stream.next() => match maybe_msg {
                     Some(Ok(msg)) => {
                         counters::on_read_counter();
                         self.handle_msg(msg).await?
                     },
-                    Some(Err(_e)) => {
-                        // Network error - connection will close
+                    Some(Err(e)) => {
+                        break Err(ConnectionError::Io(e));
                     }
-                    _ => break, // Remote closed the connection
+                    _ => {
+                        // Peer sent FIN — clean close from their side
+                        // Flush our side then exit cleanly
+                        let _ = self.sink.flush().await;
+                        let _ = self.sink.close().await;
+                        break Ok(());
+                    }
                 },
                 maybe_cmd = self.cmd_rx.recv() => match maybe_cmd {
                     Some(cmd) => self.handle_cmd(cmd).await?,
-                    None => break,
+                    None => {
+                        self.drain().await;
+                        break Ok(());
+                    },
                 },
                 _ = heartbeat.tick() => {
                     let elapsed_request = self.last_block_request.elapsed();
@@ -308,13 +317,13 @@ impl PeerConnection {
                     if am_interested && elapsed_request > Duration::from_secs(30)
                         || elapsed_recv > Duration::from_secs(45)
                     {
-                        break;
+                        break Err(ConnectionError::Idle);
                     }
                     self.sink.send(Message::KeepAlive).await?;
                 },
                 _ = metric_tick.tick() => self.metric_update(),
             }
-        }
+        };
 
         let bitfield = match self.bitfield {
             BitfieldState::Validated(bf) => Some(bf),
@@ -325,7 +334,26 @@ impl PeerConnection {
             .send(TorrentMessage::PeerDisconnected(self.pid, bitfield))
             .await;
 
-        Ok(())
+        result
+    }
+
+    async fn drain(&mut self) {
+        // TODO: Investigate about outgoing request and request_queue
+        let _ = self.sink.flush().await;
+        let _ = self.sink.close().await;
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            tokio::select! {
+                msg = self.stream.next() => {
+                    match msg {
+                        None | Some(Err(_)) => break,
+                        Some(Ok(_)) => {}
+                    }
+                }
+                _ = tokio::time::sleep_until(deadline) => break,
+            }
+        }
     }
 
     // ── Info write helpers ────────────────────────────────────────────────────
@@ -787,9 +815,6 @@ impl PeerConnection {
         if let Some(reqq) = hs.reqq.filter(|&r| r > 0) {
             self.max_outgoing_request = self.max_outgoing_request.max(reqq as usize);
         }
-        // if let Some(v) = hs.v {
-        // TODO: v from extendd is consider source of truth for getting client name
-        // }
         Ok(())
     }
 
@@ -801,17 +826,16 @@ impl PeerConnection {
     }
 
     async fn maybe_request_metadata(&mut self) -> Result<(), ConnectionError> {
-        if self.metadata.is_some() {
-            return Ok(());
-        }
-        let supported = self
+        let metadata_supported = self
             .remote_extensions
             .get(EXTENSION_NAME_METADATA)
             .is_some_and(|&id| id != 0);
-        if supported {
-            self.request_metadata().await?;
+
+        if self.metadata.is_some() || !metadata_supported {
+            return Ok(());
         }
-        Ok(())
+
+        self.request_metadata().await
     }
 
     async fn request_metadata(&mut self) -> Result<(), ConnectionError> {
@@ -852,12 +876,12 @@ impl PeerConnection {
             ));
         };
 
-        let msg_type = dict.get_i64(b"msg_type").ok_or_else(|| {
-            ConnectionError::Protocol(ProtocolViolation::MissingMetadataField("msg_type"))
-        })?;
-        let piece = dict.get_i64(b"piece").ok_or_else(|| {
-            ConnectionError::Protocol(ProtocolViolation::MissingMetadataField("piece"))
-        })? as u32;
+        let msg_type = dict.get_i64(b"msg_type").ok_or(ConnectionError::Protocol(
+            ProtocolViolation::MissingMetadataField("msg_type"),
+        ))?;
+        let piece = dict.get_i64(b"piece").ok_or(ConnectionError::Protocol(
+            ProtocolViolation::MissingMetadataField("piece"),
+        ))? as u32;
 
         match msg_type {
             REQUEST_ID => {
@@ -873,9 +897,11 @@ impl PeerConnection {
                     .await?;
             }
             DATA_ID => {
-                let _total_size = dict.get_i64(b"total_size").ok_or_else(|| {
-                    ConnectionError::Protocol(ProtocolViolation::MissingMetadataField("total_size"))
-                })? as usize;
+                let _total_size = dict
+                    .get_i64(b"total_size")
+                    .ok_or(ConnectionError::Protocol(
+                        ProtocolViolation::MissingMetadataField("total_size"),
+                    ))? as usize;
                 let data_start = bencode::Bencode::encoder(&decoded).len();
                 if payload.len() <= data_start {
                     return Err(ConnectionError::Protocol(
@@ -1014,7 +1040,6 @@ pub fn spawn_inbound(
     pid: Pid,
     addr: SocketAddr,
     stream: TcpStream,
-    // info_hash: InfoHash,
     torrent_tx: mpsc::Sender<TorrentMessage>,
     remote_peer_id: PeerID,
     supports_ext: bool,
