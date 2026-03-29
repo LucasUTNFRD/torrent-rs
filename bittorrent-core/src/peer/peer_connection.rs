@@ -8,7 +8,7 @@ use std::{
 use crate::{
     detail::Direction,
     metrics::counters::inc_connected,
-    peer::error::{ConnectionError, HandshakeError},
+    peer::error::{ConnectionError, HandshakeError, ProtocolViolation},
     protocol::{
         extension::{
             DATA_ID, ExtendedHandshake, ExtendedMessage, MetadataMessage, REJECT_ID, REQUEST_ID,
@@ -527,14 +527,20 @@ impl PeerConnection {
         if let Some(ref meta) = self.metadata {
             let n = meta.pieces.len();
             if piece_index as usize >= n {
-                return Err(ConnectionError::Protocol(format!(
-                    "HAVE piece index {piece_index} >= num_pieces {n}"
-                )));
+                return Err(ConnectionError::Protocol(
+                    ProtocolViolation::InvalidPieceIndex {
+                        index: piece_index,
+                        total: n as u32,
+                    },
+                ));
             }
         } else if piece_index >= 65536 {
-            return Err(ConnectionError::Protocol(format!(
-                "HAVE piece index {piece_index} exceeds pre-metadata limit"
-            )));
+            return Err(ConnectionError::Protocol(
+                ProtocolViolation::InvalidPieceIndex {
+                    index: piece_index,
+                    total: 65536,
+                },
+            ));
         }
 
         if let Some(bf) = self.bitfield.get_bitfield_mut() {
@@ -561,11 +567,13 @@ impl PeerConnection {
 
     async fn on_bitfield(&mut self, payload: Bytes) -> Result<(), ConnectionError> {
         if self.bitfield.is_received() {
-            return Err(ConnectionError::Protocol("Duplicate bitfield".into()));
+            return Err(ConnectionError::Protocol(
+                ProtocolViolation::DuplicateBitfield,
+            ));
         }
         if let Some(ref meta) = self.metadata {
             let bf = Bitfield::from_bytes_checked(payload, meta.pieces.len())
-                .map_err(ConnectionError::BitfieldError)?;
+                .map_err(ConnectionError::Bitfield)?;
             self.bitfield = BitfieldState::Validated(bf);
         } else {
             self.bitfield
@@ -831,21 +839,21 @@ impl PeerConnection {
     async fn handle_metadata_message(&mut self, payload: Bytes) -> Result<(), ConnectionError> {
         use bencode::{Bencode, BencodeDict};
 
-        let decoded = Bencode::decode(&payload)
-            .map_err(|e| ConnectionError::Protocol(format!("bad metadata bencode: {e}")))?;
+        let decoded = Bencode::decode(&payload).map_err(|e| {
+            ConnectionError::Protocol(ProtocolViolation::BadMetadataBencode(e.to_string()))
+        })?;
         let Bencode::Dict(ref dict) = decoded else {
             return Err(ConnectionError::Protocol(
-                "metadata message not a dict".into(),
+                ProtocolViolation::BadMetadataBencode("metadata message not a dict".into()),
             ));
         };
 
-        let msg_type = dict
-            .get_i64(b"msg_type")
-            .ok_or_else(|| ConnectionError::Protocol("missing msg_type".into()))?;
-        let piece = dict
-            .get_i64(b"piece")
-            .ok_or_else(|| ConnectionError::Protocol("missing piece".into()))?
-            as u32;
+        let msg_type = dict.get_i64(b"msg_type").ok_or_else(|| {
+            ConnectionError::Protocol(ProtocolViolation::MissingMetadataField("msg_type"))
+        })?;
+        let piece = dict.get_i64(b"piece").ok_or_else(|| {
+            ConnectionError::Protocol(ProtocolViolation::MissingMetadataField("piece"))
+        })? as u32;
 
         match msg_type {
             REQUEST_ID => {
@@ -861,14 +869,15 @@ impl PeerConnection {
                     .await?;
             }
             DATA_ID => {
-                let _total_size = dict
-                    .get_i64(b"total_size")
-                    .ok_or_else(|| ConnectionError::Protocol("missing total_size".into()))?
-                    as usize;
+                let _total_size = dict.get_i64(b"total_size").ok_or_else(|| {
+                    ConnectionError::Protocol(ProtocolViolation::MissingMetadataField("total_size"))
+                })? as usize;
                 let data_start = bencode::Bencode::encoder(&decoded).len();
                 if payload.len() <= data_start {
                     return Err(ConnectionError::Protocol(
-                        "no data after bencode header".into(),
+                        ProtocolViolation::BadMetadataBencode(
+                            "no data after bencode header".into(),
+                        ),
                     ));
                 }
                 let _ = self
@@ -890,9 +899,9 @@ impl PeerConnection {
                     .await;
             }
             _ => {
-                return Err(ConnectionError::Protocol(format!(
-                    "unknown metadata msg_type: {msg_type}"
-                )));
+                return Err(ConnectionError::Protocol(
+                    ProtocolViolation::UnknownMetadataMsgType(msg_type),
+                ));
             }
         }
         Ok(())
