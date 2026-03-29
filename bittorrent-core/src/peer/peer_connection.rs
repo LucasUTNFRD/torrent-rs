@@ -8,7 +8,7 @@ use std::{
 use crate::{
     detail::Direction,
     metrics::counters::inc_connected,
-    peer::error::ConnectionError,
+    peer::error::{ConnectionError, HandshakeError},
     protocol::{
         extension::{
             DATA_ID, ExtendedHandshake, ExtendedMessage, MetadataMessage, REJECT_ID, REQUEST_ID,
@@ -240,10 +240,11 @@ impl PeerConnection {
         let mut buf = BytesMut::zeroed(Handshake::HANDSHAKE_LEN);
         stream.read_exact(&mut buf).await?;
 
-        let remote = Handshake::from_bytes(&buf).ok_or(ConnectionError::InvalidHandshake)?;
+        let remote = Handshake::from_bytes(&buf)
+            .ok_or(ConnectionError::Handshake(HandshakeError::ParseFailure))?;
 
         if remote.info_hash != info_hash {
-            return Err(ConnectionError::InvalidHandshake);
+            return Err(ConnectionError::Handshake(HandshakeError::InfoHashMismatch));
         }
         if remote.peer_id == local_peer_id {
             return Err(ConnectionError::SelfConnection);
