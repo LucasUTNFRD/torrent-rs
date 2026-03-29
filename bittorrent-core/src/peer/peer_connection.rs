@@ -234,27 +234,8 @@ impl PeerConnection {
         local_peer_id: PeerID,
         info_hash: InfoHash,
     ) -> Result<(PeerID, bool, bool), ConnectionError> /* (peer_id, ext, dht)*/ {
-        let handshake = Handshake::new(local_peer_id, info_hash);
-        stream.write_all(&handshake.to_bytes()).await?;
-
-        let mut buf = BytesMut::zeroed(Handshake::HANDSHAKE_LEN);
-        stream.read_exact(&mut buf).await?;
-
-        let remote = Handshake::from_bytes(&buf)
-            .ok_or(ConnectionError::Handshake(HandshakeError::ParseFailure))?;
-
-        if remote.info_hash != info_hash {
-            return Err(ConnectionError::Handshake(HandshakeError::InfoHashMismatch));
-        }
-        if remote.peer_id == local_peer_id {
-            return Err(ConnectionError::SelfConnection);
-        }
-
-        Ok((
-            remote.peer_id,
-            remote.support_extended_message(),
-            remote.support_dht(),
-        ))
+        const WRITE_TIMEOUT = Duration::from_secs(15);
+        timeout(duration, future)
     }
 
     // ── Event loop ────────────────────────────────────────────────────────────
