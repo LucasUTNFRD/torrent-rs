@@ -10,7 +10,8 @@ use crate::{
     net::TcpStream,
     peer::{
         PeerMessage,
-        peer_connection::{ConnectionError, PeerHandle, spawn_inbound, spawn_outbound},
+        error::ConnectionError,
+        peer_connection::{PeerHandle, spawn_inbound, spawn_outbound},
     },
     piece_picker::{AvailabilityUpdate, BlockRequest, PieceManager, PieceState},
     protocol::peer_wire::{Block, BlockInfo, Message},

@@ -8,6 +8,7 @@ use std::{
 use crate::{
     detail::Direction,
     metrics::counters::inc_connected,
+    peer::error::ConnectionError,
     protocol::{
         extension::{
             DATA_ID, ExtendedHandshake, ExtendedMessage, MetadataMessage, REJECT_ID, REQUEST_ID,
@@ -25,7 +26,6 @@ use futures::{
     SinkExt, StreamExt,
     stream::{SplitSink, SplitStream},
 };
-use thiserror::Error;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     sync::{mpsc, oneshot},
@@ -43,28 +43,6 @@ use crate::{
     session::CLIENT_ID,
     torrent::{Pid, TorrentMessage},
 };
-
-#[derive(Debug, Error)]
-pub enum ConnectionError {
-    #[error("Network error: {0}")]
-    Network(#[from] tokio::io::Error),
-
-    #[error("Protocol error: {0}")]
-    Protocol(String),
-
-    #[error("Connection timeout")]
-    #[allow(dead_code)]
-    Timeout,
-
-    #[error("Invalid handshake")]
-    InvalidHandshake,
-
-    #[error("Bitfield error")]
-    BitfieldError(#[from] BitfieldError),
-
-    #[error("Self connection detected")]
-    SelfConnection,
-}
 
 #[derive(Debug, Clone)]
 pub(crate) enum BitfieldState {

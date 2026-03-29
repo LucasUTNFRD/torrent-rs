@@ -1,13 +1,25 @@
 use thiserror::Error;
 
+use crate::bitfield::BitfieldError;
+
 #[derive(Debug, Error)]
-pub enum PeerError {
-    #[error("Peer disconnected")]
-    Disconnected,
+pub enum ConnectionError {
+    #[error("Network error: {0}")]
+    Network(#[from] tokio::io::Error),
+
+    #[error("Protocol error: {0}")]
+    Protocol(String),
+
     #[error("Connection timeout")]
+    #[allow(dead_code)]
     Timeout,
-    #[error("I/O error: {0}")]
-    IoError(std::io::Error),
+
     #[error("Invalid handshake")]
     InvalidHandshake,
+
+    #[error("Bitfield error")]
+    BitfieldError(#[from] BitfieldError),
+
+    #[error("Self connection detected")]
+    SelfConnection,
 }
