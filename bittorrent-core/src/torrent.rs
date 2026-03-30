@@ -10,7 +10,6 @@ use crate::{
     net::TcpStream,
     peer::{
         PeerMessage,
-        error::ConnectionError,
         peer_connection::{PeerHandle, spawn_inbound, spawn_outbound},
     },
     piece_picker::{AvailabilityUpdate, BlockRequest, PieceManager, PieceState},
@@ -127,8 +126,6 @@ pub enum TorrentError {
 }
 
 pub enum TorrentMessage {
-    PeerDisconnected(Pid, Option<Bitfield>),
-    PeerError(Pid, ConnectionError, Option<Bitfield>),
     ValidMetadata {
         resp: oneshot::Sender<Option<Arc<Info>>>,
     },
@@ -531,9 +528,9 @@ impl Torrent {
                     }
                 }
                 Some(discovered_peers) = discovered_peers_rx.recv() => {
-                    for peer in &discovered_peers {
-                        self.add_peer(PeerOrigin::Outbound(*peer)).await;
-                    }
+                    // for peer in &discovered_peers {
+                    //     self.add_peer(PeerOrigin::Outbound(*peer)).await;
+                    // }
 
                 }
                 _ = choker_ticker.tick() => {
@@ -766,14 +763,6 @@ impl Torrent {
                         );
                     }
                 }
-            }
-            TorrentMessage::PeerDisconnected(pid, bitfield) => {
-                tracing::debug!("PeerDisconnected");
-                self.clean_up_peer(pid, bitfield).await
-            }
-            TorrentMessage::PeerError(pid, _err, bitfield) => {
-                tracing::debug!("PeerError");
-                self.clean_up_peer(pid, bitfield).await;
             }
             TorrentMessage::Have { pid: _, piece_idx } => {
                 tracing::debug!("peer SEND HAVE");

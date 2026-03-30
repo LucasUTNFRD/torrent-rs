@@ -29,6 +29,30 @@ pub enum ConnectionError {
     Idle,
 }
 
+impl ConnectionError {
+    /// Whether this error is transient (worth retrying) or permanent.
+    ///
+    /// Transient errors are typically network-level issues that may resolve
+    /// on a subsequent attempt. Permanent errors indicate protocol violations,
+    /// identity mismatches, or logical errors that won't change on retry.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            Self::Io(io_err) => matches!(
+                io_err.kind(),
+                std::io::ErrorKind::TimedOut
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::WouldBlock
+            ),
+            Self::HandshakeTimeout | Self::WriteStalled | Self::Idle => true,
+            Self::Handshake(_) | Self::Protocol(_) | Self::Bitfield(_) | Self::SelfConnection => {
+                false
+            }
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum HandshakeError {
     #[error("Parse failure: incomplete or malformed bytes")]

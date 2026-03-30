@@ -33,7 +33,7 @@ use tokio::{
     time::{Instant, interval, timeout},
 };
 use tokio_util::{codec::Framed, sync::CancellationToken};
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::{
     bitfield::{Bitfield, BitfieldError},
@@ -106,7 +106,7 @@ pub const EXTENSION_NAME_METADATA: &str = "ut_metadata";
 pub const EXTENSION_NAME_PEX: &str = "ut_pex";
 
 const UT_METADATA_ID: u8 = 1;
-const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
+const CONNECTION_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug)]
 pub struct PeerInfo {
@@ -277,7 +277,7 @@ impl PeerConnection {
         heartbeat.tick().await;
         metric_tick.tick().await;
 
-        let result = loop {
+        loop {
             self.maybe_request_metadata().await?;
 
             tokio::select! {
@@ -323,18 +323,16 @@ impl PeerConnection {
                 },
                 _ = metric_tick.tick() => self.metric_update(),
             }
-        };
+        }
 
-        let bitfield = match self.bitfield {
-            BitfieldState::Validated(bf) => Some(bf),
-            _ => None,
-        };
-        let _ = self
-            .torrent_tx
-            .send(TorrentMessage::PeerDisconnected(self.pid, bitfield))
-            .await;
-
-        result
+        // let bitfield = match self.bitfield {
+        //     BitfieldState::Validated(bf) => Some(bf),
+        //     _ => None,
+        // };
+        // let _ = self
+        //     .torrent_tx
+        //     .send(TorrentMessage::PeerDisconnected(self.pid, bitfield))
+        //     .await;
     }
 
     async fn drain(&mut self) {
@@ -979,7 +977,7 @@ pub fn spawn_outbound(
     torrent_tx: mpsc::Sender<TorrentMessage>,
     peer_token: CancellationToken,
 ) -> (JoinHandle<()>, PeerHandle) {
-    let (tx, rx) = mpsc::channel(256);
+    let (tx, rx) = mpsc::channel(512);
     // PeerInfo initialised with a placeholder peer_id; updated after handshake
     let info = Arc::new(RwLock::new(PeerInfo::new(*CLIENT_ID, Direction::Outbound)));
     let info_clone = info.clone();
@@ -1015,11 +1013,11 @@ pub fn spawn_outbound(
         }
         .await;
 
-        if let Err(e) = result {
-            // TODO: Improve Error Handling
-            debug!(peer = %addr, error = %e, "Outbound peer failed");
-            let _ = tx_err.send(TorrentMessage::PeerError(pid, e, None)).await;
-        }
+        // if let Err(e) = result {
+        //     // TODO: Improve Error Handling
+        //     warn!(peer = %addr, error = %e, "Outbound peer failed");
+        //     let _ = tx_err.send(TorrentMessage::PeerError(pid, e, None)).await;
+        // }
     });
 
     (
@@ -1046,7 +1044,7 @@ pub fn spawn_inbound(
     dht_enabled: bool,
     peer_token: CancellationToken,
 ) -> (JoinHandle<()>, PeerHandle) {
-    let (tx, rx) = mpsc::channel(256);
+    let (tx, rx) = mpsc::channel(512);
     let info = Arc::new(RwLock::new(PeerInfo::new(*CLIENT_ID, Direction::Inbound)));
     let info_clone = info.clone();
 
@@ -1076,10 +1074,10 @@ pub fn spawn_inbound(
         }
         .await;
 
-        if let Err(e) = result {
-            debug!(peer = %addr, error = %e, "Inbound peer failed");
-            let _ = tx_err.send(TorrentMessage::PeerError(pid, e, None)).await;
-        }
+        // if let Err(e) = result {
+        //     warn!(peer = %addr, error = %e, "Inbound peer failed");
+        //     let _ = tx_err.send(TorrentMessage::PeerError(pid, e, None)).await;
+        // }
     });
 
     (
