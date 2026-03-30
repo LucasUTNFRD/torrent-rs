@@ -106,7 +106,7 @@ pub const EXTENSION_NAME_METADATA: &str = "ut_metadata";
 pub const EXTENSION_NAME_PEX: &str = "ut_pex";
 
 const UT_METADATA_ID: u8 = 1;
-const CONNECTION_TIMEOUT: Duration = Duration::from_secs(15);
+pub const CONNECTION_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug)]
 pub struct PeerInfo {
@@ -132,7 +132,7 @@ pub struct PeerInfo {
 }
 
 impl PeerInfo {
-    fn new(peer_id: PeerID, source: Direction) -> Self {
+    pub fn new(peer_id: PeerID, source: Direction) -> Self {
         Self {
             peer_id,
             source,
@@ -149,7 +149,7 @@ impl PeerInfo {
     }
 }
 
-struct PeerConnection {
+pub struct PeerConnection {
     pid: Pid,
     peer_addr: SocketAddr,
 
@@ -190,7 +190,7 @@ struct PeerConnection {
 
 impl PeerConnection {
     #[allow(clippy::too_many_arguments)]
-    fn new(
+    pub fn new(
         pid: Pid,
         stream: TcpStream,
         peer_addr: SocketAddr,
@@ -228,7 +228,7 @@ impl PeerConnection {
         }
     }
 
-    async fn handshake(
+    pub async fn handshake(
         stream: &mut TcpStream,
         local_peer_id: PeerID,
         info_hash: InfoHash,
@@ -262,7 +262,7 @@ impl PeerConnection {
     }
 
     // ── Event loop ────────────────────────────────────────────────────────────
-    async fn run(mut self, peer_token: CancellationToken) -> Result<(), ConnectionError> {
+    pub async fn run(mut self, peer_token: CancellationToken) -> Result<(), ConnectionError> {
         self.have_valid_metadata().await;
 
         if self.supports_extended {
@@ -954,81 +954,11 @@ impl PeerConnection {
 // Clone-able. The info Arc lets the choker read state without a message round
 // trip. The tx channel is for sending commands into the peer task.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct PeerHandle {
-    pid: Pid,
+    pub pid: Pid,
     pub peer_addr: SocketAddr,
     pub info: Arc<RwLock<PeerInfo>>,
     pub tx: mpsc::Sender<PeerMessage>,
-}
-
-// ── Public spawn API ──────────────────────────────────────────────────────────
-//
-// Two functions, one per direction. Both return PeerHandle immediately;
-// the actual work runs in a detached task. Errors are reported via
-// TorrentMessage::PeerError.
-
-/// Spawn an outbound connection. Connects, handshakes, then runs the event loop.
-pub fn spawn_outbound(
-    pid: Pid,
-    addr: SocketAddr,
-    info_hash: InfoHash,
-    local_peer_id: PeerID,
-    torrent_tx: mpsc::Sender<TorrentMessage>,
-    peer_token: CancellationToken,
-) -> (JoinHandle<()>, PeerHandle) {
-    let (tx, rx) = mpsc::channel(512);
-    // PeerInfo initialised with a placeholder peer_id; updated after handshake
-    let info = Arc::new(RwLock::new(PeerInfo::new(*CLIENT_ID, Direction::Outbound)));
-    let info_clone = info.clone();
-
-    let tx_err = torrent_tx.clone();
-    let handle = tokio::spawn(async move {
-        let result: Result<(), ConnectionError> = async {
-            let mut stream = TcpStream::connect_timeout(&addr, CONNECTION_TIMEOUT).await?;
-            let (remote_peer_id, supports_extended, dht_enabled) =
-                PeerConnection::handshake(&mut stream, local_peer_id, info_hash).await?;
-            inc_connected();
-
-            // Update peer info with handshake results
-            {
-                let mut info_guard = info_clone.write().unwrap();
-                info_guard.peer_id = remote_peer_id;
-                info_guard.supports_extended = supports_extended;
-                info_guard.dht_enabled = dht_enabled;
-            }
-
-            PeerConnection::new(
-                pid,
-                stream,
-                addr,
-                Arc::clone(&info_clone),
-                torrent_tx,
-                rx,
-                supports_extended,
-                dht_enabled,
-            )
-            .run(peer_token)
-            .await
-        }
-        .await;
-
-        // if let Err(e) = result {
-        //     // TODO: Improve Error Handling
-        //     warn!(peer = %addr, error = %e, "Outbound peer failed");
-        //     let _ = tx_err.send(TorrentMessage::PeerError(pid, e, None)).await;
-        // }
-    });
-
-    (
-        handle,
-        PeerHandle {
-            pid,
-            peer_addr: addr,
-            info: Arc::clone(&info),
-            tx,
-        },
-    )
 }
 
 /// Spawn an inbound connection. The caller has already performed the TCP handshake
