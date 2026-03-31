@@ -1,19 +1,23 @@
 use crate::{
-    StorageBackend, TorrentProgress, TorrentState,
+    Direction, StorageBackend, TorrentProgress, TorrentState,
     bitfield::Bitfield,
     choker::Choker,
     detail::{FileInfo, PeerSnapshot, TorrentDetail, TorrentMeta, TrackerState, TrackerStatus},
     ema::EmaRate,
     events::{EventBus, SessionEvent},
     metadata::{Metadata, MetadataState},
-    metrics::counters::{self, dec_connected},
-    net::TcpStream,
+    metrics::counters::{self, dec_connected, inc_connected},
+    net::{ConnectTimeout, TcpStream},
     peer::{
         PeerMessage,
-        peer_connection::{ConnectionError, PeerHandle, spawn_inbound, spawn_outbound},
+        error::ConnectionError,
+        peer_connection::{
+            CONNECTION_TIMEOUT, PeerConnection, PeerHandle, PeerInfo, spawn_inbound,
+        },
     },
     piece_picker::{AvailabilityUpdate, BlockRequest, PieceManager, PieceState},
     protocol::peer_wire::{Block, BlockInfo, Message},
+    session::CLIENT_ID,
     storage::DiskStorage,
 };
 use bittorrent_common::{
@@ -24,11 +28,11 @@ use bytes::Bytes;
 use magnet_uri::Magnet;
 use mainline_dht::DhtHandler;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     net::SocketAddr,
     path::PathBuf,
     sync::{
-        Arc,
+        Arc, RwLock,
         atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     time::Duration,
@@ -37,7 +41,7 @@ use thiserror::Error;
 use tokio::{
     sync::{mpsc, oneshot, watch},
     task::JoinSet,
-    time::{sleep, timeout},
+    time::{Instant, sleep, timeout},
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument, warn};
@@ -46,6 +50,7 @@ use url::Url;
 
 // TODO: Use a criteria for this, this is so harcoded lol
 const CHANNEL_SIZE: usize = 1024;
+const MAX_CONCURRENT_PEERS: usize = 50;
 
 /// Session-level context shared across all torrents.
 /// Contains resources and configuration that are identical for every torrent in a session.
@@ -126,11 +131,10 @@ pub enum TorrentError {
 }
 
 pub enum TorrentMessage {
-    PeerDisconnected(Pid, Option<Bitfield>),
-    PeerError(Pid, ConnectionError, Option<Bitfield>),
     ValidMetadata {
         resp: oneshot::Sender<Option<Arc<Info>>>,
     },
+    ConnectionEstablished(SocketAddr),
     DhtAddNode {
         node_addr: SocketAddr,
     },
@@ -230,9 +234,74 @@ pub struct Metrics {
     pub peers_discovered: AtomicUsize,
 }
 
+struct SessionTickers {
+    choker: tokio::time::Interval,
+    metrics: tokio::time::Interval,
+    ema: tokio::time::Interval,
+    retry: tokio::time::Interval,
+}
+
+impl SessionTickers {
+    fn new() -> Self {
+        Self {
+            choker: tokio::time::interval(Duration::from_secs(30)),
+            metrics: tokio::time::interval(Duration::from_millis(500)),
+            ema: tokio::time::interval(Duration::from_secs(1)),
+            retry: tokio::time::interval(Duration::from_secs(30)),
+        }
+    }
+}
+
+/// Tracks peer connection history for retry decisions.
+/// Based on libtorrent's peer_info structure.
+struct PeerConnectionState {
+    /// Consecutive failed connection attempts (capped at 31, 5-bit value in libtorrent)
+    failcount: u8,
+    /// When we last attempted to connect
+    last_attempt: Option<Instant>,
+}
+
+impl PeerConnectionState {
+    pub fn new() -> Self {
+        Self {
+            failcount: 0,
+            last_attempt: None,
+        }
+    }
+    fn is_eligible_for_retry(&self, now: Instant) -> bool {
+        if self.failcount >= MAX_FAILCOUNT {
+            return false;
+        }
+
+        match self.last_attempt {
+            None => true, // Never attempted - immediately eligible
+            Some(last) => {
+                let delay = (self.failcount as u32 + 1) * MIN_RECONNECT_TIME;
+                now.duration_since(last) >= delay
+            }
+        }
+    }
+
+    fn record_failure(&mut self, _error: &ConnectionError) {
+        self.failcount = self.failcount.saturating_add(1).min(31);
+        self.last_attempt = Some(Instant::now());
+    }
+
+    fn record_success(&mut self) {
+        self.failcount = 0;
+        self.last_attempt = Some(Instant::now());
+    }
+}
+
+const MAX_FAILCOUNT: u8 = 3;
+const MIN_RECONNECT_TIME: Duration = Duration::from_secs(60);
+const CONNECTION_TIMEOUT_BASE: Duration = Duration::from_secs(10);
+
 //
 // TORRENT Control Structure
 //
+
+type ConnectionResult = (Result<Option<Bitfield>, ConnectionError>, Pid);
 
 pub struct Torrent {
     info_hash: InfoHash,
@@ -250,10 +319,15 @@ pub struct Torrent {
 
     metrics: Arc<Metrics>,
     peers: HashMap<Pid, PeerHandle>,
-    peer_tasks: JoinSet<()>,
+    peer_tasks: JoinSet<ConnectionResult>,
+    /// All known peers with their connection state
+    known_peers: HashMap<SocketAddr, PeerConnectionState>,
+    /// Queue of addresses ready for connection attempt
+    pending_peers: VecDeque<SocketAddr>,
     peer_cancel_token: CancellationToken,
 
     // Torrent-local per-peer state that PeerHandle no longer holds
+    // TODO: Maybe move this into PeerInfo field
     pending_requests: HashMap<Pid, Vec<BlockInfo>>,
 
     // channels
@@ -282,6 +356,7 @@ pub struct Torrent {
     /// Cancellation token for the torrent (from session)
     cancel_token: CancellationToken,
     /// Background tasks (tracker announce, DHT discovery)
+    // TODO: Rename this to peer_discovery_task
     background_tasks: JoinSet<()>,
 }
 
@@ -480,11 +555,22 @@ impl Torrent {
                 peer_tasks: JoinSet::new(),
                 peer_cancel_token: CancellationToken::new(),
                 cancel_token: CancellationToken::new(),
+                known_peers: HashMap::new(),
+                pending_peers: VecDeque::new(),
                 background_tasks: JoinSet::new(),
             },
             tx,
             progress_rx,
         )
+    }
+    async fn initialize_state(&mut self) {
+        match self.state {
+            TorrentState::Downloading | TorrentState::Checking | TorrentState::FetchingMetadata => {
+                self.init_interal().await
+            }
+            TorrentState::Seeding => self.init_seed().await,
+            TorrentState::Paused | TorrentState::Error(_) | TorrentState::Finished => {}
+        }
     }
 
     #[instrument(skip(self), name = "torrent", fields(
@@ -495,58 +581,246 @@ impl Torrent {
         cancelation_token: CancellationToken,
     ) -> Result<(), TorrentError> {
         self.cancel_token = cancelation_token.clone();
+        self.initialize_state().await;
 
-        match self.state {
-            TorrentState::Downloading | TorrentState::Checking | TorrentState::FetchingMetadata => {
-                self.init_interal().await
-            }
-            TorrentState::Seeding => self.init_seed().await,
-            TorrentState::Paused | TorrentState::Error(_) | TorrentState::Finished => {}
-        }
-
-        // Start announcing to Trackers/DHT
         let (discovered_peers_tx, mut discovered_peers_rx) = mpsc::channel(64);
         self.announce(&discovered_peers_tx);
 
-        // Periodic choker tick (every 10 seconds)
-        let mut choker_ticker = tokio::time::interval(Duration::from_secs(30));
-        choker_ticker.tick().await;
-
-        // Periodic metrics update (every 1 second)
-        let mut metrics_ticker = tokio::time::interval(Duration::from_millis(500));
-        let mut ema_rates = tokio::time::interval(Duration::from_secs(1));
+        let mut tickers = SessionTickers::new();
+        tickers.choker.tick().await;
+        tickers.retry.tick().await;
 
         loop {
+            self.try_spawn_pending_peers();
+
             tokio::select! {
                 biased;
                 _ = cancelation_token.cancelled() => {
                     self.shutdown().await;
                     break Ok(());
                 }
-                maybe_msg = self.rx.recv() => {
-                    match maybe_msg{
-                        Some(msg) => self.handle_message(msg).await?,
+                msg = self.rx.recv() => {
+                    match msg {
+                        Some(m) => self.handle_message(m).await?,
                         None => break Ok(()),
                     }
                 }
-                Some(discovered_peers) = discovered_peers_rx.recv() => {
-                    for peer in &discovered_peers {
-                        self.add_peer(PeerOrigin::Outbound(*peer)).await;
+                Some(peers) = discovered_peers_rx.recv() => {
+                    self.register_discovered_peers(peers);
+                }
+                Some(peer_task) = self.peer_tasks.join_next(),
+                    if !self.peer_tasks.is_empty() => {
+                    match peer_task {
+                        Ok((result, pid)) => self.handle_peer_completion(pid, result),
+                        Err(e) => warn!("Peer task panicked: {:?}", e),
                     }
-
                 }
-                _ = choker_ticker.tick() => {
-                    self.run_choker().await;
-                }
-                _ = metrics_ticker.tick() => {
-                    self.update_progress();
-                }
-                _ = ema_rates.tick() => {
-                    self.dl_rate.update();
-                    self.ul_rate.update();
-                }
+                _ = tickers.choker.tick() => self.run_choker().await,
+                _ = tickers.metrics.tick() => self.update_progress(),
+                _ = tickers.ema.tick() => self.update_rates(),
+                _ = tickers.retry.tick() => self.requeue_eligible_peers(),
             }
         }
+    }
+
+    fn try_spawn_pending_peers(&mut self) {
+        let now = Instant::now();
+        while self.peer_tasks.len() <= MAX_CONCURRENT_PEERS {
+            let Some(peer_addr) = self.pending_peers.pop_front() else {
+                break;
+            };
+
+            if !self.is_peer_eligible(peer_addr, now) {
+                continue;
+            }
+
+            self.mark_peer_attempt(peer_addr, now);
+            self.spawn_outbound_connection(peer_addr);
+        }
+    }
+
+    fn is_peer_eligible(&self, peer_addr: SocketAddr, now: Instant) -> bool {
+        self.known_peers
+            .get(&peer_addr)
+            .map(|state| state.is_eligible_for_retry(now))
+            .unwrap_or(true)
+    }
+
+    fn mark_peer_attempt(&mut self, peer_addr: SocketAddr, now: Instant) {
+        if let Some(state) = self.known_peers.get_mut(&peer_addr) {
+            state.last_attempt = Some(now);
+        }
+    }
+
+    fn register_discovered_peers(&mut self, peers: Vec<SocketAddr>) {
+        for peer in peers {
+            self.known_peers
+                .entry(peer)
+                .or_insert_with(PeerConnectionState::new);
+            if !self.pending_peers.contains(&peer) {
+                self.pending_peers.push_back(peer);
+            }
+        }
+    }
+
+    fn update_rates(&mut self) {
+        self.dl_rate.update();
+        self.ul_rate.update();
+    }
+
+    /// Periodic scan to re-add retry-eligible peers to the pending queue.
+    /// This handles peers that failed and have waited their backoff period.
+    fn requeue_eligible_peers(&mut self) {
+        let now = Instant::now();
+        let mut requeued = 0;
+
+        // Get all currently connected peer addresses to avoid duplicating
+        let connected: std::collections::HashSet<SocketAddr> =
+            self.peers.values().map(|h| h.peer_addr).collect();
+
+        // Collect peers that are eligible but not currently connected or pending
+        let eligible: Vec<SocketAddr> = self
+            .known_peers
+            .iter()
+            .filter(|(_, state)| state.is_eligible_for_retry(now))
+            .filter(|(addr, _)| !connected.contains(addr) && !self.pending_peers.contains(addr))
+            .map(|(addr, _)| *addr)
+            .collect();
+
+        for addr in eligible {
+            self.pending_peers.push_back(addr);
+            requeued += 1;
+        }
+
+        if requeued > 0 {
+            debug!("Re-queued {} peers for retry", requeued);
+        }
+    }
+
+    fn handle_peer_completion(
+        &mut self,
+        pid: Pid,
+        result: Result<Option<Bitfield>, ConnectionError>,
+    ) {
+        // Get peer_addr before cleanup (clean_up_peer removes from self.peers)
+        let peer_addr = self.peers.get(&pid).map(|h| h.peer_addr);
+
+        match result {
+            Ok(bitfield) => {
+                debug!("Peer {} disconnected cleanly", pid);
+                self.clean_up_peer(pid, bitfield);
+            }
+            Err(e) => {
+                warn!("Peer {} connection error: {}", pid, e);
+
+                if let Some(addr) = peer_addr {
+                    // Self-connection should be banned permanently
+                    if matches!(e, ConnectionError::SelfConnection) {
+                        self.known_peers.remove(&addr);
+                        debug!("Peer {} banned (self-connection)", addr);
+                    } else if e.is_transient() {
+                        self.schedule_retry(addr, &e);
+                    } else {
+                        // Non-transient error: record failure but don't re-add to pending
+                        if let Some(state) = self.known_peers.get_mut(&addr) {
+                            state.record_failure(&e);
+                            debug!(
+                                "Peer {} failed {} time(s), not retrying (non-transient)",
+                                addr, state.failcount
+                            );
+                        }
+                    }
+                }
+
+                self.clean_up_peer(pid, None);
+            }
+        }
+    }
+
+    /// Schedule a peer for retry after a transient error.
+    /// Records the failure and re-adds to pending queue if eligible.
+    fn schedule_retry(&mut self, peer_addr: SocketAddr, error: &ConnectionError) {
+        let Some(state) = self.known_peers.get_mut(&peer_addr) else {
+            return;
+        };
+
+        state.record_failure(error);
+
+        if state.is_eligible_for_retry(Instant::now()) {
+            debug!(
+                "Peer {} failed {} time(s), re-queuing for retry",
+                peer_addr, state.failcount
+            );
+            self.pending_peers.push_back(peer_addr);
+        } else {
+            debug!(
+                "Peer {} failed {} time(s), waiting before retry",
+                peer_addr, state.failcount
+            );
+        }
+    }
+
+    pub async fn add_peer(&mut self, peer: PeerOrigin) {}
+
+    /// Spawn an outbound connection. Connects, handshakes, then runs the event loop.
+    fn spawn_outbound_connection(&mut self, peer_addr: SocketAddr) {
+        let pid = Pid(PEER_COUNTER.fetch_add(1, Ordering::Relaxed));
+        self.metrics
+            .peers_discovered
+            .fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = mpsc::channel(512);
+        let torrent_tx = self.tx.clone();
+        let info = Arc::new(RwLock::new(PeerInfo::new(*CLIENT_ID, Direction::Outbound)));
+        let info_clone = info.clone();
+        let peer_token = self.peer_cancel_token.child_token();
+
+        let info_hash = self.info_hash;
+        let local_peer_id = self.peer_id;
+
+        self.peer_tasks.spawn(async move {
+            let result = async {
+                let mut stream = TcpStream::connect_timeout(&peer_addr, CONNECTION_TIMEOUT).await?;
+                let (remote_peer_id, supports_extended, dht_enabled) =
+                    PeerConnection::handshake(&mut stream, local_peer_id, info_hash).await?;
+                inc_connected();
+                let _ = torrent_tx
+                    .send(TorrentMessage::ConnectionEstablished(peer_addr))
+                    .await;
+                // Update peer info with handshake results
+                {
+                    let mut info_guard = info_clone.write().unwrap();
+                    info_guard.peer_id = remote_peer_id;
+                    info_guard.supports_extended = supports_extended;
+                    info_guard.dht_enabled = dht_enabled;
+                }
+
+                PeerConnection::new(
+                    pid,
+                    stream,
+                    peer_addr,
+                    Arc::clone(&info_clone),
+                    torrent_tx,
+                    rx,
+                    supports_extended,
+                    dht_enabled,
+                )
+                .run(peer_token)
+                .await
+            }
+            .await;
+            (result, pid)
+        });
+
+        self.pending_requests.insert(pid, Vec::new());
+        self.peers.insert(
+            pid,
+            PeerHandle {
+                pid,
+                peer_addr,
+                info: Arc::clone(&info),
+                tx,
+            },
+        );
     }
 
     async fn shutdown(mut self) {
@@ -658,82 +932,6 @@ impl Torrent {
         self.piece_mananger = Some(PieceManager::new_all_have(info));
     }
 
-    pub async fn add_peer(&mut self, peer: PeerOrigin) {
-        // check if we already are connected to this peer?
-        let already_connected = self.peers.values().any(|p| p.peer_addr == *peer.get_addr());
-        if already_connected {
-            return;
-        }
-
-        if self.peers.len() >= 500 {
-            return;
-        }
-
-        let pid = Pid(PEER_COUNTER.fetch_add(1, Ordering::Relaxed));
-        self.metrics
-            .peers_discovered
-            .fetch_add(1, Ordering::Relaxed);
-
-        let direction = match &peer {
-            PeerOrigin::Inbound { .. } => crate::events::peer::Direction::Inbound,
-            PeerOrigin::Outbound(_) => crate::events::peer::Direction::Outbound,
-        };
-        let peer_token = self.peer_cancel_token.child_token();
-        let (jh, peer_handle) = match peer {
-            PeerOrigin::Inbound {
-                peer_id: remote_peer_id,
-                stream,
-                supports_ext,
-                remote_addr,
-                dht_enabled,
-            } => spawn_inbound(
-                pid,
-                remote_addr,
-                stream,
-                // self.info_hash,
-                self.tx.clone(),
-                remote_peer_id,
-                supports_ext,
-                dht_enabled,
-                peer_token,
-            ),
-            PeerOrigin::Outbound(remote_addr) => spawn_outbound(
-                pid,
-                remote_addr,
-                self.info_hash,
-                self.peer_id,
-                self.tx.clone(),
-                peer_token,
-            ),
-        };
-
-        self.peer_tasks.spawn(async move {
-            jh.await.ok();
-        });
-
-        // Send our bitfield if we have any pieces
-        if self.bitfield.size() > 0 && self.bitfield.iter_set().next().is_some() {
-            peer_handle
-                .tx
-                .send(PeerMessage::SendBitfield {
-                    bitfield: self.bitfield.clone(),
-                })
-                .await
-                .unwrap();
-        }
-
-        self.pending_requests.insert(pid, Vec::new());
-        let peer_addr = peer_handle.peer_addr;
-        self.peers.insert(pid, peer_handle);
-        let _ = self
-            .event_bus
-            .peer_tx
-            .send(crate::events::peer::PeerEvent::Connected {
-                addr: peer_addr,
-                direction,
-            });
-    }
-
     async fn handle_message(&mut self, msg: TorrentMessage) -> Result<(), TorrentError> {
         match msg {
             TorrentMessage::RemoteBlockRequest { pid, block_info } => {
@@ -766,13 +964,10 @@ impl Torrent {
                     }
                 }
             }
-            TorrentMessage::PeerDisconnected(pid, bitfield) => {
-                tracing::debug!("PeerDisconnected");
-                self.clean_up_peer(pid, bitfield).await
-            }
-            TorrentMessage::PeerError(pid, _err, bitfield) => {
-                tracing::debug!("PeerError");
-                self.clean_up_peer(pid, bitfield).await;
+            TorrentMessage::ConnectionEstablished(peer_addr) => {
+                if let Some(state) = self.known_peers.get_mut(&peer_addr) {
+                    state.record_success();
+                }
             }
             TorrentMessage::Have { pid: _, piece_idx } => {
                 tracing::debug!("peer SEND HAVE");
@@ -1313,7 +1508,10 @@ impl Torrent {
         Ok(())
     }
 
-    async fn clean_up_peer(&mut self, pid: Pid, bitfield: Option<Bitfield>) {
+    // Remove from choker
+    // Remove from piece trackig  + update piece swarm availaility
+    // metric update
+    fn clean_up_peer(&mut self, pid: Pid, bitfield: Option<Bitfield>) {
         if let Some(unchoked_pid) = self.choker.on_peer_disconnected(pid) {
             self.send_to_peer(unchoked_pid, PeerMessage::SendUnchoke);
         }
@@ -1420,10 +1618,10 @@ impl Torrent {
             eta_seconds: None,
         };
 
+        info!("SENDING METRICS");
         let _ = self.progress_tx.send(metrics);
     }
 
-    // TODO: Message delivery strategy — not all messages warrant blocking send.
     // try_send (non-blocking, drop on full):
     //   - SendHave, SendChoke, SendUnchoke: peer will learn state eventually or disconnect
     //   - SendBitfield, HaveMetadata: one-time setup, stale if peer is lagging anyway
@@ -1437,8 +1635,8 @@ impl Torrent {
         if let Some(p) = self.peers.get(&pid) {
             match p.tx.try_send(message) {
                 Ok(()) => {}
-                Err(mpsc::error::TrySendError::Full(_)) => {
-                    tracing::warn!(%pid, "peer channel full, dropping message");
+                Err(mpsc::error::TrySendError::Full(m)) => {
+                    tracing::warn!(%pid, "peer channel full, dropping {m:?}");
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => {
                     // Task already exited, PeerDisconnected is in flight
@@ -1452,12 +1650,6 @@ impl Torrent {
         for pid in self.peers.keys() {
             self.send_to_peer(*pid, message.clone());
         }
-    }
-
-    /// Send a protocol message to a specific peer
-    #[allow(dead_code)]
-    fn send_message_to_peer(&self, pid: Pid, message: Message) {
-        self.send_to_peer(pid, PeerMessage::SendMessage(message))
     }
 
     // If we are seeding a file we are not interest in receiving peers

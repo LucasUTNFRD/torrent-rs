@@ -2,6 +2,7 @@ use crate::{bitfield::Bitfield, protocol::peer_wire::Message};
 use bittorrent_common::metainfo::Info;
 use std::sync::Arc;
 
+pub mod error;
 pub mod metrics;
 pub mod peer_connection;
 

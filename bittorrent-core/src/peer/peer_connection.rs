@@ -8,6 +8,7 @@ use std::{
 use crate::{
     detail::Direction,
     metrics::counters::inc_connected,
+    peer::error::{ConnectionError, HandshakeError, ProtocolViolation},
     protocol::{
         extension::{
             DATA_ID, ExtendedHandshake, ExtendedMessage, MetadataMessage, REJECT_ID, REQUEST_ID,
@@ -25,15 +26,14 @@ use futures::{
     SinkExt, StreamExt,
     stream::{SplitSink, SplitStream},
 };
-use thiserror::Error;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     sync::{mpsc, oneshot},
     task::JoinHandle,
-    time::{Instant, interval},
+    time::{Instant, interval, timeout},
 };
 use tokio_util::{codec::Framed, sync::CancellationToken};
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::{
     bitfield::{Bitfield, BitfieldError},
@@ -43,28 +43,6 @@ use crate::{
     session::CLIENT_ID,
     torrent::{Pid, TorrentMessage},
 };
-
-#[derive(Debug, Error)]
-pub enum ConnectionError {
-    #[error("Network error: {0}")]
-    Network(#[from] tokio::io::Error),
-
-    #[error("Protocol error: {0}")]
-    Protocol(String),
-
-    #[error("Connection timeout")]
-    #[allow(dead_code)]
-    Timeout,
-
-    #[error("Invalid handshake")]
-    InvalidHandshake,
-
-    #[error("Bitfield error")]
-    BitfieldError(#[from] BitfieldError),
-
-    #[error("Self connection detected")]
-    SelfConnection,
-}
 
 #[derive(Debug, Clone)]
 pub(crate) enum BitfieldState {
@@ -123,13 +101,12 @@ impl BitfieldState {
     }
 }
 
-#[allow(dead_code)]
 pub const EXTENSION_NAME_METADATA: &str = "ut_metadata";
 #[allow(dead_code)]
 pub const EXTENSION_NAME_PEX: &str = "ut_pex";
 
 const UT_METADATA_ID: u8 = 1;
-const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
+pub const CONNECTION_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug)]
 pub struct PeerInfo {
@@ -155,7 +132,7 @@ pub struct PeerInfo {
 }
 
 impl PeerInfo {
-    fn new(peer_id: PeerID, source: Direction) -> Self {
+    pub fn new(peer_id: PeerID, source: Direction) -> Self {
         Self {
             peer_id,
             source,
@@ -172,7 +149,7 @@ impl PeerInfo {
     }
 }
 
-struct PeerConnection {
+pub struct PeerConnection {
     pid: Pid,
     peer_addr: SocketAddr,
 
@@ -213,7 +190,7 @@ struct PeerConnection {
 
 impl PeerConnection {
     #[allow(clippy::too_many_arguments)]
-    fn new(
+    pub fn new(
         pid: Pid,
         stream: TcpStream,
         peer_addr: SocketAddr,
@@ -251,35 +228,41 @@ impl PeerConnection {
         }
     }
 
-    async fn handshake(
+    pub async fn handshake(
         stream: &mut TcpStream,
         local_peer_id: PeerID,
         info_hash: InfoHash,
     ) -> Result<(PeerID, bool, bool), ConnectionError> /* (peer_id, ext, dht)*/ {
-        let handshake = Handshake::new(local_peer_id, info_hash);
-        stream.write_all(&handshake.to_bytes()).await?;
+        const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+        timeout(HANDSHAKE_TIMEOUT, async {
+            let handshake = Handshake::new(local_peer_id, info_hash);
+            stream.write_all(&handshake.to_bytes()).await?;
 
-        let mut buf = BytesMut::zeroed(Handshake::HANDSHAKE_LEN);
-        stream.read_exact(&mut buf).await?;
+            let mut buf = BytesMut::zeroed(Handshake::HANDSHAKE_LEN);
+            stream.read_exact(&mut buf).await?;
 
-        let remote = Handshake::from_bytes(&buf).ok_or(ConnectionError::InvalidHandshake)?;
+            let remote = Handshake::from_bytes(&buf)
+                .ok_or(ConnectionError::Handshake(HandshakeError::ParseFailure))?;
 
-        if remote.info_hash != info_hash {
-            return Err(ConnectionError::InvalidHandshake);
-        }
-        if remote.peer_id == local_peer_id {
-            return Err(ConnectionError::SelfConnection);
-        }
+            if remote.info_hash != info_hash {
+                return Err(ConnectionError::Handshake(HandshakeError::InfoHashMismatch));
+            }
+            if remote.peer_id == local_peer_id {
+                return Err(ConnectionError::SelfConnection);
+            }
 
-        Ok((
-            remote.peer_id,
-            remote.support_extended_message(),
-            remote.support_dht(),
-        ))
+            Ok((
+                remote.peer_id,
+                remote.support_extended_message(),
+                remote.support_dht(),
+            ))
+        })
+        .await
+        .map_err(|_| ConnectionError::HandshakeTimeout)?
     }
 
     // ── Event loop ────────────────────────────────────────────────────────────
-    async fn run(mut self, peer_token: CancellationToken) -> Result<(), ConnectionError> {
+    pub async fn run(mut self, peer_token: CancellationToken) -> Result<Option<Bitfield>, ConnectionError> {
         self.have_valid_metadata().await;
 
         if self.supports_extended {
@@ -294,28 +277,37 @@ impl PeerConnection {
         heartbeat.tick().await;
         metric_tick.tick().await;
 
-        loop {
+        let result = loop {
             self.maybe_request_metadata().await?;
 
             tokio::select! {
                 biased;
                 _ = peer_token.cancelled() => {
-                    tracing::info!("TOken Cancel Received");
-                    break;
+                    self.drain().await;
+                    break Ok(());
                 }
                 maybe_msg = self.stream.next() => match maybe_msg {
                     Some(Ok(msg)) => {
                         counters::on_read_counter();
                         self.handle_msg(msg).await?
                     },
-                    Some(Err(_e)) => {
-                        // Network error - connection will close
+                    Some(Err(e)) => {
+                        break Err(ConnectionError::Io(e));
                     }
-                    _ => break, // Remote closed the connection
+                    _ => {
+                        // Peer sent FIN — clean close from their side
+                        // Flush our side then exit cleanly
+                        let _ = self.sink.flush().await;
+                        let _ = self.sink.close().await;
+                        break Ok(());
+                    }
                 },
                 maybe_cmd = self.cmd_rx.recv() => match maybe_cmd {
                     Some(cmd) => self.handle_cmd(cmd).await?,
-                    None => break,
+                    None => {
+                        self.drain().await;
+                        break Ok(());
+                    },
                 },
                 _ = heartbeat.tick() => {
                     let elapsed_request = self.last_block_request.elapsed();
@@ -325,24 +317,40 @@ impl PeerConnection {
                     if am_interested && elapsed_request > Duration::from_secs(30)
                         || elapsed_recv > Duration::from_secs(45)
                     {
-                        break;
+                        break Err(ConnectionError::Idle);
                     }
                     self.sink.send(Message::KeepAlive).await?;
                 },
                 _ = metric_tick.tick() => self.metric_update(),
             }
-        }
+        };
 
+        // Extract the validated bitfield to return for piece availability cleanup
         let bitfield = match self.bitfield {
             BitfieldState::Validated(bf) => Some(bf),
             _ => None,
         };
-        let _ = self
-            .torrent_tx
-            .send(TorrentMessage::PeerDisconnected(self.pid, bitfield))
-            .await;
 
-        Ok(())
+        result.map(|()| bitfield)
+    }
+
+    async fn drain(&mut self) {
+        // TODO: Investigate about outgoing request and request_queue
+        let _ = self.sink.flush().await;
+        let _ = self.sink.close().await;
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            tokio::select! {
+                msg = self.stream.next() => {
+                    match msg {
+                        None | Some(Err(_)) => break,
+                        Some(Ok(_)) => {}
+                    }
+                }
+                _ = tokio::time::sleep_until(deadline) => break,
+            }
+        }
     }
 
     // ── Info write helpers ────────────────────────────────────────────────────
@@ -548,14 +556,20 @@ impl PeerConnection {
         if let Some(ref meta) = self.metadata {
             let n = meta.pieces.len();
             if piece_index as usize >= n {
-                return Err(ConnectionError::Protocol(format!(
-                    "HAVE piece index {piece_index} >= num_pieces {n}"
-                )));
+                return Err(ConnectionError::Protocol(
+                    ProtocolViolation::InvalidPieceIndex {
+                        index: piece_index,
+                        total: n as u32,
+                    },
+                ));
             }
         } else if piece_index >= 65536 {
-            return Err(ConnectionError::Protocol(format!(
-                "HAVE piece index {piece_index} exceeds pre-metadata limit"
-            )));
+            return Err(ConnectionError::Protocol(
+                ProtocolViolation::InvalidPieceIndex {
+                    index: piece_index,
+                    total: 65536,
+                },
+            ));
         }
 
         if let Some(bf) = self.bitfield.get_bitfield_mut() {
@@ -582,11 +596,13 @@ impl PeerConnection {
 
     async fn on_bitfield(&mut self, payload: Bytes) -> Result<(), ConnectionError> {
         if self.bitfield.is_received() {
-            return Err(ConnectionError::Protocol("Duplicate bitfield".into()));
+            return Err(ConnectionError::Protocol(
+                ProtocolViolation::DuplicateBitfield,
+            ));
         }
         if let Some(ref meta) = self.metadata {
             let bf = Bitfield::from_bytes_checked(payload, meta.pieces.len())
-                .map_err(ConnectionError::BitfieldError)?;
+                .map_err(ConnectionError::Bitfield)?;
             self.bitfield = BitfieldState::Validated(bf);
         } else {
             self.bitfield
@@ -796,9 +812,6 @@ impl PeerConnection {
         if let Some(reqq) = hs.reqq.filter(|&r| r > 0) {
             self.max_outgoing_request = self.max_outgoing_request.max(reqq as usize);
         }
-        // if let Some(v) = hs.v {
-        // TODO: v from extendd is consider source of truth for getting client name
-        // }
         Ok(())
     }
 
@@ -810,17 +823,16 @@ impl PeerConnection {
     }
 
     async fn maybe_request_metadata(&mut self) -> Result<(), ConnectionError> {
-        if self.metadata.is_some() {
-            return Ok(());
-        }
-        let supported = self
+        let metadata_supported = self
             .remote_extensions
             .get(EXTENSION_NAME_METADATA)
             .is_some_and(|&id| id != 0);
-        if supported {
-            self.request_metadata().await?;
+
+        if self.metadata.is_some() || !metadata_supported {
+            return Ok(());
         }
-        Ok(())
+
+        self.request_metadata().await
     }
 
     async fn request_metadata(&mut self) -> Result<(), ConnectionError> {
@@ -852,21 +864,21 @@ impl PeerConnection {
     async fn handle_metadata_message(&mut self, payload: Bytes) -> Result<(), ConnectionError> {
         use bencode::{Bencode, BencodeDict};
 
-        let decoded = Bencode::decode(&payload)
-            .map_err(|e| ConnectionError::Protocol(format!("bad metadata bencode: {e}")))?;
+        let decoded = Bencode::decode(&payload).map_err(|e| {
+            ConnectionError::Protocol(ProtocolViolation::BadMetadataBencode(e.to_string()))
+        })?;
         let Bencode::Dict(ref dict) = decoded else {
             return Err(ConnectionError::Protocol(
-                "metadata message not a dict".into(),
+                ProtocolViolation::BadMetadataBencode("metadata message not a dict".into()),
             ));
         };
 
-        let msg_type = dict
-            .get_i64(b"msg_type")
-            .ok_or_else(|| ConnectionError::Protocol("missing msg_type".into()))?;
-        let piece = dict
-            .get_i64(b"piece")
-            .ok_or_else(|| ConnectionError::Protocol("missing piece".into()))?
-            as u32;
+        let msg_type = dict.get_i64(b"msg_type").ok_or(ConnectionError::Protocol(
+            ProtocolViolation::MissingMetadataField("msg_type"),
+        ))?;
+        let piece = dict.get_i64(b"piece").ok_or(ConnectionError::Protocol(
+            ProtocolViolation::MissingMetadataField("piece"),
+        ))? as u32;
 
         match msg_type {
             REQUEST_ID => {
@@ -884,12 +896,15 @@ impl PeerConnection {
             DATA_ID => {
                 let _total_size = dict
                     .get_i64(b"total_size")
-                    .ok_or_else(|| ConnectionError::Protocol("missing total_size".into()))?
-                    as usize;
+                    .ok_or(ConnectionError::Protocol(
+                        ProtocolViolation::MissingMetadataField("total_size"),
+                    ))? as usize;
                 let data_start = bencode::Bencode::encoder(&decoded).len();
                 if payload.len() <= data_start {
                     return Err(ConnectionError::Protocol(
-                        "no data after bencode header".into(),
+                        ProtocolViolation::BadMetadataBencode(
+                            "no data after bencode header".into(),
+                        ),
                     ));
                 }
                 let _ = self
@@ -911,9 +926,9 @@ impl PeerConnection {
                     .await;
             }
             _ => {
-                return Err(ConnectionError::Protocol(format!(
-                    "unknown metadata msg_type: {msg_type}"
-                )));
+                return Err(ConnectionError::Protocol(
+                    ProtocolViolation::UnknownMetadataMsgType(msg_type),
+                ));
             }
         }
         Ok(())
@@ -938,81 +953,11 @@ impl PeerConnection {
 // Clone-able. The info Arc lets the choker read state without a message round
 // trip. The tx channel is for sending commands into the peer task.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct PeerHandle {
-    pid: Pid,
+    pub pid: Pid,
     pub peer_addr: SocketAddr,
     pub info: Arc<RwLock<PeerInfo>>,
     pub tx: mpsc::Sender<PeerMessage>,
-}
-
-// ── Public spawn API ──────────────────────────────────────────────────────────
-//
-// Two functions, one per direction. Both return PeerHandle immediately;
-// the actual work runs in a detached task. Errors are reported via
-// TorrentMessage::PeerError.
-
-/// Spawn an outbound connection. Connects, handshakes, then runs the event loop.
-pub fn spawn_outbound(
-    pid: Pid,
-    addr: SocketAddr,
-    info_hash: InfoHash,
-    local_peer_id: PeerID,
-    torrent_tx: mpsc::Sender<TorrentMessage>,
-    peer_token: CancellationToken,
-) -> (JoinHandle<()>, PeerHandle) {
-    let (tx, rx) = mpsc::channel(256);
-    // PeerInfo initialised with a placeholder peer_id; updated after handshake
-    let info = Arc::new(RwLock::new(PeerInfo::new(*CLIENT_ID, Direction::Outbound)));
-    let info_clone = info.clone();
-
-    let tx_err = torrent_tx.clone();
-    let handle = tokio::spawn(async move {
-        let result: Result<(), ConnectionError> = async {
-            let mut stream = TcpStream::connect_timeout(&addr, CONNECTION_TIMEOUT).await?;
-            let (remote_peer_id, supports_extended, dht_enabled) =
-                PeerConnection::handshake(&mut stream, local_peer_id, info_hash).await?;
-            inc_connected();
-
-            // Update peer info with handshake results
-            {
-                let mut info_guard = info_clone.write().unwrap();
-                info_guard.peer_id = remote_peer_id;
-                info_guard.supports_extended = supports_extended;
-                info_guard.dht_enabled = dht_enabled;
-            }
-
-            PeerConnection::new(
-                pid,
-                stream,
-                addr,
-                Arc::clone(&info_clone),
-                torrent_tx,
-                rx,
-                supports_extended,
-                dht_enabled,
-            )
-            .run(peer_token)
-            .await
-        }
-        .await;
-
-        if let Err(e) = result {
-            // TODO: Improve Error Handling
-            debug!(peer = %addr, error = %e, "Outbound peer failed");
-            let _ = tx_err.send(TorrentMessage::PeerError(pid, e, None)).await;
-        }
-    });
-
-    (
-        handle,
-        PeerHandle {
-            pid,
-            peer_addr: addr,
-            info: Arc::clone(&info),
-            tx,
-        },
-    )
 }
 
 /// Spawn an inbound connection. The caller has already performed the TCP handshake
@@ -1022,20 +967,19 @@ pub fn spawn_inbound(
     pid: Pid,
     addr: SocketAddr,
     stream: TcpStream,
-    // info_hash: InfoHash,
     torrent_tx: mpsc::Sender<TorrentMessage>,
     remote_peer_id: PeerID,
     supports_ext: bool,
     dht_enabled: bool,
     peer_token: CancellationToken,
 ) -> (JoinHandle<()>, PeerHandle) {
-    let (tx, rx) = mpsc::channel(256);
+    let (tx, rx) = mpsc::channel(512);
     let info = Arc::new(RwLock::new(PeerInfo::new(*CLIENT_ID, Direction::Inbound)));
     let info_clone = info.clone();
 
-    let tx_err = torrent_tx.clone();
+    let _tx_err = torrent_tx.clone();
     let handle = tokio::spawn(async move {
-        let result: Result<(), ConnectionError> = async {
+        let result: Result<Option<Bitfield>, ConnectionError> = async {
             inc_connected();
             {
                 let mut info_guard = info_clone.write().unwrap();
@@ -1059,10 +1003,8 @@ pub fn spawn_inbound(
         }
         .await;
 
-        if let Err(e) = result {
-            debug!(peer = %addr, error = %e, "Inbound peer failed");
-            let _ = tx_err.send(TorrentMessage::PeerError(pid, e, None)).await;
-        }
+        // TODO: Integrate with Torrent's JoinSet pattern for proper error/bitfield handling
+        let _ = result;
     });
 
     (
