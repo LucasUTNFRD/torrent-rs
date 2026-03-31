@@ -28,7 +28,7 @@ use bytes::Bytes;
 use magnet_uri::Magnet;
 use mainline_dht::DhtHandler;
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     net::SocketAddr,
     path::PathBuf,
     sync::{
@@ -232,6 +232,24 @@ pub struct Metrics {
     pub uploaded_bytes: AtomicU64,
     /// Total number of unique peers discovered from trackers/DHT (cumulative, never decrements)
     pub peers_discovered: AtomicUsize,
+}
+
+struct SessionTickers {
+    choker: tokio::time::Interval,
+    metrics: tokio::time::Interval,
+    ema: tokio::time::Interval,
+    retry: tokio::time::Interval,
+}
+
+impl SessionTickers {
+    fn new() -> Self {
+        Self {
+            choker: tokio::time::interval(Duration::from_secs(30)),
+            metrics: tokio::time::interval(Duration::from_millis(500)),
+            ema: tokio::time::interval(Duration::from_secs(1)),
+            retry: tokio::time::interval(Duration::from_secs(30)),
+        }
+    }
 }
 
 /// Tracks peer connection history for retry decisions.
@@ -545,6 +563,15 @@ impl Torrent {
             progress_rx,
         )
     }
+    async fn initialize_state(&mut self) {
+        match self.state {
+            TorrentState::Downloading | TorrentState::Checking | TorrentState::FetchingMetadata => {
+                self.init_interal().await
+            }
+            TorrentState::Seeding => self.init_seed().await,
+            TorrentState::Paused | TorrentState::Error(_) | TorrentState::Finished => {}
+        }
+    }
 
     #[instrument(skip(self), name = "torrent", fields(
     info_hash=%self.info_hash,
@@ -554,94 +581,179 @@ impl Torrent {
         cancelation_token: CancellationToken,
     ) -> Result<(), TorrentError> {
         self.cancel_token = cancelation_token.clone();
+        self.initialize_state().await;
 
-        match self.state {
-            TorrentState::Downloading | TorrentState::Checking | TorrentState::FetchingMetadata => {
-                self.init_interal().await
-            }
-            TorrentState::Seeding => self.init_seed().await,
-            TorrentState::Paused | TorrentState::Error(_) | TorrentState::Finished => {}
-        }
-
-        // Start announcing to Trackers/DHT
         let (discovered_peers_tx, mut discovered_peers_rx) = mpsc::channel(64);
         self.announce(&discovered_peers_tx);
 
-        // Periodic choker tick (every 10 seconds)
-        let mut choker_ticker = tokio::time::interval(Duration::from_secs(30));
-        choker_ticker.tick().await;
-
-        // Periodic metrics update (every 1 second)
-        let mut metrics_ticker = tokio::time::interval(Duration::from_millis(500));
-        let mut ema_rates = tokio::time::interval(Duration::from_secs(1));
+        let mut tickers = SessionTickers::new();
+        tickers.choker.tick().await;
+        tickers.retry.tick().await;
 
         loop {
-            while self.peer_tasks.len() <= MAX_CONCURRENT_PEERS {
-                if let Some(peer_addr) = self.pending_peers.pop_front() {
-                    self.spawn_outbound_connection(peer_addr);
-                } else {
-                    break;
-                }
-            }
+            self.try_spawn_pending_peers();
+
             tokio::select! {
                 biased;
                 _ = cancelation_token.cancelled() => {
                     self.shutdown().await;
                     break Ok(());
                 }
-                maybe_msg = self.rx.recv() => {
-                    match maybe_msg{
-                        Some(msg) => self.handle_message(msg).await?,
+                msg = self.rx.recv() => {
+                    match msg {
+                        Some(m) => self.handle_message(m).await?,
                         None => break Ok(()),
                     }
                 }
-                Some(discovered_peers) = discovered_peers_rx.recv() => {
-                    for peer in discovered_peers {
-                        self.known_peers.entry(peer)
-                        .or_insert_with(PeerConnectionState::new);
-                        if !self.pending_peers.contains(&peer) {
-                            self.pending_peers.push_back(peer);
-                        }
+                Some(peers) = discovered_peers_rx.recv() => {
+                    self.register_discovered_peers(peers);
+                }
+                Some(peer_task) = self.peer_tasks.join_next(),
+                    if !self.peer_tasks.is_empty() => {
+                    match peer_task {
+                        Ok((result, pid)) => self.handle_peer_completion(pid, result),
+                        Err(e) => warn!("Peer task panicked: {:?}", e),
                     }
                 }
-                Some(peer_task_result) = self.peer_tasks.join_next(),if !self.peer_tasks.is_empty() => {
-                     match peer_task_result {
-                        Ok((result, pid)) => self.handle_peer_completion(pid,result),
-
-                        Err(join_err) => {
-                            warn!("Peer task panicked: {:?}", join_err);
-                        }
-                    }
-
-                }
-                _ = choker_ticker.tick() => {
-                    self.run_choker().await;
-                }
-                _ = metrics_ticker.tick() => {
-                    self.update_progress();
-                }
-                _ = ema_rates.tick() => {
-                    self.dl_rate.update();
-                    self.ul_rate.update();
-                }
+                _ = tickers.choker.tick() => self.run_choker().await,
+                _ = tickers.metrics.tick() => self.update_progress(),
+                _ = tickers.ema.tick() => self.update_rates(),
+                _ = tickers.retry.tick() => self.requeue_eligible_peers(),
             }
+        }
+    }
+
+    fn try_spawn_pending_peers(&mut self) {
+        let now = Instant::now();
+        while self.peer_tasks.len() <= MAX_CONCURRENT_PEERS {
+            let Some(peer_addr) = self.pending_peers.pop_front() else {
+                break;
+            };
+
+            if !self.is_peer_eligible(peer_addr, now) {
+                continue;
+            }
+
+            self.mark_peer_attempt(peer_addr, now);
+            self.spawn_outbound_connection(peer_addr);
+        }
+    }
+
+    fn is_peer_eligible(&self, peer_addr: SocketAddr, now: Instant) -> bool {
+        self.known_peers
+            .get(&peer_addr)
+            .map(|state| state.is_eligible_for_retry(now))
+            .unwrap_or(true)
+    }
+
+    fn mark_peer_attempt(&mut self, peer_addr: SocketAddr, now: Instant) {
+        if let Some(state) = self.known_peers.get_mut(&peer_addr) {
+            state.last_attempt = Some(now);
+        }
+    }
+
+    fn register_discovered_peers(&mut self, peers: Vec<SocketAddr>) {
+        for peer in peers {
+            self.known_peers
+                .entry(peer)
+                .or_insert_with(PeerConnectionState::new);
+            if !self.pending_peers.contains(&peer) {
+                self.pending_peers.push_back(peer);
+            }
+        }
+    }
+
+    fn update_rates(&mut self) {
+        self.dl_rate.update();
+        self.ul_rate.update();
+    }
+
+    /// Periodic scan to re-add retry-eligible peers to the pending queue.
+    /// This handles peers that failed and have waited their backoff period.
+    fn requeue_eligible_peers(&mut self) {
+        let now = Instant::now();
+        let mut requeued = 0;
+
+        // Get all currently connected peer addresses to avoid duplicating
+        let connected: std::collections::HashSet<SocketAddr> =
+            self.peers.values().map(|h| h.peer_addr).collect();
+
+        // Collect peers that are eligible but not currently connected or pending
+        let eligible: Vec<SocketAddr> = self
+            .known_peers
+            .iter()
+            .filter(|(_, state)| state.is_eligible_for_retry(now))
+            .filter(|(addr, _)| !connected.contains(addr) && !self.pending_peers.contains(addr))
+            .map(|(addr, _)| *addr)
+            .collect();
+
+        for addr in eligible {
+            self.pending_peers.push_back(addr);
+            requeued += 1;
+        }
+
+        if requeued > 0 {
+            debug!("Re-queued {} peers for retry", requeued);
         }
     }
 
     fn handle_peer_completion(&mut self, pid: Pid, result: Result<(), ConnectionError>) {
+        // Get peer_addr before cleanup (clean_up_peer removes from self.peers)
+        let peer_addr = self.peers.get(&pid).map(|h| h.peer_addr);
+
         match result {
-            Ok(()) => debug!("Peer {} disconnected cleanly", pid),
+            Ok(()) => {
+                debug!("Peer {} disconnected cleanly", pid);
+            }
             Err(e) => {
                 warn!("Peer {} connection error: {}", pid, e);
-                if e.is_transient() {
-                    self.retry_peer_on_transient_error(pid);
+
+                if let Some(addr) = peer_addr {
+                    // Self-connection should be banned permanently
+                    if matches!(e, ConnectionError::SelfConnection) {
+                        self.known_peers.remove(&addr);
+                        debug!("Peer {} banned (self-connection)", addr);
+                    } else if e.is_transient() {
+                        self.schedule_retry(addr, &e);
+                    } else {
+                        // Non-transient error: record failure but don't re-add to pending
+                        if let Some(state) = self.known_peers.get_mut(&addr) {
+                            state.record_failure(&e);
+                            debug!(
+                                "Peer {} failed {} time(s), not retrying (non-transient)",
+                                addr, state.failcount
+                            );
+                        }
+                    }
                 }
             }
         }
+
         self.clean_up_peer(pid, None);
     }
 
-    fn retry_peer_on_transient_error(pid: Pid) {}
+    /// Schedule a peer for retry after a transient error.
+    /// Records the failure and re-adds to pending queue if eligible.
+    fn schedule_retry(&mut self, peer_addr: SocketAddr, error: &ConnectionError) {
+        let Some(state) = self.known_peers.get_mut(&peer_addr) else {
+            return;
+        };
+
+        state.record_failure(error);
+
+        if state.is_eligible_for_retry(Instant::now()) {
+            debug!(
+                "Peer {} failed {} time(s), re-queuing for retry",
+                peer_addr, state.failcount
+            );
+            self.pending_peers.push_back(peer_addr);
+        } else {
+            debug!(
+                "Peer {} failed {} time(s), waiting before retry",
+                peer_addr, state.failcount
+            );
+        }
+    }
 
     pub async fn add_peer(&mut self, peer: PeerOrigin) {}
 
