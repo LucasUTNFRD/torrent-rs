@@ -6,6 +6,7 @@
 //! - `get_peers` and `announce_peer` queries
 //! - BEP 42 secure node ID generation
 //! - Iterative Kademlia-style node lookup
+//! - Automatic bootstrap on startup
 //!
 //! # Example
 //!
@@ -14,10 +15,9 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     // Create and bootstrap a DHT node
+//!     // Create a DHT node (bootstrap happens automatically)
 //!     let dht = Dht::new(None).await?;
-//!     let node_id = dht.bootstrap().await?;
-//!     println!("Our node ID: {:?}", node_id);
+//!     println!("Our node ID: {:?}", dht.node_id());
 //!
 //!     // Find nodes close to a random target
 //!     let target = NodeId::generate_random();

@@ -50,13 +50,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let dht = Dht::with_config(config).await?;
 
-    println!("Bootstrapping into the DHT network...");
-    dht.bootstrap().await?;
-    println!("Bootstrap successful. Node ID: {}\n", dht.node_id());
-
-    // Wait a bit for bootstrap responses to populate routing table
-    println!("Waiting for bootstrap responses...");
-    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+    println!("Bootstrap complete. Node ID: {}", dht.node_id());
     println!(
         "Routing table size: {} nodes\n",
         dht.routing_table_size().await?

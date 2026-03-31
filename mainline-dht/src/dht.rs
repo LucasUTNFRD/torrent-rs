@@ -1,4 +1,4 @@
-//! DHT node implementation for BitTorrent Mainline DHT (BEP 0005).
+//! DHT node rmplementation for BitTorrent Mainline DHT (BEP 0005).
 //!
 //! This module provides the main DHT client with:
 //! - Bootstrap into the DHT network
@@ -7,8 +7,10 @@
 //! - Announce peer participation (announce_peer)
 //! - Server mode (responding to incoming queries)
 
+use futures::stream::FuturesOrdered;
 use rand::RngExt;
 use std::{
+    collections::{HashMap, HashSet},
     fs,
     net::{Ipv4Addr, SocketAddr, ToSocketAddrs},
     path::PathBuf,
@@ -21,7 +23,7 @@ use bittorrent_common::types::InfoHash;
 use tokio::{
     net::UdpSocket,
     sync::{mpsc, oneshot},
-    time::interval,
+    time::{Instant, interval},
 };
 
 use crate::{
@@ -82,8 +84,7 @@ impl DhtConfig {
     /// Create a config with default persistence in the user's config directory
     ///
     /// On Linux: ~/.config/mainline-dht/
-    /// On macOS: ~/Library/Application Support/mainline-dht/
-    /// On Windows: %APPDATA%/mainline-dht/
+    ///
     pub fn with_default_persistence(port: u16) -> Result<Self, DhtError> {
         let project_dirs = directories::ProjectDirs::from("com", "mainline", "mainline-dht")
             .ok_or_else(|| DhtError::Other("Could not determine config directory".to_string()))?;
@@ -200,27 +201,27 @@ impl DhtHandler {
         })
     }
 
-    /// Bootstrap into the DHT network using default bootstrap nodes.
-    ///
-    /// Sends ping queries to bootstrap nodes to populate the routing table.
-    pub async fn bootstrap(&self) -> Result<(), DhtError> {
-        self.bootstrap_with_nodes(&DEFAULT_BOOTSTRAP_NODES).await
-    }
-
-    /// Bootstrap using custom bootstrap nodes.
-    pub async fn bootstrap_with_nodes(&self, nodes: &[&str]) -> Result<(), DhtError> {
-        let (resp_tx, resp_rx) = oneshot::channel();
-
-        self.command_tx
-            .send(DhtCommand::Bootstrap {
-                nodes: nodes.iter().map(|s| s.to_string()).collect(),
-                resp: resp_tx,
-            })
-            .await
-            .map_err(|_| DhtError::ChannelClosed)?;
-
-        resp_rx.await.map_err(|_| DhtError::ChannelClosed)?
-    }
+    // /// Bootstrap into the DHT network using default bootstrap nodes.
+    // ///
+    // /// Sends ping queries to bootstrap nodes to populate the routing table.
+    // pub async fn bootstrap(&self) -> Result<(), DhtError> {
+    //     self.bootstrap_with_nodes(&DEFAULT_BOOTSTRAP_NODES).await
+    // }
+    //
+    // /// Bootstrap using custom bootstrap nodes.
+    // pub async fn bootstrap_with_nodes(&self, nodes: &[&str]) -> Result<(), DhtError> {
+    //     let (resp_tx, resp_rx) = oneshot::channel();
+    //
+    //     self.command_tx
+    //         .send(DhtCommand::Bootstrap {
+    //             nodes: nodes.iter().map(|s| s.to_string()).collect(),
+    //             resp: resp_tx,
+    //         })
+    //         .await
+    //         .map_err(|_| DhtError::ChannelClosed)?;
+    //
+    //     resp_rx.await.map_err(|_| DhtError::ChannelClosed)?
+    // }
 
     /// Find the K closest nodes to a target ID.
     ///
@@ -365,10 +366,6 @@ impl DhtHandler {
 // ============================================================================
 
 enum DhtCommand {
-    Bootstrap {
-        nodes: Vec<String>,
-        resp: oneshot::Sender<Result<(), DhtError>>,
-    },
     FindNode {
         target: NodeId,
         resp: oneshot::Sender<Result<Vec<CompactNodeInfo>, DhtError>>,
@@ -396,15 +393,6 @@ enum DhtCommand {
 }
 
 // ============================================================================
-// Internal: Pending request tracking
-// ============================================================================
-
-#[allow(dead_code)]
-struct PendingRequest {
-    resp_tx: oneshot::Sender<KrpcMessage>,
-}
-
-// ============================================================================
 // Internal: DHT Actor
 // ============================================================================
 
@@ -417,31 +405,31 @@ struct DhtActor {
     peer_store: PeerStore,
     /// Token generation and validation.
     token_manager: TokenManager,
-    /// Path to store the node ID file for persistence.
+    /// Path to store the node ID file for persistence (BEP 42).
     #[allow(dead_code)]
     id_file_path: Option<PathBuf>,
     /// Path to store the DHT state (routing table) for persistence.
     state_file_path: Option<PathBuf>,
     transaction_manager: TransactionManager,
     /// Active get_peers lookups and their collected results
-    pending_get_peers: std::collections::HashMap<InfoHash, GetPeersLookupState>,
+    pending_get_peers: HashMap<InfoHash, GetPeersLookupState>,
 }
 
 /// State for an active get_peers lookup
 #[derive(Debug)]
 struct GetPeersLookupState {
     /// Peers discovered so far
-    peers: std::collections::HashSet<SocketAddr>,
+    peers: HashSet<SocketAddr>,
     /// Nodes with tokens for potential announce
     nodes_with_tokens: Vec<(CompactNodeInfo, Vec<u8>)>,
     /// Nodes we've queried
     #[allow(dead_code)]
-    queried_nodes: std::collections::HashSet<SocketAddr>,
+    queried_nodes: HashSet<SocketAddr>,
     /// Channel to stream discovered peers to caller
     peer_tx: mpsc::Sender<Vec<SocketAddr>>,
     /// When the lookup started
     #[allow(dead_code)]
-    started_at: std::time::Instant,
+    started_at: Instant,
 }
 
 impl DhtActor {
@@ -466,10 +454,196 @@ impl DhtActor {
         }
     }
 
+    const BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(10);
+    const BOOTSTRAP_TARGET: usize = 180;
+
+    /// Resolve bootstrap node addresses from DNS.
+    /// This is done upfront because DNS resolution can block.
+    fn resolve_bootstrap_nodes(&self) -> Result<Vec<SocketAddr>, DhtError> {
+        let mut addrs: Vec<SocketAddr> = Vec::new();
+        for node in DEFAULT_BOOTSTRAP_NODES.iter() {
+            match node.to_socket_addrs() {
+                Ok(resolved) => {
+                    addrs.extend(resolved.filter(|a| a.is_ipv4()));
+                }
+                Err(e) => tracing::warn!("Failed to resolve {}: {}", node, e),
+            }
+        }
+
+        if addrs.is_empty() {
+            tracing::warn!("No bootstrap nodes could be resolved");
+        }
+
+        Ok(addrs)
+    }
+
+    /// Perform blocking bootstrap until we have enough nodes or timeout.
+    /// This sends pings to bootstrap nodes and processes responses inline.
+    async fn do_bootstrap(&mut self, bootstrap_nodes: &[SocketAddr]) -> Result<(), DhtError> {
+        tracing::info!(
+            "Starting DHT bootstrap with {} bootstrap nodes",
+            bootstrap_nodes.len()
+        );
+
+        // Load persisted state for faster bootstrap
+        if let Some(path) = self.state_file_path.clone()
+            && let Some((_saved_id, saved_nodes)) = Self::load_state(&path)
+        {
+            tracing::info!("Loaded {} persisted nodes from cache", saved_nodes.len());
+            for node_info in &saved_nodes {
+                self.routing_table
+                    .try_add_node(Node::new(node_info.node_id, node_info.addr));
+            }
+        }
+
+        if self.routing_table.node_count() >= Self::BOOTSTRAP_TARGET {
+            tracing::info!(
+                "Bootstrap complete: {} nodes from persisted state",
+                self.routing_table.node_count()
+            );
+            return Ok(());
+        }
+
+        if bootstrap_nodes.is_empty() && self.routing_table.node_count() == 0 {
+            return Err(DhtError::BootstrapFailed);
+        }
+
+        use futures::stream::StreamExt;
+
+        // Per-ping oneshot channels keyed by tx_id bytes.
+        // Bootstrap pings are NOT registered in TransactionManager — we own their lifecycle here.
+        let mut pong_senders: HashMap<[u8; 2], oneshot::Sender<(NodeId, SocketAddr)>> =
+            HashMap::new();
+        let mut pong_futures = FuturesOrdered::new();
+
+        for addr in bootstrap_nodes {
+            let tx_id = self.transaction_manager.gen_id();
+            let (pong_tx, pong_rx) = oneshot::channel::<(NodeId, SocketAddr)>();
+
+            let msg = KrpcMessage::ping_query(u16::from_be_bytes(tx_id.0), self.node_id);
+            let bytes = msg.to_bytes();
+            if self.socket.try_send_to(&bytes, *addr).is_ok() {
+                inc_msg_out();
+                inc_bytes_out(bytes.len());
+                pong_senders.insert(tx_id.0, pong_tx);
+                pong_futures.push_back(async move {
+                    tokio::time::timeout(QUERY_TIMEOUT * 3, pong_rx)
+                        .await
+                        .ok() // timeout -> None
+                        .and_then(|r| r.ok()) // channel closed -> None
+                });
+            }
+        }
+
+        tracing::info!(
+            "Sent {} bootstrap pings, waiting for pongs...",
+            pong_senders.len()
+        );
+
+        let mut buf = [0u8; 4096];
+        let deadline = tokio::time::Instant::now() + Self::BOOTSTRAP_TIMEOUT;
+
+        // Consume the first tick so the interval doesn't fire immediately.
+        let mut find_node_interval = tokio::time::interval(Duration::from_secs(2));
+        find_node_interval.tick().await;
+
+        loop {
+            if self.routing_table.node_count() >= Self::BOOTSTRAP_TARGET {
+                break;
+            }
+
+            tokio::select! {
+                // A per-node pong future resolved (response received or individual timeout).
+                Some(result) = pong_futures.next() => {
+                    if let Some((node_id, addr)) = result {
+                        tracing::debug!("Bootstrap pong from {}: node {:?}", addr, node_id);
+                        self.routing_table.try_add_node(Node::new_good(node_id, addr));
+                        // Immediately expand from this node toward our own ID.
+                        let _ = self.send_find_node(addr, self.node_id);
+                    }
+                    // None means individual timeout — just continue waiting.
+                }
+
+                // Receive a UDP packet.
+                Ok((size, from)) = self.socket.recv_from(&mut buf) => {
+                    inc_msg_in();
+                    inc_bytes_in(size);
+
+                    match KrpcMessage::from_bytes(&buf[..size]) {
+                        Ok(msg) => {
+                            // Is this a pong for one of our bootstrap pings?
+                            let is_bootstrap_pong = matches!(&msg.body, MessageBody::Response(_))
+                                && pong_senders.contains_key(&msg.transaction_id.0);
+
+                            if is_bootstrap_pong {
+                                // Extract node_id and deliver via oneshot.
+                                // The FuturesUnordered branch will update the routing table.
+                                if let Some(node_id) = msg.get_node_id() &&
+                                     let Some(sender) = pong_senders.remove(&msg.transaction_id.0) {
+                                        let _ = sender.send((node_id, from));
+                                }
+                            } else {
+                                // find_node responses, queries from the network, etc.
+                                self.handle_incoming(&buf[..size], from).await;
+                            }
+                        }
+                        Err(e) => {
+                            tracing::debug!("Failed to parse message from {from}: {e}");
+                            inc_msg_dropped();
+                        }
+                    }
+                }
+
+                // Periodically fan find_node to the currently-closest known nodes.
+                _ = find_node_interval.tick() => {
+                    if self.routing_table.node_count() > 0 {
+                        let target = self.node_id;
+                        let addrs: Vec<SocketAddr> = self
+                            .routing_table
+                            .get_closest_nodes(&target, K)
+                            .iter()
+                            .take(3)
+                            .map(|n| n.addr)
+                            .collect();
+                        for addr in addrs {
+                            let _ = self.send_find_node(addr, target);
+                        }
+                    }
+                }
+
+                // Global bootstrap wall-clock timeout.
+                _ = tokio::time::sleep_until(deadline)=> {
+                    tracing::warn!(
+                        "Bootstrap timed out after {:?}, {} nodes found",
+                        Self::BOOTSTRAP_TIMEOUT,
+                        self.routing_table.node_count()
+                    );
+                    break;
+                }
+            }
+        }
+
+        let node_count = self.routing_table.node_count();
+        if node_count == 0 {
+            tracing::warn!("Bootstrap failed: no nodes responded");
+            Err(DhtError::BootstrapFailed)
+        } else {
+            tracing::info!("Bootstrap complete: {} nodes in routing table", node_count);
+            Ok(())
+        }
+    }
+
     async fn run(
         mut self,
         _shared_node_id: Arc<std::sync::RwLock<NodeId>>,
     ) -> Result<(), DhtError> {
+        let bootstrap_addrs = self.resolve_bootstrap_nodes()?;
+
+        // Phase 1: Blocking bootstrap
+        if !bootstrap_addrs.is_empty() {
+            self.do_bootstrap(&bootstrap_addrs).await?;
+        }
+
         let mut buf = [0u8; 4096];
         // Check for transaction timeouts every 500ms
         let mut timeout_interval = interval(Duration::from_millis(500));
@@ -503,10 +677,6 @@ impl DhtActor {
                 // Handle commands from the public API
                 Some(cmd) = self.command_rx.recv() => {
                     match cmd {
-                        DhtCommand::Bootstrap { nodes, resp } => {
-                            let result = self.bootstrap(&nodes).await;
-                            let _ = resp.send(result);
-                        }
                         DhtCommand::FindNode { target, resp } => {
                             // Perform iterative find_node lookup
                             let result = self.iterative_find_node(target).await;
@@ -624,159 +794,6 @@ impl DhtActor {
     }
 
     // ========================================================================
-    // Bootstrap
-    // ========================================================================
-
-    async fn bootstrap(&mut self, bootstrap_nodes: &[String]) -> Result<(), DhtError> {
-        tracing::info!(
-            "Starting DHT bootstrap with {} nodes",
-            bootstrap_nodes.len()
-        );
-
-        // Try to load persisted state for faster bootstrap
-        let persisted_nodes = self.state_file_path.as_ref().and_then(DhtActor::load_state);
-
-        if let Some((saved_id, ref saved_nodes)) = persisted_nodes {
-            tracing::info!(
-                "Found persisted DHT state: {} nodes, node_id={:?}",
-                saved_nodes.len(),
-                saved_id
-            );
-        }
-
-        // Resolve bootstrap addresses (IPv4 only since socket is IPv4-bound)
-        let mut addrs: Vec<SocketAddr> = Vec::new();
-        for node in bootstrap_nodes {
-            match node.to_socket_addrs() {
-                Ok(resolved) => {
-                    addrs.extend(resolved.filter(|a| a.is_ipv4()));
-                }
-                Err(e) => tracing::warn!("Failed to resolve {node}: {e}"),
-            }
-        }
-
-        if addrs.is_empty() && persisted_nodes.is_none() {
-            return Err(DhtError::BootstrapFailed);
-        }
-
-        // Add persisted nodes to routing table
-        if let Some((_saved_id, ref saved_nodes)) = persisted_nodes {
-            tracing::info!(
-                "Adding {} persisted nodes to routing table",
-                saved_nodes.len()
-            );
-            for node_info in saved_nodes {
-                let node = Node::new(node_info.node_id, node_info.addr);
-                self.routing_table.try_add_node(node);
-            }
-        }
-
-        // Send ping to bootstrap nodes - this is how we initially populate the routing table
-        // The ping->pong handshake lets us learn their node IDs
-        for addr in &addrs {
-            self.send_ping(*addr)?;
-        }
-
-        tracing::info!(
-            "Bootstrap complete: sent pings to {} bootstrap nodes, {} nodes in routing table",
-            addrs.len(),
-            self.routing_table.node_count()
-        );
-        Ok(())
-        //
-        //     match self.ping(*addr_v4).await {
-        //         Ok((msg, _)) => {
-        //             if let Some(sender_ip) = msg.sender_ip {
-        //                 external_ip = Some(*sender_ip.ip());
-        //             }
-        //
-        //             if let Some(node_id) = msg.get_node_id() {
-        //                 first_node = Some((node_id, *addr_v4));
-        //                 break;
-        //             }
-        //         }
-        //         Err(e) => {
-        //             tracing::debug!("Bootstrap ping to {addr} failed: {e}");
-        //         }
-        //     }
-        // }
-        //
-        // // Check/update BEP 42 secure node ID
-        // if let Some(ip) = external_ip {
-        //     let ip_addr = IpAddr::V4(ip);
-        //
-        //     if self.node_id.is_node_id_secure(ip_addr) {
-        //         tracing::info!(
-        //             "Reusing existing BEP 42 compliant node ID: {:?}",
-        //             self.node_id
-        //         );
-        //     } else {
-        //         let mut secure_id = NodeId::generate_random();
-        //         secure_id.secure_node_id(&ip_addr);
-        //         self.node_id = secure_id;
-        //         self.routing_table = RoutingTable::new(secure_id);
-        //         tracing::info!("Generated new BEP 42 secure node ID: {:?}", self.node_id);
-        //
-        //         if let Some(ref path) = self.id_file_path {
-        //             if let Err(e) = self.node_id.save(path) {
-        //                 tracing::warn!("Failed to save node ID to {}: {}", path.display(), e);
-        //             } else {
-        //                 tracing::info!("Saved new BEP 42 node ID to {}", path.display());
-        //             }
-        //         }
-        //     }
-        // } else {
-        //     tracing::warn!("Could not discover external IP, using random node ID");
-        // }
-        //
-        // // Add the first responding bootstrap node
-        // if let Some((node_id, addr)) = first_node {
-        //     let node = Node::new_good(node_id, addr);
-        //     self.routing_table.try_add_node(node);
-        //     tracing::info!("Added bootstrap node to routing table");
-        // }
-        //
-        // // Ping persisted nodes and add responsive ones to the routing table
-        // if let Some((_, saved_nodes)) = persisted_nodes {
-        //     let total = saved_nodes.len();
-        //     let mut added = 0usize;
-        //
-        //     for node_info in &saved_nodes {
-        //         match self.ping(node_info.addr).await {
-        //             Ok((msg, _)) => {
-        //                 if let Some(resp_id) = msg.get_node_id() {
-        //                     let node = Node::new_good(resp_id, node_info.addr);
-        //                     self.routing_table.try_add_node(node);
-        //                     added += 1;
-        //                 }
-        //             }
-        //             Err(_) => {
-        //                 tracing::debug!("Persisted node {} did not respond", node_info.addr);
-        //             }
-        //         }
-        //     }
-        //
-        //     tracing::info!(
-        //         "Pinged {} persisted nodes, {} responded and added to routing table",
-        //         total,
-        //         added
-        //     );
-        // }
-        //
-        // // Perform iterative find_node on ourselves to populate routing table
-        // tracing::info!("Starting iterative find_node to populate routing table...");
-        // // TODO: Perfomr this async
-        //
-        // let node_count = self.routing_table.node_count();
-        // if node_count == 0 {
-        //     return Err(DhtError::BootstrapFailed);
-        // }
-        //
-        // tracing::info!("Bootstrap complete: {} nodes in routing table", node_count);
-        // Ok(self.node_id)
-    }
-
-    // ========================================================================
     // Get Peers (Iterative Lookup)
     // ========================================================================
 
@@ -864,7 +881,7 @@ impl DhtActor {
             nodes_with_tokens: Vec::new(),
             queried_nodes: HashSet::new(),
             peer_tx,
-            started_at: std::time::Instant::now(),
+            started_at: Instant::now(),
         };
         self.pending_get_peers.insert(info_hash, lookup_state);
 
