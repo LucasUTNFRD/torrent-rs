@@ -28,7 +28,7 @@ use bytes::Bytes;
 use magnet_uri::Magnet;
 use mainline_dht::DhtHandler;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     net::SocketAddr,
     path::PathBuf,
     sync::{
@@ -41,7 +41,7 @@ use thiserror::Error;
 use tokio::{
     sync::{mpsc, oneshot, watch},
     task::JoinSet,
-    time::{sleep, timeout},
+    time::{Instant, sleep, timeout},
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument, warn};
@@ -134,6 +134,7 @@ pub enum TorrentMessage {
     ValidMetadata {
         resp: oneshot::Sender<Option<Arc<Info>>>,
     },
+    ConnectionEstablished(SocketAddr),
     DhtAddNode {
         node_addr: SocketAddr,
     },
@@ -233,6 +234,51 @@ pub struct Metrics {
     pub peers_discovered: AtomicUsize,
 }
 
+/// Tracks peer connection history for retry decisions.
+/// Based on libtorrent's peer_info structure.
+struct PeerConnectionState {
+    /// Consecutive failed connection attempts (capped at 31, 5-bit value in libtorrent)
+    failcount: u8,
+    /// When we last attempted to connect
+    last_attempt: Option<Instant>,
+}
+
+impl PeerConnectionState {
+    pub fn new() -> Self {
+        Self {
+            failcount: 0,
+            last_attempt: None,
+        }
+    }
+    fn is_eligible_for_retry(&self, now: Instant) -> bool {
+        if self.failcount >= MAX_FAILCOUNT {
+            return false;
+        }
+
+        match self.last_attempt {
+            None => true, // Never attempted - immediately eligible
+            Some(last) => {
+                let delay = (self.failcount as u32 + 1) * MIN_RECONNECT_TIME;
+                now.duration_since(last) >= delay
+            }
+        }
+    }
+
+    fn record_failure(&mut self, _error: &ConnectionError) {
+        self.failcount = self.failcount.saturating_add(1).min(31);
+        self.last_attempt = Some(Instant::now());
+    }
+
+    fn record_success(&mut self) {
+        self.failcount = 0;
+        self.last_attempt = Some(Instant::now());
+    }
+}
+
+const MAX_FAILCOUNT: u8 = 3;
+const MIN_RECONNECT_TIME: Duration = Duration::from_secs(60);
+const CONNECTION_TIMEOUT_BASE: Duration = Duration::from_secs(10);
+
 //
 // TORRENT Control Structure
 //
@@ -256,8 +302,10 @@ pub struct Torrent {
     metrics: Arc<Metrics>,
     peers: HashMap<Pid, PeerHandle>,
     peer_tasks: JoinSet<ConnectionResult>,
-    discovered_peers: HashSet<SocketAddr>,
-    pending_peers: Vec<SocketAddr>,
+    /// All known peers with their connection state
+    known_peers: HashMap<SocketAddr, PeerConnectionState>,
+    /// Queue of addresses ready for connection attempt
+    pending_peers: VecDeque<SocketAddr>,
     peer_cancel_token: CancellationToken,
 
     // Torrent-local per-peer state that PeerHandle no longer holds
@@ -489,9 +537,9 @@ impl Torrent {
                 peer_tasks: JoinSet::new(),
                 peer_cancel_token: CancellationToken::new(),
                 cancel_token: CancellationToken::new(),
+                known_peers: HashMap::new(),
+                pending_peers: VecDeque::new(),
                 background_tasks: JoinSet::new(),
-                discovered_peers: HashSet::new(),
-                pending_peers: Vec::new(),
             },
             tx,
             progress_rx,
@@ -529,8 +577,8 @@ impl Torrent {
 
         loop {
             while self.peer_tasks.len() <= MAX_CONCURRENT_PEERS {
-                if let Some(peer_addr) = self.pending_peers.pop() {
-                    self.try_connect(peer_addr);
+                if let Some(peer_addr) = self.pending_peers.pop_front() {
+                    self.spawn_outbound_connection(peer_addr);
                 } else {
                     break;
                 }
@@ -549,25 +597,17 @@ impl Torrent {
                 }
                 Some(discovered_peers) = discovered_peers_rx.recv() => {
                     for peer in discovered_peers {
-                        if self.discovered_peers.insert(peer){
-                            self.pending_peers.push(peer);
+                        self.known_peers.entry(peer)
+                        .or_insert_with(PeerConnectionState::new);
+                        if !self.pending_peers.contains(&peer) {
+                            self.pending_peers.push_back(peer);
                         }
                     }
                 }
                 Some(peer_task_result) = self.peer_tasks.join_next(),if !self.peer_tasks.is_empty() => {
                      match peer_task_result {
-                        Ok((result, pid)) => {
-                            match result {
-                                Ok(()) => {
-                                    debug!("Peer {} disconnected cleanly", pid);
-                                    self.clean_up_peer(pid, None);
-                                }
-                                Err(e) => {
-                                    warn!("Peer {} connection error: {}", pid, e);
-                                    self.clean_up_peer(pid, None);
-                                }
-                            }
-                        }
+                        Ok((result, pid)) => self.handle_peer_completion(pid,result),
+
                         Err(join_err) => {
                             warn!("Peer task panicked: {:?}", join_err);
                         }
@@ -588,19 +628,32 @@ impl Torrent {
         }
     }
 
-    pub async fn add_peer(&mut self, peer: PeerOrigin) {
-       
+    fn handle_peer_completion(&mut self, pid: Pid, result: Result<(), ConnectionError>) {
+        match result {
+            Ok(()) => debug!("Peer {} disconnected cleanly", pid),
+            Err(e) => {
+                warn!("Peer {} connection error: {}", pid, e);
+                if e.is_transient() {
+                    self.retry_peer_on_transient_error(pid);
+                }
+            }
+        }
+        self.clean_up_peer(pid, None);
     }
 
+    fn retry_peer_on_transient_error(pid: Pid) {}
+
+    pub async fn add_peer(&mut self, peer: PeerOrigin) {}
+
     /// Spawn an outbound connection. Connects, handshakes, then runs the event loop.
-    fn try_connect(&mut self, peer_addr: SocketAddr) {
+    fn spawn_outbound_connection(&mut self, peer_addr: SocketAddr) {
         let pid = Pid(PEER_COUNTER.fetch_add(1, Ordering::Relaxed));
         self.metrics
             .peers_discovered
             .fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel(512);
         let torrent_tx = self.tx.clone();
-        let info = Arc::new(RwLock::new(PeerInfo::new(*CLIENT_ID, Direction::Inbound)));
+        let info = Arc::new(RwLock::new(PeerInfo::new(*CLIENT_ID, Direction::Outbound)));
         let info_clone = info.clone();
         let peer_token = self.peer_cancel_token.child_token();
 
@@ -613,7 +666,9 @@ impl Torrent {
                 let (remote_peer_id, supports_extended, dht_enabled) =
                     PeerConnection::handshake(&mut stream, local_peer_id, info_hash).await?;
                 inc_connected();
-
+                let _ = torrent_tx
+                    .send(TorrentMessage::ConnectionEstablished(peer_addr))
+                    .await;
                 // Update peer info with handshake results
                 {
                     let mut info_guard = info_clone.write().unwrap();
@@ -790,6 +845,11 @@ impl Torrent {
                             e
                         );
                     }
+                }
+            }
+            TorrentMessage::ConnectionEstablished(peer_addr) => {
+                if let Some(state) = self.known_peers.get_mut(&peer_addr) {
+                    state.record_success();
                 }
             }
             TorrentMessage::Have { pid: _, piece_idx } => {
