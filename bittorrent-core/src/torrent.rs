@@ -301,7 +301,7 @@ const CONNECTION_TIMEOUT_BASE: Duration = Duration::from_secs(10);
 // TORRENT Control Structure
 //
 
-type ConnectionResult = (Result<(), ConnectionError>, Pid);
+type ConnectionResult = (Result<Option<Bitfield>, ConnectionError>, Pid);
 
 pub struct Torrent {
     info_hash: InfoHash,
@@ -697,13 +697,18 @@ impl Torrent {
         }
     }
 
-    fn handle_peer_completion(&mut self, pid: Pid, result: Result<(), ConnectionError>) {
+    fn handle_peer_completion(
+        &mut self,
+        pid: Pid,
+        result: Result<Option<Bitfield>, ConnectionError>,
+    ) {
         // Get peer_addr before cleanup (clean_up_peer removes from self.peers)
         let peer_addr = self.peers.get(&pid).map(|h| h.peer_addr);
 
         match result {
-            Ok(()) => {
+            Ok(bitfield) => {
                 debug!("Peer {} disconnected cleanly", pid);
+                self.clean_up_peer(pid, bitfield);
             }
             Err(e) => {
                 warn!("Peer {} connection error: {}", pid, e);
@@ -726,10 +731,10 @@ impl Torrent {
                         }
                     }
                 }
+
+                self.clean_up_peer(pid, None);
             }
         }
-
-        self.clean_up_peer(pid, None);
     }
 
     /// Schedule a peer for retry after a transient error.
@@ -1617,7 +1622,6 @@ impl Torrent {
         let _ = self.progress_tx.send(metrics);
     }
 
-    // TODO: Message delivery strategy — not all messages warrant blocking send.
     // try_send (non-blocking, drop on full):
     //   - SendHave, SendChoke, SendUnchoke: peer will learn state eventually or disconnect
     //   - SendBitfield, HaveMetadata: one-time setup, stale if peer is lagging anyway
@@ -1631,8 +1635,8 @@ impl Torrent {
         if let Some(p) = self.peers.get(&pid) {
             match p.tx.try_send(message) {
                 Ok(()) => {}
-                Err(mpsc::error::TrySendError::Full(_)) => {
-                    tracing::warn!(%pid, "peer channel full, dropping message");
+                Err(mpsc::error::TrySendError::Full(m)) => {
+                    tracing::warn!(%pid, "peer channel full, dropping {m:?}");
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => {
                     // Task already exited, PeerDisconnected is in flight

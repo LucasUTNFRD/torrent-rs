@@ -262,7 +262,7 @@ impl PeerConnection {
     }
 
     // ── Event loop ────────────────────────────────────────────────────────────
-    pub async fn run(mut self, peer_token: CancellationToken) -> Result<(), ConnectionError> {
+    pub async fn run(mut self, peer_token: CancellationToken) -> Result<Option<Bitfield>, ConnectionError> {
         self.have_valid_metadata().await;
 
         if self.supports_extended {
@@ -277,7 +277,7 @@ impl PeerConnection {
         heartbeat.tick().await;
         metric_tick.tick().await;
 
-        loop {
+        let result = loop {
             self.maybe_request_metadata().await?;
 
             tokio::select! {
@@ -323,16 +323,15 @@ impl PeerConnection {
                 },
                 _ = metric_tick.tick() => self.metric_update(),
             }
-        }
+        };
 
-        // let bitfield = match self.bitfield {
-        //     BitfieldState::Validated(bf) => Some(bf),
-        //     _ => None,
-        // };
-        // let _ = self
-        //     .torrent_tx
-        //     .send(TorrentMessage::PeerDisconnected(self.pid, bitfield))
-        //     .await;
+        // Extract the validated bitfield to return for piece availability cleanup
+        let bitfield = match self.bitfield {
+            BitfieldState::Validated(bf) => Some(bf),
+            _ => None,
+        };
+
+        result.map(|()| bitfield)
     }
 
     async fn drain(&mut self) {
@@ -978,9 +977,9 @@ pub fn spawn_inbound(
     let info = Arc::new(RwLock::new(PeerInfo::new(*CLIENT_ID, Direction::Inbound)));
     let info_clone = info.clone();
 
-    let tx_err = torrent_tx.clone();
+    let _tx_err = torrent_tx.clone();
     let handle = tokio::spawn(async move {
-        let result: Result<(), ConnectionError> = async {
+        let result: Result<Option<Bitfield>, ConnectionError> = async {
             inc_connected();
             {
                 let mut info_guard = info_clone.write().unwrap();
@@ -1004,10 +1003,8 @@ pub fn spawn_inbound(
         }
         .await;
 
-        // if let Err(e) = result {
-        //     warn!(peer = %addr, error = %e, "Inbound peer failed");
-        //     let _ = tx_err.send(TorrentMessage::PeerError(pid, e, None)).await;
-        // }
+        // TODO: Integrate with Torrent's JoinSet pattern for proper error/bitfield handling
+        let _ = result;
     });
 
     (
