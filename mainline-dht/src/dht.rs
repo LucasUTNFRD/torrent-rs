@@ -223,23 +223,23 @@ impl DhtHandler {
     //     resp_rx.await.map_err(|_| DhtError::ChannelClosed)?
     // }
 
-    /// Find the K closest nodes to a target ID.
-    ///
-    /// Performs an iterative lookup, querying progressively closer nodes
-    /// until no closer nodes are found.
-    pub async fn find_node(&self, target: NodeId) -> Result<Vec<CompactNodeInfo>, DhtError> {
-        let (resp_tx, resp_rx) = oneshot::channel();
-
-        self.command_tx
-            .send(DhtCommand::FindNode {
-                target,
-                resp: resp_tx,
-            })
-            .await
-            .map_err(|_| DhtError::ChannelClosed)?;
-
-        resp_rx.await.map_err(|_| DhtError::ChannelClosed)?
-    }
+    // /// Find the K closest nodes to a target ID.
+    // ///
+    // /// Performs an iterative lookup, querying progressively closer nodes
+    // /// until no closer nodes are found.
+    // pub async fn find_node(&self, target: NodeId) -> Result<Vec<CompactNodeInfo>, DhtError> {
+    //     let (resp_tx, resp_rx) = oneshot::channel();
+    //
+    //     self.command_tx
+    //         .send(DhtCommand::FindNode {
+    //             target,
+    //             resp: resp_tx,
+    //         })
+    //         .await
+    //         .map_err(|_| DhtError::ChannelClosed)?;
+    //
+    //     resp_rx.await.map_err(|_| DhtError::ChannelClosed)?
+    // }
 
     /// Find peers for a torrent infohash.
     ///
@@ -366,10 +366,10 @@ impl DhtHandler {
 // ============================================================================
 
 enum DhtCommand {
-    FindNode {
-        target: NodeId,
-        resp: oneshot::Sender<Result<Vec<CompactNodeInfo>, DhtError>>,
-    },
+    // FindNode {
+    //     target: NodeId,
+    //     resp: oneshot::Sender<Result<Vec<CompactNodeInfo>, DhtError>>,
+    // },
     GetPeers {
         info_hash: InfoHash,
         peer_tx: mpsc::Sender<Vec<SocketAddr>>,
@@ -677,11 +677,11 @@ impl DhtActor {
                 // Handle commands from the public API
                 Some(cmd) = self.command_rx.recv() => {
                     match cmd {
-                        DhtCommand::FindNode { target, resp } => {
-                            // Perform iterative find_node lookup
-                            let result = self.iterative_find_node(target).await;
-                            let _ = resp.send(result);
-                        }
+                        // DhtCommand::FindNode { target, resp } => {
+                        //     // Perform iterative find_node lookup
+                        //     let result = self.iterative_find_node(target).await;
+                        //     let _ = resp.send(result);
+                        // }
                         DhtCommand::GetPeers { info_hash, peer_tx } => {
                             self.start_get_peers(info_hash, peer_tx).await;
                         }
