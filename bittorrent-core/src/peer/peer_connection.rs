@@ -262,7 +262,10 @@ impl PeerConnection {
     }
 
     // ── Event loop ────────────────────────────────────────────────────────────
-    pub async fn run(mut self, peer_token: CancellationToken) -> Result<Option<Bitfield>, ConnectionError> {
+    pub async fn run(
+        mut self,
+        peer_token: CancellationToken,
+    ) -> Result<Option<Bitfield>, ConnectionError> {
         self.have_valid_metadata().await;
 
         if self.supports_extended {

@@ -7,7 +7,6 @@
 //! - Announce peer participation (announce_peer)
 //! - Server mode (responding to incoming queries)
 
-use futures::stream::FuturesOrdered;
 use rand::RngExt;
 use std::{
     collections::{HashMap, HashSet},
@@ -505,116 +504,72 @@ impl DhtActor {
         }
 
         if bootstrap_nodes.is_empty() && self.routing_table.node_count() == 0 {
+            tracing::error!("No bootstrap nodes available and routing table is empty");
             return Err(DhtError::BootstrapFailed);
         }
 
-        use futures::stream::StreamExt;
-
-        // Per-ping oneshot channels keyed by tx_id bytes.
-        // Bootstrap pings are NOT registered in TransactionManager — we own their lifecycle here.
-        let mut pong_senders: HashMap<[u8; 2], oneshot::Sender<(NodeId, SocketAddr)>> =
-            HashMap::new();
-        let mut pong_futures = FuturesOrdered::new();
-
-        for addr in bootstrap_nodes {
-            let tx_id = self.transaction_manager.gen_id();
-            let (pong_tx, pong_rx) = oneshot::channel::<(NodeId, SocketAddr)>();
-
-            let msg = KrpcMessage::ping_query(u16::from_be_bytes(tx_id.0), self.node_id);
-            let bytes = msg.to_bytes();
-            if self.socket.try_send_to(&bytes, *addr).is_ok() {
-                inc_msg_out();
-                inc_bytes_out(bytes.len());
-                pong_senders.insert(tx_id.0, pong_tx);
-                pong_futures.push_back(async move {
-                    tokio::time::timeout(QUERY_TIMEOUT * 3, pong_rx)
-                        .await
-                        .ok() // timeout -> None
-                        .and_then(|r| r.ok()) // channel closed -> None
-                });
-            }
-        }
-
-        tracing::info!(
-            "Sent {} bootstrap pings, waiting for pongs...",
-            pong_senders.len()
+        tracing::debug!(
+            "Bootstrap target: {} nodes, timeout: {:?}",
+            Self::BOOTSTRAP_TARGET,
+            Self::BOOTSTRAP_TIMEOUT
         );
 
+        // Send find_node to all bootstrap nodes
+        for &addr in bootstrap_nodes {
+            tracing::debug!(
+                "Sending find_node({}) to bootstrap node {}",
+                self.node_id,
+                addr
+            );
+            let _ = self.send_find_node(addr, self.node_id);
+        }
+
         let mut buf = [0u8; 4096];
-        let deadline = tokio::time::Instant::now() + Self::BOOTSTRAP_TIMEOUT;
+        let deadline = Instant::now() + Self::BOOTSTRAP_TIMEOUT;
+        let mut last_progress_log = Instant::now();
 
-        // Consume the first tick so the interval doesn't fire immediately.
-        let mut find_node_interval = tokio::time::interval(Duration::from_secs(2));
-        find_node_interval.tick().await;
+        tracing::debug!("Entering bootstrap receive loop");
 
-        loop {
-            if self.routing_table.node_count() >= Self::BOOTSTRAP_TARGET {
-                break;
-            }
-
+        while self.routing_table.node_count() < Self::BOOTSTRAP_TARGET {
             tokio::select! {
-                // A per-node pong future resolved (response received or individual timeout).
-                Some(result) = pong_futures.next() => {
-                    if let Some((node_id, addr)) = result {
-                        tracing::debug!("Bootstrap pong from {}: node {:?}", addr, node_id);
-                        self.routing_table.try_add_node(Node::new_good(node_id, addr));
-                        // Immediately expand from this node toward our own ID.
-                        let _ = self.send_find_node(addr, self.node_id);
-                    }
-                    // None means individual timeout — just continue waiting.
-                }
+                result = self.socket.recv_from(&mut buf) => {
+                    match result {
+                        Ok((size, from)) => {
+                            inc_msg_in();
+                            inc_bytes_in(size);
+                            let before_count = self.routing_table.node_count();
+                            self.handle_incoming(&buf[..size], from).await;
+                            let after_count = self.routing_table.node_count();
 
-                // Receive a UDP packet.
-                Ok((size, from)) = self.socket.recv_from(&mut buf) => {
-                    inc_msg_in();
-                    inc_bytes_in(size);
+                            // Log progress when nodes are added
+                            if after_count > before_count {
+                                tracing::debug!(
+                                    "Bootstrap progress: {} -> {} nodes (+{})",
+                                    before_count,
+                                    after_count,
+                                    after_count - before_count
+                                );
+                            }
 
-                    match KrpcMessage::from_bytes(&buf[..size]) {
-                        Ok(msg) => {
-                            // Is this a pong for one of our bootstrap pings?
-                            let is_bootstrap_pong = matches!(&msg.body, MessageBody::Response(_))
-                                && pong_senders.contains_key(&msg.transaction_id.0);
-
-                            if is_bootstrap_pong {
-                                // Extract node_id and deliver via oneshot.
-                                // The FuturesUnordered branch will update the routing table.
-                                if let Some(node_id) = msg.get_node_id() &&
-                                     let Some(sender) = pong_senders.remove(&msg.transaction_id.0) {
-                                        let _ = sender.send((node_id, from));
-                                }
-                            } else {
-                                // find_node responses, queries from the network, etc.
-                                self.handle_incoming(&buf[..size], from).await;
+                            // Periodic progress logging (every 2 seconds)
+                            if last_progress_log.elapsed().as_secs() >= 2 {
+                                tracing::info!(
+                                    "Bootstrap status: {}/{} nodes, {:.0}s remaining",
+                                    after_count,
+                                    Self::BOOTSTRAP_TARGET,
+                                    (deadline - Instant::now()).as_secs_f32()
+                                );
+                                last_progress_log = Instant::now();
                             }
                         }
                         Err(e) => {
-                            tracing::debug!("Failed to parse message from {from}: {e}");
-                            inc_msg_dropped();
+                            tracing::warn!("UDP recv error: {e}");
                         }
                     }
-                }
-
-                // Periodically fan find_node to the currently-closest known nodes.
-                _ = find_node_interval.tick() => {
-                    if self.routing_table.node_count() > 0 {
-                        let target = self.node_id;
-                        let addrs: Vec<SocketAddr> = self
-                            .routing_table
-                            .get_closest_nodes(&target, K)
-                            .iter()
-                            .take(3)
-                            .map(|n| n.addr)
-                            .collect();
-                        for addr in addrs {
-                            let _ = self.send_find_node(addr, target);
-                        }
-                    }
-                }
-
-                // Global bootstrap wall-clock timeout.
-                _ = tokio::time::sleep_until(deadline)=> {
+                },
+                _ = tokio::time::sleep_until(deadline) => {
                     tracing::warn!(
-                        "Bootstrap timed out after {:?}, {} nodes found",
+                        "Bootstrap timed out after {:?}, routing table has {} nodes",
                         Self::BOOTSTRAP_TIMEOUT,
                         self.routing_table.node_count()
                     );
@@ -623,14 +578,24 @@ impl DhtActor {
             }
         }
 
-        let node_count = self.routing_table.node_count();
-        if node_count == 0 {
-            tracing::warn!("Bootstrap failed: no nodes responded");
-            Err(DhtError::BootstrapFailed)
+        let final_count = self.routing_table.node_count();
+        if final_count >= Self::BOOTSTRAP_TARGET {
+            tracing::info!(
+                "Bootstrap target reached: {} nodes in routing table",
+                final_count
+            );
+        } else if final_count == 0 {
+            tracing::error!("Bootstrap failed: no nodes responded");
+            return Err(DhtError::BootstrapFailed);
         } else {
-            tracing::info!("Bootstrap complete: {} nodes in routing table", node_count);
-            Ok(())
+            tracing::warn!(
+                "Bootstrap finished with {} nodes (target: {})",
+                final_count,
+                Self::BOOTSTRAP_TARGET
+            );
         }
+
+        Ok(())
     }
 
     async fn run(
@@ -1127,13 +1092,26 @@ impl DhtActor {
                         QueryType::Ping => {
                             // Extract node ID from response
                             if let Some(node_id) = msg.get_node_id() {
+                                tracing::trace!("Ping response from {}: node {:?}", from, node_id);
                                 // Update routing table
                                 let node = Node::new_good(node_id, from);
                                 self.routing_table.try_add_node(node);
+
+                                // Idk if this is questionable but  on ping response we:
+                                //  Learn the node's ID
+                                //  if we do self_find_node it gets us  K closest nodes to us (cascade discovery)
+                                let _ = self.send_find_node(from, self.node_id);
                             }
                         }
                         QueryType::FindNode { target } => {
                             if let Response::FindNode { nodes, .. } = response {
+                                tracing::debug!(
+                                    "FindNode response from {}: {} nodes returned for target {:?}",
+                                    from,
+                                    nodes.len(),
+                                    target
+                                );
+                                let before_count = self.routing_table.node_count();
                                 for node_info in nodes {
                                     // Add to routing table
                                     let new_node = Node::new(node_info.node_id, node_info.addr);
@@ -1146,8 +1124,20 @@ impl DhtActor {
                                         .get_by_index("find_node", &node_info.addr)
                                         .is_none()
                                     {
+                                        tracing::trace!(
+                                            "Querying discovered node {} for target {:?}",
+                                            node_info.addr,
+                                            target
+                                        );
                                         let _ = self.send_find_node(node_info.addr, *target);
                                     }
+                                }
+                                let added = self.routing_table.node_count() - before_count;
+                                if added > 0 {
+                                    tracing::debug!(
+                                        "Added {} new nodes to routing table from FindNode response",
+                                        added
+                                    );
                                 }
                             }
                         }
@@ -1159,6 +1149,16 @@ impl DhtActor {
                                 ..
                             } = response
                             {
+                                let peer_count = values.as_ref().map(|v| v.len()).unwrap_or(0);
+                                let node_count = nodes.as_ref().map(|n| n.len()).unwrap_or(0);
+                                tracing::debug!(
+                                    "GetPeers response from {}: {} peers, {} closer nodes for {:?}",
+                                    from,
+                                    peer_count,
+                                    node_count,
+                                    info_hash
+                                );
+
                                 // Get the sender's node info from the transaction
                                 let sender_node_info = {
                                     // Try to get node ID from response or transaction
@@ -1179,6 +1179,11 @@ impl DhtActor {
                                             .collect();
 
                                         if !peer_vec.is_empty() {
+                                            tracing::debug!(
+                                                "Streaming {} peers to caller for {:?}",
+                                                peer_vec.len(),
+                                                info_hash
+                                            );
                                             let _ = state.peer_tx.send(peer_vec).await;
                                         }
                                     }
@@ -1208,6 +1213,11 @@ impl DhtActor {
                                             .get_by_index("get_peers", &node_info.addr)
                                             .is_none()
                                         {
+                                            tracing::trace!(
+                                                "Querying closer node {} for {:?}",
+                                                node_info.addr,
+                                                info_hash
+                                            );
                                             let _ = self.send_get_peers(node_info.addr, *info_hash);
                                         }
                                     }
@@ -1215,6 +1225,12 @@ impl DhtActor {
 
                                 // If we have an announce_port set, send announce_peer
                                 if let Some(port) = tx.announce_port {
+                                    tracing::debug!(
+                                        "Sending announce_peer to {} for {:?} on port {}",
+                                        from,
+                                        info_hash,
+                                        port
+                                    );
                                     let _ = self.send_announce_peer(
                                         from,
                                         *info_hash,
@@ -1244,12 +1260,29 @@ impl DhtActor {
     }
 
     async fn handle_query(&mut self, msg: &KrpcMessage, query: &Query, from: SocketAddr) {
+        // BEP 05: When we receive a query, update the node's status
+        // If the node has previously responded, receiving a query from it keeps it "good"
+        if let Some(id) = msg.get_node_id() {
+            // Try to add/update the node in routing table
+            let node = Node::new(id, from);
+            self.routing_table.try_add_node(node);
+            // Mark that we received a query from this node
+            self.routing_table.mark_node_query_from(&id);
+        }
+
         let response = match query {
             Query::Ping { .. } => {
+                tracing::trace!("Received ping query from {}", from);
                 KrpcMessage::ping_response(msg.transaction_id.clone(), self.node_id)
             }
             Query::FindNode { target, .. } => {
+                tracing::debug!(
+                    "Received find_node query from {} for target {:?}",
+                    from,
+                    target
+                );
                 let closest = self.routing_table.get_closest_nodes(target, K);
+                let count = closest.len();
                 let nodes: Vec<CompactNodeInfo> = closest
                     .into_iter()
                     .map(|n| CompactNodeInfo {
@@ -1257,9 +1290,15 @@ impl DhtActor {
                         addr: n.addr,
                     })
                     .collect();
+                tracing::debug!(
+                    "Responding with {} nodes for find_node from {}",
+                    count,
+                    from
+                );
                 KrpcMessage::find_node_response(msg.transaction_id.clone(), self.node_id, nodes)
             }
             Query::GetPeers { info_hash, .. } => {
+                tracing::debug!("Received get_peers query from {} for {:?}", from, info_hash);
                 self.handle_get_peers_query(msg.transaction_id.clone(), from, info_hash)
             }
             Query::AnnouncePeer {
@@ -1268,14 +1307,22 @@ impl DhtActor {
                 token,
                 implied_port,
                 ..
-            } => self.handle_announce_peer_query(
-                msg.transaction_id.clone(),
-                from,
-                *info_hash,
-                *port,
-                token,
-                *implied_port,
-            ),
+            } => {
+                tracing::debug!(
+                    "Received announce_peer query from {} for {:?} port {}",
+                    from,
+                    info_hash,
+                    port
+                );
+                self.handle_announce_peer_query(
+                    msg.transaction_id.clone(),
+                    from,
+                    *info_hash,
+                    *port,
+                    token,
+                    *implied_port,
+                )
+            }
         };
 
         let bytes = response.to_bytes();
@@ -1477,8 +1524,6 @@ impl DhtActor {
     /// the node on the received port and IP address. If a response is received,
     /// the node should be inserted into the routing table according to the usual rules.
     async fn try_add_node(&mut self, addr: SocketAddr) -> Result<(), DhtError> {
-        tracing::debug!("Attempting to add node {} to routing table", addr);
-
         self.send_ping(addr)
     }
 
