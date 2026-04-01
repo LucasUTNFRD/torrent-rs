@@ -135,7 +135,7 @@ Avoid over-documenting:
 - Trivial getters/setters or obvious wrapper code
 - Code that's primarily syntactic sugar over well-known patterns
 
-## Claude Code sandbox insights
+## Claude Code sandbox workarounds
 
 ### Pipe workaround (trailing `;`)
 
@@ -181,27 +181,18 @@ until some_command; do sleep 1; done
 
 [cc-24136]: https://github.com/anthropics/claude-code/issues/24136
 
-### Unsandboxable commands
+### `gh` (GitHub CLI) workaround
 
-The following commands can never be run successfully inside the sandbox,
-and thus must always be run with `dangerouslyDisableSandbox: true`.
-Because they cannot be run inside the sandbox, avoid running them in
-bash invocations with other commands (e.g., using `|`, `&&` or `||`).
-Instead, capture their output to a file, and then operate on that file
-in subsequent commands, which can then be sandboxed.
-
-Known unsandboxable commands are:
-
-- `gh`
-- `perf record` (but _not_ `perf script`)
+The `gh` CLI needs auth tokens under `~/.config/gh/` which the
+sandbox blocks. Use `dangerouslyDisableSandbox: true` for `gh`
+invocations.
 
 ### Sandbox discipline
 
 Never use `dangerouslyDisableSandbox` preemptively. Always attempt
 commands in the default sandbox first. Only bypass the sandbox after
 observing an actual permission error, and document which error
-triggered the bypass. The standing exceptions are the commands known to
-be unsandboxable.
+triggered the bypass. The one standing exception is `gh` (see above).
 
 ### Prefer temp files over pipes for sub-agent CLI testing
 

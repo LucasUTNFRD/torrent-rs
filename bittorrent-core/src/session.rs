@@ -565,17 +565,13 @@ impl SessionManager {
             })
             .ok()?;
 
-        tracing::info!("DHT node created, bootstrapping...");
+        // tracing::info!("DHT node created, bootstrapping...");
+        //
+        // if let Err(e) = dht.bootstrap().await {
+        //     tracing::warn!("DHT bootstrap failed: {e}, continuing without DHT");
+        //     return None;
+        // }
 
-        if let Err(e) = dht.bootstrap().await {
-            tracing::warn!("DHT bootstrap failed: {e}, continuing without DHT");
-            return None;
-        }
-
-        tracing::info!(
-            "DHT bootstrapped successfully with node ID: {:?}",
-            dht.node_id()
-        );
         Some(Arc::new(dht))
     }
 
