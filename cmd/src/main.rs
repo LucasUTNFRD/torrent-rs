@@ -125,7 +125,9 @@ async fn download_torrent(input: String) -> Result<(), Box<dyn std::error::Error
                 }
             }
 
-            _ = ticker.tick() => {}
+            _ = ticker.tick() => {
+                progress_bar.tick();
+            }
         }
     }
 

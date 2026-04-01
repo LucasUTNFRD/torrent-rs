@@ -245,7 +245,7 @@ impl SessionTickers {
     fn new() -> Self {
         Self {
             choker: tokio::time::interval(Duration::from_secs(30)),
-            metrics: tokio::time::interval(Duration::from_millis(500)),
+            metrics: tokio::time::interval(Duration::from_millis(100)),
             ema: tokio::time::interval(Duration::from_secs(1)),
             retry: tokio::time::interval(Duration::from_secs(30)),
         }
