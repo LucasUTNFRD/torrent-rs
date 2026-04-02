@@ -550,7 +550,7 @@ impl SessionManager {
         let dht_config = DhtConfig {
             id_file_path: Some(config_dir.join("node.id")),
             state_file_path: Some(config_dir.join("dht_state.dat")),
-            port: self.config.listen_addr.port(),
+            port: self.config.listen_interface.port,
         };
 
         let dht = DhtHandler::with_config(dht_config)
@@ -620,7 +620,7 @@ impl SessionManager {
             storage: self.storage.as_ref().unwrap().clone(),
             torrents_dir: self.config.torrents_dir.clone(),
             event_bus: self.event_bus.clone(),
-            unchoke_slots: self.config.unchoke_slots_limit as usize,
+            unchoke_slots: self.config.unchoke_slots.get() as usize,
         };
 
         let (torrent, tx, progress_rx) = Torrent::new(
@@ -687,7 +687,7 @@ impl SessionManager {
             storage: self.storage.as_ref().unwrap().clone(),
             torrents_dir: self.config.torrents_dir.clone(),
             event_bus: self.event_bus.clone(),
-            unchoke_slots: self.config.unchoke_slots_limit as usize,
+            unchoke_slots: self.config.unchoke_slots.get() as usize,
         };
 
         let (torrent, tx, progress_rx) =
@@ -760,7 +760,7 @@ impl SessionManager {
             storage: self.storage.as_ref().unwrap().clone(),
             torrents_dir: self.config.torrents_dir.clone(),
             event_bus: self.event_bus.clone(),
-            unchoke_slots: self.config.unchoke_slots_limit as usize,
+            unchoke_slots: self.config.unchoke_slots.get() as usize,
         };
 
         let (torrent, tx, progress_rx) = Torrent::new(ctx, TorrentSource::Magnet(magnet));
@@ -866,7 +866,7 @@ impl SessionManager {
 
     fn spawn_tcp_listener(&self) -> JoinHandle<()> {
         let sessions = self.sessions.clone();
-        let listen_addr = self.config.listen_addr;
+        let listen_addr = self.config.listen_addr();
         let peer_id = self.peer_id;
         let cancel_token = self.torrent_root_token.clone();
 
