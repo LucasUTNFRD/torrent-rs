@@ -7,7 +7,6 @@ use std::{
 
 use crate::{
     detail::Direction,
-    metrics::counters::inc_connected,
     peer::error::{ConnectionError, HandshakeError, ProtocolViolation},
     protocol::{
         extension::{
@@ -29,18 +28,16 @@ use futures::{
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     sync::{mpsc, oneshot},
-    task::JoinHandle,
     time::{Instant, interval, timeout},
 };
 use tokio_util::{codec::Framed, sync::CancellationToken};
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::{
     bitfield::{Bitfield, BitfieldError},
     metrics::counters,
-    net::{ConnectTimeout, TcpStream},
+    net::TcpStream,
     peer::{PeerMessage, metrics::PeerMetrics},
-    session::CLIENT_ID,
     torrent::{Pid, TorrentMessage},
 };
 
@@ -957,66 +954,9 @@ impl PeerConnection {
 // trip. The tx channel is for sending commands into the peer task.
 #[derive(Debug)]
 pub struct PeerHandle {
+    #[allow(dead_code)]
     pub pid: Pid,
     pub peer_addr: SocketAddr,
     pub info: Arc<RwLock<PeerInfo>>,
     pub tx: mpsc::Sender<PeerMessage>,
-}
-
-/// Spawn an inbound connection. The caller has already performed the TCP handshake
-/// (done in the listener/session layer). We take the raw stream and skip directly
-/// to the BitTorrent handshake.
-pub fn spawn_inbound(
-    pid: Pid,
-    addr: SocketAddr,
-    stream: TcpStream,
-    torrent_tx: mpsc::Sender<TorrentMessage>,
-    remote_peer_id: PeerID,
-    supports_ext: bool,
-    dht_enabled: bool,
-    peer_token: CancellationToken,
-) -> (JoinHandle<()>, PeerHandle) {
-    let (tx, rx) = mpsc::channel(512);
-    let info = Arc::new(RwLock::new(PeerInfo::new(*CLIENT_ID, Direction::Inbound)));
-    let info_clone = info.clone();
-
-    let _tx_err = torrent_tx.clone();
-    let handle = tokio::spawn(async move {
-        let result: Result<Option<Bitfield>, ConnectionError> = async {
-            inc_connected();
-            {
-                let mut info_guard = info_clone.write().unwrap();
-                info_guard.peer_id = remote_peer_id;
-                info_guard.supports_extended = supports_ext;
-                info_guard.dht_enabled = dht_enabled;
-            }
-
-            PeerConnection::new(
-                pid,
-                stream,
-                addr,
-                Arc::clone(&info_clone),
-                torrent_tx,
-                rx,
-                supports_ext,
-                dht_enabled,
-            )
-            .run(peer_token)
-            .await
-        }
-        .await;
-
-        // TODO: Integrate with Torrent's JoinSet pattern for proper error/bitfield handling
-        let _ = result;
-    });
-
-    (
-        handle,
-        PeerHandle {
-            pid,
-            peer_addr: addr,
-            info: Arc::clone(&info),
-            tx,
-        },
-    )
 }

@@ -427,12 +427,7 @@ impl SessionManager {
 
     /// Main entry point - runs the session manager loop.
     pub async fn start(mut self) {
-        // TrackerHandler eagerly binds a UDP socket, which turmoil doesn't support.
-        // In sim mode, create a no-op handler (announce calls will return channel errors).
-        #[cfg(not(feature = "sim"))]
         let tracker = Arc::new(TrackerHandler::new(*CLIENT_ID));
-        #[cfg(feature = "sim")]
-        let tracker = Arc::new(TrackerHandler::new_noop());
 
         let dht = self.initialize_dht().await;
 
