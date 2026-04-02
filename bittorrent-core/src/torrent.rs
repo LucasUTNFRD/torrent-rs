@@ -46,9 +46,7 @@ use tracing::{debug, info, instrument, warn};
 use tracker_client::{ClientState, Events, TrackerError, TrackerHandler};
 use url::Url;
 
-// TODO: Use a criteria for this, this is so harcoded lol
 const CHANNEL_SIZE: usize = 1024;
-const MAX_CONCURRENT_PEERS: usize = 50;
 
 /// Session-level context shared across all torrents.
 /// Contains resources and configuration that are identical for every torrent in a session.
@@ -60,6 +58,7 @@ pub struct TorrentContext {
     pub torrents_dir: PathBuf,
     pub event_bus: EventBus,
     pub unchoke_slots: usize,
+    pub max_concurrent_peers: usize,
 }
 
 /// Source material for creating a torrent.
@@ -355,6 +354,8 @@ pub struct Torrent {
     /// Background tasks (tracker announce, DHT discovery)
     // TODO: Rename this to peer_discovery_task
     background_tasks: JoinSet<()>,
+    /// Maximum concurrent peer connections.
+    max_concurrent_peers: usize,
 }
 
 const ALPHA: f64 = 0.5;
@@ -555,6 +556,7 @@ impl Torrent {
                 known_peers: HashMap::new(),
                 pending_peers: VecDeque::new(),
                 background_tasks: JoinSet::new(),
+                max_concurrent_peers: ctx.max_concurrent_peers,
             },
             tx,
             progress_rx,
@@ -622,7 +624,7 @@ impl Torrent {
 
     fn try_spawn_pending_peers(&mut self) {
         let now = Instant::now();
-        while self.peer_tasks.len() <= MAX_CONCURRENT_PEERS {
+        while self.peer_tasks.len() < self.max_concurrent_peers {
             let Some(peer_addr) = self.pending_peers.pop_front() else {
                 break;
             };
@@ -1847,7 +1849,7 @@ impl Torrent {
 
                 const MAX_RESPONSES: usize = 50;
 
-                let _ = dht.announce_peer(info_hash, port).await;
+                let _ = dht.announce(info_hash, port).await;
 
                 loop {
                     tokio::select! {

@@ -26,6 +26,7 @@ use tokio::{
 };
 
 use crate::{
+    dht_config::{BootstrapNode, DhtConfig},
     error::DhtError,
     message::{CompactNodeInfo, KrpcMessage, MessageBody, Query, Response, TransactionId},
     metrics::{
@@ -40,65 +41,8 @@ use crate::{
     transaction::{QueryType, Transaction, TransactionManager},
 };
 
-/// Default bootstrap nodes for the BitTorrent DHT.
-pub const DEFAULT_BOOTSTRAP_NODES: [&str; 4] = [
-    "router.bittorrent.com:6881",
-    "dht.transmissionbt.com:6881",
-    "dht.libtorrent.org:25401",
-    "router.utorrent.com:6881",
-];
-
-/// Default port for DHT.
-const DEFAULT_PORT: u16 = 6881;
-
 /// Timeout for individual queries.
 const QUERY_TIMEOUT: Duration = Duration::from_secs(2);
-
-// ============================================================================
-// Configuration
-// ============================================================================
-
-/// Configuration for DHT node ID persistence
-#[derive(Debug, Clone)]
-pub struct DhtConfig {
-    /// Path to store the node ID file. If None, generates random ID on each start
-    pub id_file_path: Option<PathBuf>,
-    /// Path to store the DHT state (routing table nodes). If None, no state persistence
-    pub state_file_path: Option<PathBuf>,
-    /// Network port to bind to
-    pub port: u16,
-}
-
-impl Default for DhtConfig {
-    fn default() -> Self {
-        Self {
-            id_file_path: None,
-            state_file_path: None,
-            port: DEFAULT_PORT,
-        }
-    }
-}
-
-impl DhtConfig {
-    /// Create a config with default persistence in the user's config directory
-    ///
-    /// On Linux: ~/.config/mainline-dht/
-    ///
-    pub fn with_default_persistence(port: u16) -> Result<Self, DhtError> {
-        let project_dirs = directories::ProjectDirs::from("com", "mainline", "mainline-dht")
-            .ok_or_else(|| DhtError::Other("Could not determine config directory".to_string()))?;
-
-        let config_dir = project_dirs.config_dir();
-        let id_path = config_dir.join("node.id");
-        let state_path = config_dir.join("dht_state.dat");
-
-        Ok(Self {
-            id_file_path: Some(id_path),
-            state_file_path: Some(state_path),
-            port,
-        })
-    }
-}
 
 // ============================================================================
 // Result Types
@@ -137,20 +81,6 @@ pub struct DhtHandler {
 }
 
 impl DhtHandler {
-    /// Create a new DHT node bound to the specified port.
-    ///
-    /// If no port is specified, binds to port 6881 (default DHT port).
-    /// The node is not bootstrapped yet - call `bootstrap()` to join the network.
-    ///
-    /// Uses default configuration (random ID on each start, no persistence).
-    pub async fn new(port: Option<u16>) -> Result<Self, DhtError> {
-        let config = DhtConfig {
-            port: port.unwrap_or(DEFAULT_PORT),
-            ..Default::default()
-        };
-        Self::with_config(config).await
-    }
-
     /// Create a new DHT node with full configuration
     pub async fn with_config(config: DhtConfig) -> Result<Self, DhtError> {
         let bind_addr = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), config.port);
@@ -185,6 +115,7 @@ impl DhtHandler {
             command_rx,
             config.id_file_path.clone(),
             config.state_file_path.clone(),
+            config.bootstrap_nodes,
         );
 
         let node_id_clone = node_id.clone();
@@ -255,42 +186,6 @@ impl DhtHandler {
         peer_rx
     }
 
-    /// Announce that we are participating in a torrent.
-    ///
-    /// Finds the closest nodes to the infohash in our routing table,
-    /// sends get_peers to obtain tokens, then announces to those nodes.
-    ///
-    /// Note: This does NOT return peers. Call `get_peers` separately to
-    /// discover peers you can connect to.
-    pub async fn announce_peer(&self, info_hash: InfoHash, port: u16) -> Result<usize, DhtError> {
-        self.announce_peer_ext(info_hash, port, false).await
-    }
-
-    /// Announce with implied_port option for NAT traversal.
-    ///
-    /// If `implied_port` is true, receiving nodes will use our DHT UDP port
-    /// as the peer port (useful when behind NAT).
-    pub async fn announce_peer_ext(
-        &self,
-        info_hash: InfoHash,
-        port: u16,
-        implied_port: bool,
-    ) -> Result<usize, DhtError> {
-        let (resp_tx, resp_rx) = oneshot::channel();
-
-        self.command_tx
-            .send(DhtCommand::Announce {
-                info_hash,
-                port,
-                implied_port,
-                resp: resp_tx,
-            })
-            .await
-            .map_err(|_| DhtError::ChannelClosed)?;
-
-        resp_rx.await.map_err(|_| DhtError::ChannelClosed)?
-    }
-
     /// Get our current node ID.
     pub fn node_id(&self) -> NodeId {
         *self.node_id.read().unwrap()
@@ -335,28 +230,86 @@ impl DhtHandler {
         resp_rx.await.map_err(|_| DhtError::ChannelClosed)?
     }
 
-    /// Announce that we're downloading a torrent.
+    // ========================================================================
+    // Announce API
+    // ========================================================================
+
+    /// Announce that we are participating in a torrent.
     ///
     /// Finds the closest nodes to the infohash in our routing table,
-    /// obtains tokens via get_peers, and announces to those nodes.
+    /// sends get_peers to obtain tokens, then announces to those nodes.
     ///
-    /// Returns the number of nodes we're attempting to announce to.
-    /// Call `get_peers` separately to discover peers you can connect to.
+    /// Note: This does NOT return peers. Call `get_peers` separately to
+    /// discover peers you can connect to.
     pub async fn announce(&self, info_hash: InfoHash, port: u16) -> Result<usize, DhtError> {
-        self.announce_peer_ext(info_hash, port, false).await
+        self.announce_inner(info_hash, port, false).await
+    }
+
+    /// Announce with implied_port for NAT traversal.
+    ///
+    /// The receiving DHT nodes will use our source UDP port as the peer port
+    /// instead of the provided port value. Useful when behind NAT.
+    pub async fn announce_implied(
+        &self,
+        info_hash: InfoHash,
+        port: u16,
+        implied_port: bool,
+    ) -> Result<usize, DhtError> {
+        self.announce_inner(info_hash, port, implied_port).await
+    }
+
+    /// Internal implementation for announce methods.
+    async fn announce_inner(
+        &self,
+        info_hash: InfoHash,
+        port: u16,
+        implied_port: bool,
+    ) -> Result<usize, DhtError> {
+        let (resp_tx, resp_rx) = oneshot::channel();
+
+        self.command_tx
+            .send(DhtCommand::Announce {
+                info_hash,
+                port,
+                implied_port,
+                resp: resp_tx,
+            })
+            .await
+            .map_err(|_| DhtError::ChannelClosed)?;
+
+        resp_rx.await.map_err(|_| DhtError::ChannelClosed)?
+    }
+
+    // ========================================================================
+    // Deprecated announce methods (kept for backward compatibility)
+    // ========================================================================
+
+    /// Announce that we are participating in a torrent.
+    #[deprecated(since = "0.2.0", note = "Use `announce` instead")]
+    pub async fn announce_peer(&self, info_hash: InfoHash, port: u16) -> Result<usize, DhtError> {
+        self.announce_inner(info_hash, port, false).await
     }
 
     /// Announce with implied_port option for NAT traversal.
-    ///
-    /// If `implied_port` is true, receiving nodes will use our DHT UDP port
-    /// as the peer port (useful when behind NAT).
+    #[deprecated(since = "0.2.0", note = "Use `announce_implied` instead")]
+    pub async fn announce_peer_ext(
+        &self,
+        info_hash: InfoHash,
+        port: u16,
+        implied_port: bool,
+    ) -> Result<usize, DhtError> {
+        self.announce_inner(info_hash, port, implied_port).await
+    }
+
+    /// Announce with implied_port option for NAT traversal.
+    #[deprecated(since = "0.2.0", note = "Use `announce_implied` instead")]
     pub async fn announce_ext(
         &self,
         info_hash: InfoHash,
         port: u16,
         implied_port: bool,
     ) -> Result<usize, DhtError> {
-        self.announce_peer_ext(info_hash, port, implied_port).await
+        self.announce_inner(info_hash, port, implied_port).await
     }
 }
 
@@ -412,6 +365,8 @@ struct DhtActor {
     transaction_manager: TransactionManager,
     /// Active get_peers lookups and their collected results
     pending_get_peers: HashMap<InfoHash, GetPeersLookupState>,
+    /// Bootstrap nodes for DHT network entry.
+    bootstrap_nodes: Vec<BootstrapNode>,
 }
 
 /// State for an active get_peers lookup
@@ -438,6 +393,7 @@ impl DhtActor {
         command_rx: mpsc::Receiver<DhtCommand>,
         id_file_path: Option<PathBuf>,
         state_file_path: Option<PathBuf>,
+        bootstrap_nodes: Vec<BootstrapNode>,
     ) -> Self {
         Self {
             socket,
@@ -450,6 +406,7 @@ impl DhtActor {
             state_file_path,
             transaction_manager: TransactionManager::new(),
             pending_get_peers: std::collections::HashMap::new(),
+            bootstrap_nodes,
         }
     }
 
@@ -460,12 +417,13 @@ impl DhtActor {
     /// This is done upfront because DNS resolution can block.
     fn resolve_bootstrap_nodes(&self) -> Result<Vec<SocketAddr>, DhtError> {
         let mut addrs: Vec<SocketAddr> = Vec::new();
-        for node in DEFAULT_BOOTSTRAP_NODES.iter() {
-            match node.to_socket_addrs() {
+        for node in &self.bootstrap_nodes {
+            let host_port = format!("{}:{}", node.host, node.port);
+            match host_port.to_socket_addrs() {
                 Ok(resolved) => {
                     addrs.extend(resolved.filter(|a| a.is_ipv4()));
                 }
-                Err(e) => tracing::warn!("Failed to resolve {}: {}", node, e),
+                Err(e) => tracing::warn!("Failed to resolve {}: {}", host_port, e),
             }
         }
 
@@ -863,12 +821,20 @@ impl DhtActor {
         if closest_nodes.is_empty() {
             tracing::info!("Routing table empty, querying bootstrap nodes for get_peers");
 
-            for node_addr in DEFAULT_BOOTSTRAP_NODES.iter() {
-                if let Ok(addrs) = node_addr.to_socket_addrs() {
-                    for addr in addrs.filter(|a| a.is_ipv4()) {
-                        let _ = self.send_get_peers(addr, info_hash);
+            let bootstrap_nodes: Vec<_> = self
+                .bootstrap_nodes
+                .iter()
+                .flat_map(|node| {
+                    let host_port = format!("{}:{}", node.host, node.port);
+                    match host_port.to_socket_addrs() {
+                        Ok(addrs) => addrs.filter(|a| a.is_ipv4()).collect::<Vec<_>>(),
+                        Err(_) => Vec::new(),
                     }
-                }
+                })
+                .collect();
+
+            for addr in bootstrap_nodes {
+                let _ = self.send_get_peers(addr, info_hash);
             }
         } else {
             for node_info in closest_nodes.iter().take(3) {

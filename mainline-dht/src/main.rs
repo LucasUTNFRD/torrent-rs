@@ -40,11 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create DHT with NO persistence - starts with empty routing table
     println!("Creating DHT node (empty routing table)...");
-    let config = DhtConfig {
-        id_file_path: None,    // No persisted node ID
-        state_file_path: None, // No persisted routing table
-        port: cli.port,
-    };
+    let config = DhtConfig::builder().port(cli.port).build();
 
     let start = Instant::now();
     let dht = Dht::with_config(config).await?;

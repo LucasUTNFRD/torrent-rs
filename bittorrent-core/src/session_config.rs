@@ -7,6 +7,7 @@ use std::{
 
 use bittorrent_common::types::PeerID;
 use directories::ProjectDirs;
+use mainline_dht::{BootstrapNode, default_dht_bootstrap_nodes};
 
 // ---------------------------------------------------------------------------
 // Sub-types
@@ -42,32 +43,6 @@ impl Default for ListenInterface {
     }
 }
 
-/// A DHT bootstrap node (host + port, unresolved).
-/// Kept as strings because DNS resolution happens at connection time.
-#[derive(Debug, Clone)]
-pub struct BootstrapNode {
-    pub host: String,
-    pub port: u16,
-}
-
-impl BootstrapNode {
-    pub fn new(host: impl Into<String>, port: u16) -> Self {
-        Self {
-            host: host.into(),
-            port,
-        }
-    }
-}
-
-/// Well-known public bootstrap nodes shipped as a convenience default.
-pub fn default_bootstrap_nodes() -> Vec<BootstrapNode> {
-    vec![
-        BootstrapNode::new("router.bittorrent.com", 6881),
-        BootstrapNode::new("router.utorrent.com", 6881),
-        BootstrapNode::new("dht.transmissionbt.com", 6881),
-    ]
-}
-
 // ---------------------------------------------------------------------------
 // Config (the validated, owned value — not the builder)
 // ---------------------------------------------------------------------------
@@ -85,7 +60,8 @@ pub struct SessionConfig {
 
     // -- DHT --
     pub enable_dht: bool,
-    pub dht_bootstrap_nodes: Vec<BootstrapNode>,
+    /// DHT bootstrap nodes. None means "use DHT crate's defaults".
+    pub dht_bootstrap_nodes: Option<Vec<BootstrapNode>>,
 
     // -- NAT traversal --
     pub enable_upnp: bool,
@@ -196,7 +172,7 @@ impl SessionConfigBuilder {
     /// (or to the defaults if none has been set yet).
     pub fn dht_bootstrap_node(mut self, host: impl Into<String>, port: u16) -> Self {
         self.dht_bootstrap_nodes
-            .get_or_insert_with(default_bootstrap_nodes)
+            .get_or_insert_with(default_dht_bootstrap_nodes)
             .push(BootstrapNode::new(host, port));
         self
     }
@@ -245,9 +221,7 @@ impl SessionConfigBuilder {
             config_dir,
             torrents_dir,
             enable_dht: self.enable_dht,
-            dht_bootstrap_nodes: self
-                .dht_bootstrap_nodes
-                .unwrap_or_else(default_bootstrap_nodes),
+            dht_bootstrap_nodes: self.dht_bootstrap_nodes,
             enable_upnp: self.enable_upnp,
             enable_natpmp: self.enable_natpmp,
             max_connections_per_torrent: self.max_connections_per_torrent,

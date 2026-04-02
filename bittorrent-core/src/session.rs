@@ -24,7 +24,7 @@ use tokio::{
     task::{self, JoinHandle},
 };
 
-use mainline_dht::{DhtConfig, DhtHandler};
+use mainline_dht::DhtHandler;
 use tokio_util::sync::CancellationToken;
 use tracker_client::TrackerHandler;
 
@@ -547,11 +547,16 @@ impl SessionManager {
         }
 
         let config_dir = &self.config.config_dir;
-        let dht_config = DhtConfig {
-            id_file_path: Some(config_dir.join("node.id")),
-            state_file_path: Some(config_dir.join("dht_state.dat")),
-            port: self.config.listen_interface.port,
-        };
+        let mut dht_builder = mainline_dht::DhtConfig::builder()
+            .port(self.config.listen_interface.port)
+            .id_file_path(config_dir.join("node.id"))
+            .state_file_path(config_dir.join("dht_state.dat"));
+
+        if let Some(nodes) = self.config.dht_bootstrap_nodes.clone() {
+            dht_builder = dht_builder.bootstrap_nodes(nodes);
+        }
+
+        let dht_config = dht_builder.build();
 
         let dht = DhtHandler::with_config(dht_config)
             .await
@@ -559,13 +564,6 @@ impl SessionManager {
                 tracing::warn!("Failed to create DHT node: {e}, continuing without DHT");
             })
             .ok()?;
-
-        // tracing::info!("DHT node created, bootstrapping...");
-        //
-        // if let Err(e) = dht.bootstrap().await {
-        //     tracing::warn!("DHT bootstrap failed: {e}, continuing without DHT");
-        //     return None;
-        // }
 
         Some(Arc::new(dht))
     }
@@ -621,6 +619,7 @@ impl SessionManager {
             torrents_dir: self.config.torrents_dir.clone(),
             event_bus: self.event_bus.clone(),
             unchoke_slots: self.config.unchoke_slots.get() as usize,
+            max_concurrent_peers: self.config.max_connections_per_torrent.get() as usize,
         };
 
         let (torrent, tx, progress_rx) = Torrent::new(
@@ -688,6 +687,7 @@ impl SessionManager {
             torrents_dir: self.config.torrents_dir.clone(),
             event_bus: self.event_bus.clone(),
             unchoke_slots: self.config.unchoke_slots.get() as usize,
+            max_concurrent_peers: self.config.max_connections_per_torrent.get() as usize,
         };
 
         let (torrent, tx, progress_rx) =
@@ -761,6 +761,7 @@ impl SessionManager {
             torrents_dir: self.config.torrents_dir.clone(),
             event_bus: self.event_bus.clone(),
             unchoke_slots: self.config.unchoke_slots.get() as usize,
+            max_concurrent_peers: self.config.max_connections_per_torrent.get() as usize,
         };
 
         let (torrent, tx, progress_rx) = Torrent::new(ctx, TorrentSource::Magnet(magnet));
