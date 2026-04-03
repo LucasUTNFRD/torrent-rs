@@ -1002,6 +1002,7 @@ impl Torrent {
                             tracing::warn!("Failed to send piece to peer {}: {}", pid, e);
                         } else {
                             self.ul_rate.record(block_len);
+                            self.metrics.uploaded_bytes.fetch_add(block_len, Ordering::Relaxed);
                         }
                     }
                     Err(e) => {
