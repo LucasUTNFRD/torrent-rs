@@ -11,7 +11,9 @@ use crate::{
     peer::{
         PeerMessage,
         error::ConnectionError,
-        peer_connection::{CONNECTION_TIMEOUT, PeerConnection, PeerHandle, PeerInfo},
+        peer_connection::{
+            CONNECTION_TIMEOUT, PeerConnection, PeerHandle, PeerInfo, spawn_inbound,
+        },
     },
     piece_picker::{AvailabilityUpdate, BlockRequest, PieceManager, PieceState},
     protocol::peer_wire::{Block, BlockInfo, Message},
@@ -46,7 +48,9 @@ use tracing::{debug, info, instrument, warn};
 use tracker_client::{ClientState, Events, TrackerError, TrackerHandler};
 use url::Url;
 
+// TODO: Use a criteria for this, this is so harcoded lol
 const CHANNEL_SIZE: usize = 1024;
+const MAX_CONCURRENT_PEERS: usize = 50;
 
 /// Session-level context shared across all torrents.
 /// Contains resources and configuration that are identical for every torrent in a session.
@@ -58,7 +62,6 @@ pub struct TorrentContext {
     pub torrents_dir: PathBuf,
     pub event_bus: EventBus,
     pub unchoke_slots: usize,
-    pub max_concurrent_peers: usize,
 }
 
 /// Source material for creating a torrent.
@@ -242,7 +245,7 @@ impl SessionTickers {
     fn new() -> Self {
         Self {
             choker: tokio::time::interval(Duration::from_secs(30)),
-            metrics: tokio::time::interval(Duration::from_millis(100)),
+            metrics: tokio::time::interval(Duration::from_millis(500)),
             ema: tokio::time::interval(Duration::from_secs(1)),
             retry: tokio::time::interval(Duration::from_secs(30)),
         }
@@ -292,6 +295,7 @@ impl PeerConnectionState {
 
 const MAX_FAILCOUNT: u8 = 3;
 const MIN_RECONNECT_TIME: Duration = Duration::from_secs(60);
+const CONNECTION_TIMEOUT_BASE: Duration = Duration::from_secs(10);
 
 //
 // TORRENT Control Structure
@@ -354,8 +358,6 @@ pub struct Torrent {
     /// Background tasks (tracker announce, DHT discovery)
     // TODO: Rename this to peer_discovery_task
     background_tasks: JoinSet<()>,
-    /// Maximum concurrent peer connections.
-    max_concurrent_peers: usize,
 }
 
 const ALPHA: f64 = 0.5;
@@ -556,7 +558,6 @@ impl Torrent {
                 known_peers: HashMap::new(),
                 pending_peers: VecDeque::new(),
                 background_tasks: JoinSet::new(),
-                max_concurrent_peers: ctx.max_concurrent_peers,
             },
             tx,
             progress_rx,
@@ -624,7 +625,7 @@ impl Torrent {
 
     fn try_spawn_pending_peers(&mut self) {
         let now = Instant::now();
-        while self.peer_tasks.len() < self.max_concurrent_peers {
+        while self.peer_tasks.len() <= MAX_CONCURRENT_PEERS {
             let Some(peer_addr) = self.pending_peers.pop_front() else {
                 break;
             };
@@ -759,59 +760,7 @@ impl Torrent {
         }
     }
 
-    fn spawn_inbound_connection(
-        &mut self,
-        stream: TcpStream,
-        remote_addr: SocketAddr,
-        supports_ext: bool,
-        remote_peer_id: PeerID,
-        dht_enabled: bool,
-    ) {
-        let pid = Pid(PEER_COUNTER.fetch_add(1, Ordering::Relaxed));
-        let (tx, rx) = mpsc::channel(512);
-        let info = Arc::new(RwLock::new(PeerInfo::new(*CLIENT_ID, Direction::Inbound)));
-        let info_clone = info.clone();
-
-        let torrent_tx = self.tx.clone();
-        let peer_token = self.peer_cancel_token.child_token();
-
-        self.peer_tasks.spawn(async move {
-            let result = async {
-                {
-                    let mut info_guard = info_clone.write().unwrap();
-                    info_guard.peer_id = remote_peer_id;
-                    info_guard.supports_extended = supports_ext;
-                    info_guard.dht_enabled = dht_enabled;
-                }
-
-                PeerConnection::new(
-                    pid,
-                    stream,
-                    remote_addr,
-                    Arc::clone(&info_clone),
-                    torrent_tx,
-                    rx,
-                    supports_ext,
-                    dht_enabled,
-                )
-                .run(peer_token)
-                .await
-            }
-            .await;
-            (result, pid)
-        });
-
-        self.pending_requests.insert(pid, Vec::new());
-        self.peers.insert(
-            pid,
-            PeerHandle {
-                pid,
-                peer_addr: remote_addr,
-                info: Arc::clone(&info),
-                tx,
-            },
-        );
-    }
+    pub async fn add_peer(&mut self, peer: PeerOrigin) {}
 
     /// Spawn an outbound connection. Connects, handshakes, then runs the event loop.
     fn spawn_outbound_connection(&mut self, peer_addr: SocketAddr) {
@@ -1188,18 +1137,19 @@ impl Torrent {
                 peer_id,
                 dht_enabled,
             } => {
-                self.spawn_inbound_connection(
+                info!("Received inbound peer connection from {}", remote_addr);
+                self.add_peer(PeerOrigin::Inbound {
                     stream,
                     remote_addr,
                     supports_ext,
                     peer_id,
                     dht_enabled,
-                );
+                })
+                .await;
             }
             TorrentMessage::ConnectPeer { addr } => {
-                self.spawn_outbound_connection(addr);
-                // info!("Injected outbound peer connection to {}", addr);
-                // self.add_peer(PeerOrigin::Outbound(addr)).await;
+                info!("Injected outbound peer connection to {}", addr);
+                self.add_peer(PeerOrigin::Outbound(addr)).await;
             }
             TorrentMessage::GetPeerSnapshots { resp } => {
                 let snapshots: Vec<PeerSnapshot> = self
@@ -1849,7 +1799,7 @@ impl Torrent {
 
                 const MAX_RESPONSES: usize = 50;
 
-                let _ = dht.announce(info_hash, port).await;
+                let _ = dht.announce_peer(info_hash, port).await;
 
                 loop {
                     tokio::select! {
