@@ -121,7 +121,7 @@ impl RoutingTable {
         // If node already exists, move it to the end (most recently seen)
         if let Some(pos) = bucket.nodes.iter().position(|n| n.node_id == node.node_id) {
             let mut existing = bucket.nodes.remove(pos);
-            existing.mark_good();
+            existing.mark_response();
             bucket.nodes.push(existing);
             bucket.touch();
             return true;
@@ -149,7 +149,20 @@ impl RoutingTable {
 
         let bucket = &mut self.buckets[index];
         if let Some(node) = bucket.nodes.iter_mut().find(|n| n.node_id == *node_id) {
-            node.mark_good();
+            node.mark_response();
+            bucket.touch();
+        }
+    }
+
+    /// Mark that we received a query from a node (keeps it good per BEP 05).
+    pub fn mark_node_query_from(&mut self, node_id: &NodeId) {
+        let Some(index) = self.bucket_index(node_id) else {
+            return;
+        };
+
+        let bucket = &mut self.buckets[index];
+        if let Some(node) = bucket.nodes.iter_mut().find(|n| n.node_id == *node_id) {
+            node.mark_query_from();
             bucket.touch();
         }
     }

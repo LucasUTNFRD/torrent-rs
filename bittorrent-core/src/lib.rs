@@ -47,6 +47,7 @@ pub mod metrics;
 mod net;
 mod peer;
 mod piece_picker;
+pub mod port_mapping;
 mod protocol;
 mod session;
 pub mod session_config;

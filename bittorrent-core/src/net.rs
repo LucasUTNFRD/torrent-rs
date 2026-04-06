@@ -1,10 +1,6 @@
 use async_trait::async_trait;
 use std::{net::SocketAddr, time::Duration};
 
-#[cfg(feature = "sim")]
-pub use turmoil::net::{TcpListener, TcpStream};
-
-#[cfg(not(feature = "sim"))]
 pub use tokio::net::{TcpListener, TcpStream};
 
 #[async_trait]

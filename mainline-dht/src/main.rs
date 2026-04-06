@@ -1,8 +1,9 @@
 //! Demo application for the BitTorrent Mainline DHT.
 //!
 //! This demonstrates:
-//! 1. Creating a DHT node and bootstrapping into the network
-//! 2. Retrieving peers for a specific infohash from the DHT
+//! 1. Creating a DHT node with empty routing table (no persistence)
+//! 2. Bootstrapping into the network with timeout/success tracking
+//! 3. Retrieving peers for a specific infohash from the DHT
 //!
 //! Run with:
 //! cargo run -- EA3849FFD066F77525A6DC41F2119DBD7130B540
@@ -10,7 +11,6 @@
 use bittorrent_common::types::InfoHash;
 use clap::Parser;
 use mainline_dht::{Dht, DhtConfig};
-use std::path::PathBuf;
 use std::time::Instant;
 use tracing::Level;
 
@@ -19,10 +19,9 @@ use tracing::Level;
 struct Cli {
     /// info_hash to lookup peers for (hex string)
     infohash: String,
-
-    /// Path to node ID file (persists identity across restarts)
-    #[arg(short = 'i', long, default_value = None)]
-    id_file: Option<PathBuf>,
+    /// Port to bind DHT to
+    #[arg(short, long, default_value = "6881")]
+    port: u16,
 }
 
 #[tokio::main]
@@ -31,56 +30,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let cli = Cli::parse();
 
-    // To answer your question: Internally we use the 20-byte array (InfoHash).
-    // But for the user interface, a hex string is much more convenient.
     let info_hash = InfoHash::from_hex(&cli.infohash)
         .expect("Invalid info_hash: must be a 40-character hex string");
 
-    println!("Creating DHT node...");
-    let config = if let Some(id_path) = cli.id_file {
-        let state_path = id_path.parent().map(|p| p.join("dht_state.dat"));
-        DhtConfig {
-            id_file_path: Some(id_path),
-            state_file_path: state_path,
-            port: 6881,
-        }
-    } else {
-        DhtConfig::with_default_persistence(6881)?
-    };
+    println!("=== DHT Bootstrap Test ===");
+    println!("Infohash: {}", info_hash);
+    println!("Port: {}", cli.port);
+    println!();
 
+    // Create DHT with NO persistence - starts with empty routing table
+    println!("Creating DHT node (empty routing table)...");
+    let config = DhtConfig::builder().port(cli.port).build();
+
+    let start = Instant::now();
     let dht = Dht::with_config(config).await?;
+    let bootstrap_time = start.elapsed();
 
-    println!("Bootstrapping into the DHT network...");
-    dht.bootstrap().await?;
-    println!("Bootstrap successful. Node ID: {}\n", dht.node_id());
-
-    // Wait a bit for bootstrap responses to populate routing table
-    println!("Waiting for bootstrap responses...");
-    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+    println!("Node ID: {}", dht.node_id());
+    println!("Bootstrap time: {:?}", bootstrap_time);
     println!(
-        "Routing table size: {} nodes\n",
+        "Routing table size: {} nodes",
         dht.routing_table_size().await?
     );
+    println!();
 
-    println!("Looking up peers for info_hash: {} ...", info_hash);
-
-    // Run get_peers multiple times to allow iterative lookup to progress
-    for attempt in 1..=3 {
-        println!("\n=== DHT QUERY (attempt {}/3) ===", attempt);
-        get_peers(&dht, info_hash).await?;
-
-        // Wait between attempts for responses to come in
-        if attempt < 3 {
-            println!("Waiting for more responses...");
-            tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-        }
+    if dht.routing_table_size().await? == 0 {
+        println!("WARNING: Bootstrap failed - no nodes in routing table!");
+        println!("This could be due to:");
+        println!("  - Network connectivity issues");
+        println!("  - Bootstrap nodes unreachable");
+        println!("  - Firewall blocking UDP port {}", cli.port);
     }
 
-    // In a real application, you might want to run it again or keep the node running
-    // to participate in the network.
+    println!("=== Starting get_peers lookup ===");
+    println!("Looking up peers for: {}", info_hash);
 
+    let start = Instant::now();
+    let peer_count = get_peers(&dht, info_hash).await?;
+    let lookup_time = start.elapsed();
+
+    println!();
+    println!("=== Results ===");
+    println!("Peers found: {}", peer_count);
+    println!("Lookup time: {:?}", lookup_time);
     println!(
-        "\nFinal routing table size: {} nodes",
+        "Final routing table size: {} nodes",
         dht.routing_table_size().await?
     );
 
@@ -90,19 +84,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn get_peers(dht: &Dht, info_hash: InfoHash) -> Result<(), Box<dyn std::error::Error>> {
-    let _start = Instant::now();
-
+async fn get_peers(dht: &Dht, info_hash: InfoHash) -> Result<usize, Box<dyn std::error::Error>> {
     let mut peer_recv = dht.get_peers(info_hash).await;
-    let mut count = 0;
+    let mut total_peers = 0;
+    let mut batches = 0;
+
+    println!("Waiting for peers...");
     while let Some(peers) = peer_recv.recv().await {
-        if count >= 20 {
-            break;
+        batches += 1;
+        total_peers += peers.len();
+        println!("  Batch {}: {} peers", batches, peers.len());
+        for peer in &peers {
+            println!("    - {}", peer);
         }
 
-        println!("Recv Peers {peers:?}");
-        count += 1;
+        // Stop after receiving some peers or timeout
+        if total_peers >= 50 {
+            println!("Received enough peers, stopping...");
+            break;
+        }
     }
 
-    Ok(())
+    if total_peers == 0 {
+        println!("No peers found for this infohash");
+    }
+
+    Ok(total_peers)
 }

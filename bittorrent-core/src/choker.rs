@@ -1,9 +1,3 @@
-//! The choker is responsible for:
-//! - Deciding which peers receive upload bandwidth (unchoked)
-//! - Which peers are denied upload bandwidth (choked)
-//! - Managing upload slots dynamically
-//! - Tracking peer performance metrics
-
 use std::collections::{HashSet, VecDeque};
 
 use crate::torrent::Pid;

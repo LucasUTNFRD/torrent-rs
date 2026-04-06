@@ -24,7 +24,7 @@ use tokio::{
     task::{self, JoinHandle},
 };
 
-use mainline_dht::{DhtConfig, DhtHandler};
+use mainline_dht::DhtHandler;
 use tokio_util::sync::CancellationToken;
 use tracker_client::TrackerHandler;
 
@@ -401,6 +401,7 @@ struct SessionManager {
     storage_runtime: Option<DiskStorageRuntime>,
     torrent_root_token: CancellationToken,
     tcp_listener_handle: Option<JoinHandle<()>>,
+    port_mapping_handle: Option<JoinHandle<()>>,
 }
 
 impl SessionManager {
@@ -422,19 +423,39 @@ impl SessionManager {
             storage_runtime: Some(storage_runtime),
             torrent_root_token: CancellationToken::new(),
             tcp_listener_handle: None,
+            port_mapping_handle: None,
         }
     }
 
     /// Main entry point - runs the session manager loop.
     pub async fn start(mut self) {
-        // TrackerHandler eagerly binds a UDP socket, which turmoil doesn't support.
-        // In sim mode, create a no-op handler (announce calls will return channel errors).
-        #[cfg(not(feature = "sim"))]
+        let bind_addr = self.config.listen_addr();
+        let listener = match TcpListener::bind(bind_addr).await {
+            Ok(listener) => listener,
+            Err(error) => {
+                tracing::error!(
+                    "Failed to bind TCP listener on {:?}: {}. Shutting down session manager startup.",
+                    bind_addr,
+                    error
+                );
+                return;
+            }
+        };
+
+        tracing::info!("Binded to {:?}", listener.local_addr());
+
         let tracker = Arc::new(TrackerHandler::new(*CLIENT_ID));
-        #[cfg(feature = "sim")]
-        let tracker = Arc::new(TrackerHandler::new_noop());
 
         let dht = self.initialize_dht().await;
+
+        // Attempt UPnP port mapping if enabled
+        if self.config.enable_port_mapping {
+            self.port_mapping_handle = self.setup_port_mapping().await;
+        } else {
+            tracing::info!("Port mapping disabled by configuration");
+        }
+
+        self.tcp_listener_handle = Some(self.spawn_tcp_listener(listener));
 
         // Ensure torrents directory exists
         if let Err(e) = std::fs::create_dir_all(&self.config.torrents_dir) {
@@ -444,8 +465,6 @@ impl SessionManager {
                 e
             );
         }
-
-        self.tcp_listener_handle = Some(self.spawn_tcp_listener());
 
         while let Some(cmd) = self.rx.recv().await {
             match cmd {
@@ -552,11 +571,16 @@ impl SessionManager {
         }
 
         let config_dir = &self.config.config_dir;
-        let dht_config = DhtConfig {
-            id_file_path: Some(config_dir.join("node.id")),
-            state_file_path: Some(config_dir.join("dht_state.dat")),
-            port: self.config.listen_addr.port(),
-        };
+        let mut dht_builder = mainline_dht::DhtConfig::builder()
+            .port(self.config.listen_interface.port)
+            .id_file_path(config_dir.join("node.id"))
+            .state_file_path(config_dir.join("dht_state.dat"));
+
+        if let Some(nodes) = self.config.dht_bootstrap_nodes.clone() {
+            dht_builder = dht_builder.bootstrap_nodes(nodes);
+        }
+
+        let dht_config = dht_builder.build();
 
         let dht = DhtHandler::with_config(dht_config)
             .await
@@ -565,17 +589,6 @@ impl SessionManager {
             })
             .ok()?;
 
-        tracing::info!("DHT node created, bootstrapping...");
-
-        if let Err(e) = dht.bootstrap().await {
-            tracing::warn!("DHT bootstrap failed: {e}, continuing without DHT");
-            return None;
-        }
-
-        tracing::info!(
-            "DHT bootstrapped successfully with node ID: {:?}",
-            dht.node_id()
-        );
         Some(Arc::new(dht))
     }
 
@@ -629,7 +642,8 @@ impl SessionManager {
             storage: self.storage.as_ref().unwrap().clone(),
             torrents_dir: self.config.torrents_dir.clone(),
             event_bus: self.event_bus.clone(),
-            unchoke_slots: self.config.unchoke_slots_limit as usize,
+            unchoke_slots: self.config.unchoke_slots.get() as usize,
+            max_concurrent_peers: self.config.max_connections_per_torrent.get() as usize,
         };
 
         let (torrent, tx, progress_rx) = Torrent::new(
@@ -696,7 +710,8 @@ impl SessionManager {
             storage: self.storage.as_ref().unwrap().clone(),
             torrents_dir: self.config.torrents_dir.clone(),
             event_bus: self.event_bus.clone(),
-            unchoke_slots: self.config.unchoke_slots_limit as usize,
+            unchoke_slots: self.config.unchoke_slots.get() as usize,
+            max_concurrent_peers: self.config.max_connections_per_torrent.get() as usize,
         };
 
         let (torrent, tx, progress_rx) =
@@ -769,7 +784,8 @@ impl SessionManager {
             storage: self.storage.as_ref().unwrap().clone(),
             torrents_dir: self.config.torrents_dir.clone(),
             event_bus: self.event_bus.clone(),
-            unchoke_slots: self.config.unchoke_slots_limit as usize,
+            unchoke_slots: self.config.unchoke_slots.get() as usize,
+            max_concurrent_peers: self.config.max_connections_per_torrent.get() as usize,
         };
 
         let (torrent, tx, progress_rx) = Torrent::new(ctx, TorrentSource::Magnet(magnet));
@@ -826,12 +842,54 @@ impl SessionManager {
         }
     }
 
+    async fn setup_port_mapping(&self) -> Option<JoinHandle<()>> {
+        use crate::port_mapping::PortMapping;
+        use igd_next::PortMappingProtocol;
+
+        tracing::info!("Attempting UPnP port mapping...");
+
+        let local_port = self.config.listen_interface.port;
+
+        match PortMapping::new(
+            local_port,
+            Some(local_port), // Try to keep same port externally
+            PortMappingProtocol::TCP,
+        )
+        .await
+        {
+            Ok(mapping) => {
+                let external_addr = mapping.external_addr();
+                tracing::info!(
+                    "UPnP successful: external {} -> internal {}",
+                    external_addr,
+                    local_port
+                );
+
+                // Start renewal task
+                Some(mapping.spawn_renewal_task())
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "UPnP port mapping failed ({}). Continuing in outbound-only mode.",
+                    e
+                );
+                None
+            }
+        }
+    }
+
     async fn handle_shutdown(&mut self, dht: Option<&Arc<DhtHandler>>) -> Result<(), SessionError> {
         // Signal all torrents to stop. Each Torrent internally
         // cancels its peer tokens and awaits its peer JoinSet
         // before returning — so by the time join_all() resolves,
         // zero PeerConnection tasks are alive.
         self.torrent_root_token.cancel();
+
+        // Cancel port mapping renewal task
+        if let Some(handle) = self.port_mapping_handle.take() {
+            handle.abort();
+            // PortMapping Drop will remove the port mapping
+        }
 
         // Shutdown TCP listener
         if let Some(handle) = self.tcp_listener_handle.take() {
@@ -873,22 +931,12 @@ impl SessionManager {
         Ok(())
     }
 
-    fn spawn_tcp_listener(&self) -> JoinHandle<()> {
+    fn spawn_tcp_listener(&self, listener: TcpListener) -> JoinHandle<()> {
         let sessions = self.sessions.clone();
-        let listen_addr = self.config.listen_addr;
         let peer_id = self.peer_id;
         let cancel_token = self.torrent_root_token.clone();
 
         tokio::spawn(async move {
-            let listener = match TcpListener::bind(listen_addr).await {
-                Ok(l) => l,
-                Err(e) => {
-                    tracing::error!("Failed to bind TCP listener: {}", e);
-                    return;
-                }
-            };
-            tracing::info!("Listening on {:?}", listener.local_addr());
-
             loop {
                 tokio::select! {
                     biased;
