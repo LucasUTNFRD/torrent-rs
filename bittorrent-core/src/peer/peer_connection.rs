@@ -9,6 +9,7 @@ use crate::{
     detail::Direction,
     peer::error::{ConnectionError, HandshakeError, ProtocolViolation},
     protocol::{
+        self,
         extension::{
             DATA_ID, ExtendedHandshake, ExtendedMessage, MetadataMessage, REJECT_ID, REQUEST_ID,
             RawExtendedMessage,
@@ -104,6 +105,9 @@ pub const EXTENSION_NAME_PEX: &str = "ut_pex";
 
 const UT_METADATA_ID: u8 = 1;
 pub const CONNECTION_TIMEOUT: Duration = Duration::from_secs(15);
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(90);
+const IDLE_TIMEOUT: Duration = Duration::from_secs(150);
+const SNUB_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug)]
 pub struct PeerInfo {
@@ -118,7 +122,6 @@ pub struct PeerInfo {
     pub am_choking: bool,    // we are choking them
     pub am_interested: bool, // we are interested in them
 
-    #[allow(dead_code)]
     pub snubbed: bool, // no piece in >60s
 
     // Extension support (set during handshake)
@@ -181,8 +184,8 @@ pub struct PeerConnection {
     slow_start: bool,
     prev_download_rate: f64,
 
-    last_recv_msg: Instant,
-    last_block_request: Instant,
+    last_sent_msg: Instant,
+    last_block_received: Instant,
 }
 
 impl PeerConnection {
@@ -218,8 +221,8 @@ impl PeerConnection {
             max_outgoing_request: 250,
             slow_start: true,
             prev_download_rate: 0.0,
-            last_recv_msg: Instant::now(),
-            last_block_request: Instant::now(),
+            last_sent_msg: Instant::now(),
+            last_block_received: Instant::now(),
             metrics: PeerMetrics::new(),
             dht_enabled,
         }
@@ -270,12 +273,16 @@ impl PeerConnection {
         }
         if self.dht_enabled {
             self.sink.send(Message::Port { port: 6881 }).await?;
+            self.last_sent_msg = Instant::now();
         }
 
-        let mut heartbeat = interval(Duration::from_secs(60));
+        let mut heartbeat = interval(Duration::from_secs(30));
         let mut metric_tick = interval(Duration::from_millis(500));
         heartbeat.tick().await;
         metric_tick.tick().await;
+
+        let idle_deadline = tokio::time::sleep(IDLE_TIMEOUT);
+        tokio::pin!(idle_deadline);
 
         let result = loop {
             self.maybe_request_metadata().await?;
@@ -289,14 +296,13 @@ impl PeerConnection {
                 maybe_msg = self.stream.next() => match maybe_msg {
                     Some(Ok(msg)) => {
                         counters::on_read_counter();
+                        idle_deadline.as_mut().reset(Instant::now() + IDLE_TIMEOUT);
                         self.handle_msg(msg).await?
                     },
                     Some(Err(e)) => {
                         break Err(ConnectionError::Io(e));
                     }
                     _ => {
-                        // Peer sent FIN — clean close from their side
-                        // Flush our side then exit cleanly
                         let _ = self.sink.flush().await;
                         let _ = self.sink.close().await;
                         break Ok(());
@@ -310,18 +316,16 @@ impl PeerConnection {
                     },
                 },
                 _ = heartbeat.tick() => {
-                    let elapsed_request = self.last_block_request.elapsed();
-                    let elapsed_recv = self.last_recv_msg.elapsed();
-                    let am_interested = self.peer_info.read().unwrap().am_interested;
-
-                    if am_interested && elapsed_request > Duration::from_secs(30)
-                        || elapsed_recv > Duration::from_secs(45)
-                    {
-                        break Err(ConnectionError::Idle);
+                    if self.last_sent_msg.elapsed() > KEEPALIVE_INTERVAL {
+                        self.sink.send(Message::KeepAlive).await?;
+                        self.last_sent_msg = Instant::now();
                     }
-                    self.sink.send(Message::KeepAlive).await?;
                 },
                 _ = metric_tick.tick() => self.metric_update(),
+                _ = &mut idle_deadline => {
+                    self.drain().await;
+                    break Err(ConnectionError::Idle);
+                }
             }
         };
 
@@ -384,6 +388,29 @@ impl PeerConnection {
             info.upload_rate = self.metrics.upload_rate_f64();
         }
 
+        {
+            let info = self.peer_info.read().unwrap();
+            let should_check = info.am_interested && !info.remote_choking;
+            drop(info);
+
+            if should_check {
+                let since_block = self.last_block_received.elapsed();
+                let snubbed = since_block > SNUB_TIMEOUT;
+                if snubbed != self.peer_info.read().unwrap().snubbed {
+                    self.peer_info.write().unwrap().snubbed = snubbed;
+                    if snubbed {
+                        tracing::debug!(
+                            peer = %self.peer_addr,
+                            elapsed = ?since_block,
+                            "peer snubbed us"
+                        );
+                    }
+                }
+            } else {
+                self.peer_info.write().unwrap().snubbed = false;
+            }
+        }
+
         let current_rate = self.metrics.download_rate_f64();
 
         if self.slow_start {
@@ -432,7 +459,6 @@ impl PeerConnection {
     // ── Message dispatch ──────────────────────────────────────────────────────
 
     async fn handle_msg(&mut self, msg: Message) -> Result<(), ConnectionError> {
-        self.last_recv_msg = Instant::now();
         match msg {
             Message::KeepAlive => {}
             Message::Choke => self.on_choke().await,
@@ -468,6 +494,7 @@ impl PeerConnection {
                     && bf.has(piece_index as usize)
                 {
                     self.sink.send(Message::Have { piece_index }).await?;
+                    self.last_sent_msg = Instant::now();
                 }
             }
             PeerMessage::SendBitfield { bitfield } => {
@@ -477,16 +504,19 @@ impl PeerConnection {
                             bitfield.as_bytes(),
                         )))
                         .await?;
+                    self.last_sent_msg = Instant::now();
                 }
             }
             PeerMessage::SendChoke => {
                 self.metrics.reset_since_unchoked();
                 self.set_am_choking(true);
                 self.sink.send(Message::Choke).await?;
+                self.last_sent_msg = Instant::now();
             }
             PeerMessage::SendUnchoke => {
                 self.set_am_choking(false);
                 self.sink.send(Message::Unchoke).await?;
+                self.last_sent_msg = Instant::now();
             }
             PeerMessage::HaveMetadata(metadata) => {
                 let num_pieces = metadata.num_pieces();
@@ -495,7 +525,11 @@ impl PeerConnection {
                 self.update_interest().await?;
             }
             PeerMessage::SendMessage(msg) => {
+                if let protocol::peer_wire::Message::Piece(ref block) = msg {
+                    self.metrics.record_upload(block.data.len() as u64);
+                }
                 self.sink.send(msg).await?;
+                self.last_sent_msg = Instant::now();
             }
         }
         Ok(())
@@ -627,6 +661,7 @@ impl PeerConnection {
     }
 
     async fn on_piece(&mut self, block: Block) -> Result<(), ConnectionError> {
+        self.last_block_received = Instant::now();
         self.metrics.record_download(block.data.len() as u64);
 
         let block_info = BlockInfo {
@@ -727,10 +762,10 @@ impl PeerConnection {
                 break;
             }
             self.outgoing_requests.insert(block);
-            self.last_block_request = Instant::now();
             self.sink.feed(Message::Request(block)).await?;
         }
         self.sink.flush().await?;
+        self.last_sent_msg = Instant::now();
 
         Ok(())
     }
@@ -782,6 +817,7 @@ impl PeerConnection {
         self.sink
             .send(Message::Extended(ExtendedMessage::Handshake(hs)))
             .await?;
+        self.last_sent_msg = Instant::now();
 
         Ok(())
     }
@@ -858,6 +894,7 @@ impl PeerConnection {
                 },
             )))
             .await?;
+        self.last_sent_msg = Instant::now();
         Ok(())
     }
 
@@ -892,6 +929,7 @@ impl PeerConnection {
                         },
                     )))
                     .await?;
+                self.last_sent_msg = Instant::now();
             }
             DATA_ID => {
                 let _total_size = dict
