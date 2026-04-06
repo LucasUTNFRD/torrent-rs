@@ -24,7 +24,7 @@ use tokio::{
     task::{self, JoinHandle},
 };
 
-use mainline_dht::{DhtConfig, DhtHandler};
+use mainline_dht::DhtHandler;
 use tokio_util::sync::CancellationToken;
 use tracker_client::TrackerHandler;
 
@@ -427,12 +427,7 @@ impl SessionManager {
 
     /// Main entry point - runs the session manager loop.
     pub async fn start(mut self) {
-        // TrackerHandler eagerly binds a UDP socket, which turmoil doesn't support.
-        // In sim mode, create a no-op handler (announce calls will return channel errors).
-        #[cfg(not(feature = "sim"))]
         let tracker = Arc::new(TrackerHandler::new(*CLIENT_ID));
-        #[cfg(feature = "sim")]
-        let tracker = Arc::new(TrackerHandler::new_noop());
 
         let dht = self.initialize_dht().await;
 
@@ -552,11 +547,16 @@ impl SessionManager {
         }
 
         let config_dir = &self.config.config_dir;
-        let dht_config = DhtConfig {
-            id_file_path: Some(config_dir.join("node.id")),
-            state_file_path: Some(config_dir.join("dht_state.dat")),
-            port: self.config.listen_addr.port(),
-        };
+        let mut dht_builder = mainline_dht::DhtConfig::builder()
+            .port(self.config.listen_interface.port)
+            .id_file_path(config_dir.join("node.id"))
+            .state_file_path(config_dir.join("dht_state.dat"));
+
+        if let Some(nodes) = self.config.dht_bootstrap_nodes.clone() {
+            dht_builder = dht_builder.bootstrap_nodes(nodes);
+        }
+
+        let dht_config = dht_builder.build();
 
         let dht = DhtHandler::with_config(dht_config)
             .await
@@ -565,17 +565,6 @@ impl SessionManager {
             })
             .ok()?;
 
-        tracing::info!("DHT node created, bootstrapping...");
-
-        if let Err(e) = dht.bootstrap().await {
-            tracing::warn!("DHT bootstrap failed: {e}, continuing without DHT");
-            return None;
-        }
-
-        tracing::info!(
-            "DHT bootstrapped successfully with node ID: {:?}",
-            dht.node_id()
-        );
         Some(Arc::new(dht))
     }
 
@@ -629,7 +618,8 @@ impl SessionManager {
             storage: self.storage.as_ref().unwrap().clone(),
             torrents_dir: self.config.torrents_dir.clone(),
             event_bus: self.event_bus.clone(),
-            unchoke_slots: self.config.unchoke_slots_limit as usize,
+            unchoke_slots: self.config.unchoke_slots.get() as usize,
+            max_concurrent_peers: self.config.max_connections_per_torrent.get() as usize,
         };
 
         let (torrent, tx, progress_rx) = Torrent::new(
@@ -696,7 +686,8 @@ impl SessionManager {
             storage: self.storage.as_ref().unwrap().clone(),
             torrents_dir: self.config.torrents_dir.clone(),
             event_bus: self.event_bus.clone(),
-            unchoke_slots: self.config.unchoke_slots_limit as usize,
+            unchoke_slots: self.config.unchoke_slots.get() as usize,
+            max_concurrent_peers: self.config.max_connections_per_torrent.get() as usize,
         };
 
         let (torrent, tx, progress_rx) =
@@ -769,7 +760,8 @@ impl SessionManager {
             storage: self.storage.as_ref().unwrap().clone(),
             torrents_dir: self.config.torrents_dir.clone(),
             event_bus: self.event_bus.clone(),
-            unchoke_slots: self.config.unchoke_slots_limit as usize,
+            unchoke_slots: self.config.unchoke_slots.get() as usize,
+            max_concurrent_peers: self.config.max_connections_per_torrent.get() as usize,
         };
 
         let (torrent, tx, progress_rx) = Torrent::new(ctx, TorrentSource::Magnet(magnet));
@@ -875,7 +867,7 @@ impl SessionManager {
 
     fn spawn_tcp_listener(&self) -> JoinHandle<()> {
         let sessions = self.sessions.clone();
-        let listen_addr = self.config.listen_addr;
+        let listen_addr = self.config.listen_addr();
         let peer_id = self.peer_id;
         let cancel_token = self.torrent_root_token.clone();
 
