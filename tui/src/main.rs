@@ -724,6 +724,7 @@ fn render_peers(f: &mut Frame, area: Rect, app: &App) {
                 DirectionSnapshot::Outbound => "Outgoing",
             };
             Row::new(vec![
+                Cell::from(fmt_rate(p.info.upload_rate)).style(Style::default().fg(Color::Green)),
                 Cell::from(ul_state),
                 Cell::from(fmt_rate(p.info.download_rate)).style(Style::default().fg(Color::Blue)),
                 Cell::from(dl_state),
@@ -739,6 +740,7 @@ fn render_peers(f: &mut Frame, area: Rect, app: &App) {
         .collect();
 
     let widths = [
+        Constraint::Length(9),  // Up
         Constraint::Length(10), // UL State
         Constraint::Length(9),  // Down
         Constraint::Length(10), // DL State
@@ -752,6 +754,7 @@ fn render_peers(f: &mut Frame, area: Rect, app: &App) {
     ];
 
     let header = Row::new([
+        "Up",
         "UL State",
         "Down",
         "DL State",

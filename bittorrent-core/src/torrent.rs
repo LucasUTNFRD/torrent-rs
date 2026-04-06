@@ -1214,7 +1214,7 @@ impl Torrent {
                                 am_interested: info.am_interested,
                                 source: info.source,
                                 download_rate: info.download_rate,
-                                upload_rate: info.download_rate,
+                                upload_rate: info.upload_rate,
                                 peer_progress: 0.0, // TODO: query from bitfield
                                 client_name: info
                                     .peer_id
