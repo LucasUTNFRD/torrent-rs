@@ -64,8 +64,9 @@ pub struct SessionConfig {
     pub dht_bootstrap_nodes: Option<Vec<BootstrapNode>>,
 
     // -- NAT traversal --
-    pub enable_upnp: bool,
-    pub enable_natpmp: bool,
+    /// Enable UPnP port mapping using igd_next.
+    /// Attempts to automatically create port forwarding on the router.
+    pub enable_port_mapping: bool,
 
     // -- Connection limits --
     /// Maximum concurrent peer connections per torrent.
@@ -112,8 +113,7 @@ pub struct SessionConfigBuilder {
     enable_dht: bool,
     dht_bootstrap_nodes: Option<Vec<BootstrapNode>>, // None = use defaults
 
-    enable_upnp: bool,
-    enable_natpmp: bool,
+    enable_port_mapping: bool,
 
     max_connections_per_torrent: NonZeroU32,
     unchoke_slots: NonZeroU32,
@@ -130,8 +130,7 @@ impl Default for SessionConfigBuilder {
             config_dir: None,
             enable_dht: true,
             dht_bootstrap_nodes: None,
-            enable_upnp: false,
-            enable_natpmp: false,
+            enable_port_mapping: false,
             // SAFETY: literals are non-zero.
             max_connections_per_torrent: NonZeroU32::new(50).unwrap(),
             unchoke_slots: NonZeroU32::new(4).unwrap(),
@@ -177,13 +176,8 @@ impl SessionConfigBuilder {
         self
     }
 
-    pub fn enable_upnp(mut self, enabled: bool) -> Self {
-        self.enable_upnp = enabled;
-        self
-    }
-
-    pub fn enable_natpmp(mut self, enabled: bool) -> Self {
-        self.enable_natpmp = enabled;
+    pub fn enable_port_mapping(mut self, enabled: bool) -> Self {
+        self.enable_port_mapping = enabled;
         self
     }
 
@@ -222,8 +216,7 @@ impl SessionConfigBuilder {
             torrents_dir,
             enable_dht: self.enable_dht,
             dht_bootstrap_nodes: self.dht_bootstrap_nodes,
-            enable_upnp: self.enable_upnp,
-            enable_natpmp: self.enable_natpmp,
+            enable_port_mapping: self.enable_port_mapping,
             max_connections_per_torrent: self.max_connections_per_torrent,
             unchoke_slots: self.unchoke_slots,
             peer_timeout: self.peer_timeout,

@@ -25,6 +25,8 @@ enum Commands {
     Download {
         #[arg(help = "Torrent file path or magnet URI")]
         source: String,
+        #[arg(long, help = "Continue seeding after download completes")]
+        seed: bool,
     },
 
     #[command(about = "Add a torrent to the session without starting download")]
@@ -42,17 +44,20 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // tracing_subscriber::fmt::init();
-    console_subscriber::init();
+    tracing_subscriber::fmt::init();
+    // console_subscriber::init();
 
     let cli = Cli::parse();
 
     let metrics_addr = cli.metrics_addr.parse().unwrap();
     cmd::metrics::install(metrics_addr).expect("Failed to install metrics exporter");
 
+    let config = SessionConfig::builder().enable_port_mapping(true).build();
+    let session = Session::new(config);
+
     match cli.command {
-        Commands::Download { source } => download_torrent(source).await?,
-        Commands::Add { source } => add_torrent(source).await?,
+        Commands::Download { source, seed } => download_torrent(source, session, seed).await?,
+        Commands::Add { source } => add_torrent(source, session).await?,
         Commands::List => list_torrents(),
         Commands::Stats => show_stats(),
     }
@@ -60,10 +65,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn download_torrent(input: String) -> Result<(), Box<dyn std::error::Error>> {
-    let config = SessionConfig::default();
-    let session = Session::new(config);
-
+async fn download_torrent(
+    input: String,
+    session: Session,
+    seed: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let torrent_id = if input.starts_with("magnet:") {
         session.add_magnet(&input).await?
     } else {
@@ -76,7 +82,7 @@ async fn download_torrent(input: String) -> Result<(), Box<dyn std::error::Error
     let progress_bar = ProgressBar::new(100);
     progress_bar.set_style(
         ProgressStyle::with_template(
-            "{spinner:.green} [{elapsed_precise}] {msg} {wide_bar:.cyan/blue} {pos}/{len}% ({eta})",
+            "{spinner:.green} [{elapsed_precise}] {msg} {wide_bar:.cyan/blue} ({eta})",
         )
         .unwrap()
         .progress_chars("#>-"),
@@ -115,7 +121,9 @@ async fn download_torrent(input: String) -> Result<(), Box<dyn std::error::Error
                 match event {
                     SessionEvent::TorrentCompleted(id) if id == torrent_id => {
                         progress_bar.finish_with_message("Download completed!");
-                        break;
+                        if !seed {
+                            break;
+                        }
                     }
                     SessionEvent::TorrentError(id, err) if id == torrent_id => {
                         progress_bar.finish_with_message(format!("Error: {err}"));
@@ -125,20 +133,20 @@ async fn download_torrent(input: String) -> Result<(), Box<dyn std::error::Error
                 }
             }
 
-            _ = ticker.tick() => {}
+            _ = ticker.tick() => {
+                progress_bar.tick();
+            }
         }
     }
 
-    progress_bar.finish();
-    println!("Shutting down session...");
-    session.shutdown().await?;
+    if !seed {
+        session.shutdown().await?;
+    }
 
     Ok(())
 }
 
-async fn add_torrent(input: String) -> Result<(), Box<dyn std::error::Error>> {
-    let session = Session::new(SessionConfig::default());
-
+async fn add_torrent(input: String, session: Session) -> Result<(), Box<dyn std::error::Error>> {
     let torrent_id = if input.starts_with("magnet:") {
         session.add_magnet(&input).await?
     } else {
