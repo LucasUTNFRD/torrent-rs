@@ -429,9 +429,18 @@ impl SessionManager {
 
     /// Main entry point - runs the session manager loop.
     pub async fn start(mut self) {
-        let listener = TcpListener::bind(self.config.listen_addr())
-            .await
-            .expect("TODO");
+        let bind_addr = self.config.listen_addr();
+        let listener = match TcpListener::bind(bind_addr).await {
+            Ok(listener) => listener,
+            Err(error) => {
+                tracing::error!(
+                    "Failed to bind TCP listener on {:?}: {}. Shutting down session manager startup.",
+                    bind_addr,
+                    error
+                );
+                return;
+            }
+        };
 
         tracing::info!("Binded to {:?}", listener.local_addr());
 
