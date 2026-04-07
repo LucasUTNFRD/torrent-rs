@@ -2,7 +2,10 @@ use crate::{
     Direction, StorageBackend, TorrentProgress, TorrentState,
     bitfield::Bitfield,
     choker::Choker,
-    detail::{FileInfo, PeerSnapshot, TorrentDetail, TorrentMeta, TrackerState, TrackerStatus},
+    detail::{
+        FileInfo, PeerSnapshot, TorrentDetail, TorrentMeta, TrackerState, TrackerStatus,
+        TrackerStatusWithUrl,
+    },
     ema::EmaRate,
     events::{EventBus, SessionEvent},
     metadata::{Metadata, MetadataState},
@@ -200,7 +203,7 @@ pub enum TorrentMessage {
     },
     /// Query tracker statuses for UI/TUI
     GetTrackerStatuses {
-        resp: oneshot::Sender<Vec<TrackerStatus>>,
+        resp: oneshot::Sender<Vec<TrackerStatusWithUrl>>,
     },
     /// Update tracker status (from announce task)
     TrackerUpdate {
@@ -301,7 +304,6 @@ pub struct Torrent {
     metadata: Metadata,
     state: TorrentState,
     /// Tracker statuses, keyed by announce URL
-    // TODO: Use TrackerUrl instead of Url crate
     trackers: HashMap<Url, TrackerStatus>,
 
     tracker_client: Tracker,
@@ -395,9 +397,8 @@ impl Torrent {
                         .into_iter()
                         .map(|u| {
                             (
-                                u.clone(),
+                                u,
                                 TrackerStatus {
-                                    url: u.to_string(),
                                     tier: None,
                                     seeder_count: None,
                                     leecher_count: None,
@@ -461,12 +462,11 @@ impl Torrent {
         torrent_info
             .all_trackers()
             .into_iter()
-            .filter_map(|url| {
-                Url::parse(&url).ok().map(|u| {
+            .filter_map(|url_str| {
+                Url::parse(&url_str).ok().map(|u| {
                     (
-                        u.clone(),
+                        u,
                         TrackerStatus {
-                            url,
                             tier: None,
                             seeder_count: None,
                             leecher_count: None,
@@ -1231,7 +1231,14 @@ impl Torrent {
                 let _ = resp.send(snapshots);
             }
             TorrentMessage::GetTrackerStatuses { resp } => {
-                let statuses: Vec<TrackerStatus> = self.trackers.values().cloned().collect();
+                let statuses: Vec<TrackerStatusWithUrl> = self
+                    .trackers
+                    .iter()
+                    .map(|(url, tracker)| TrackerStatusWithUrl {
+                        url: url.to_string(),
+                        status: tracker.clone(),
+                    })
+                    .collect();
                 let _ = resp.send(statuses);
             }
             TorrentMessage::TrackerUpdate {
@@ -1330,9 +1337,15 @@ impl Torrent {
                             })
                             .collect();
 
-                        // Get live tracker statuses
-                        let trackers: Vec<TrackerStatus> =
-                            self.trackers.values().cloned().collect();
+                        // Get live tracker statuses with URLs
+                        let trackers: Vec<TrackerStatusWithUrl> = self
+                            .trackers
+                            .iter()
+                            .map(|(url, tracker)| TrackerStatusWithUrl {
+                                url: url.to_string(),
+                                status: tracker.clone(),
+                            })
+                            .collect();
 
                         let detail = TorrentDetail {
                             meta: m,
@@ -1718,7 +1731,6 @@ impl Torrent {
             let tracker = self.tracker_client.clone();
             let tx = discovered_peers_tx.clone();
             let torrent_tx = self.tx.clone();
-            let url_str = url.to_string();
             let url_clone = url.clone();
             let data = announce_data.clone();
             let cancel_token = self.cancel_token.clone();
@@ -1741,7 +1753,7 @@ impl Torrent {
                         _ = cancel_token.cancelled() => return,
                         _ = tokio::time::sleep(interval) => {}
                     }
-                    match tracker.announce(url_str.clone(), data.clone()).await {
+                    match tracker.announce(url_clone.clone(), data.clone()).await {
                         Ok(response) => {
                             interval = Duration::from_secs(response.interval.clamp(5, 300) as u64);
 

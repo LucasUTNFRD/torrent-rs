@@ -146,12 +146,12 @@ pub enum SessionCommand {
     },
     GetTrackerStatuses {
         id: TorrentId,
-        resp: oneshot::Sender<Result<Vec<TrackerStatus>, SessionError>>,
+        resp: oneshot::Sender<Result<Vec<TrackerStatusWithUrl>, SessionError>>,
     },
 }
 
 // Re-export detail types from detail module
-pub use crate::detail::{PeerSnapshot, TorrentDetail, TrackerStatus};
+pub use crate::detail::{PeerSnapshot, TorrentDetail, TrackerStatusWithUrl};
 
 /// Errors that can occur in session operations.
 #[derive(Debug, thiserror::Error)]
@@ -363,7 +363,10 @@ impl Session {
     }
 
     /// Get tracker statuses for a torrent
-    pub async fn get_trackers(&self, id: TorrentId) -> Result<Vec<TrackerStatus>, SessionError> {
+    pub async fn get_trackers(
+        &self,
+        id: TorrentId,
+    ) -> Result<Vec<TrackerStatusWithUrl>, SessionError> {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(SessionCommand::GetTrackerStatuses { id, resp: tx })

@@ -12,6 +12,7 @@ use tokio::{
     sync::{RwLock, oneshot},
     time::timeout,
 };
+use url::Url;
 
 use super::{AnnounceData, AnnounceResponse, TrackerError};
 
@@ -172,7 +173,7 @@ impl UdpClient {
 
     pub async fn announce(
         &self,
-        url: &str,
+        url: &Url,
         data: AnnounceData,
     ) -> Result<AnnounceResponse, TrackerError> {
         let addr = parse_udp_url(url)?;
@@ -263,9 +264,7 @@ impl UdpClient {
     }
 }
 
-fn parse_udp_url(url: &str) -> Result<SocketAddr, TrackerError> {
-    let url = url::Url::parse(url).map_err(|_| TrackerError::InvalidUrl(url.to_string()))?;
-
+fn parse_udp_url(url: &Url) -> Result<SocketAddr, TrackerError> {
     let host = url
         .host_str()
         .ok_or_else(|| TrackerError::InvalidUrl(url.to_string()))?;

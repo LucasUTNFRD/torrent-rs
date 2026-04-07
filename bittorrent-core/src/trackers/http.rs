@@ -21,10 +21,10 @@ impl HttpClient {
 
     pub async fn announce(
         &self,
-        url: String,
+        url: &Url,
         data: AnnounceData,
     ) -> Result<AnnounceResponse, TrackerError> {
-        let mut url = Url::parse(&url).map_err(TrackerError::UrlParse)?;
+        let mut url = url.clone();
 
         {
             let mut query = url.query_pairs_mut();

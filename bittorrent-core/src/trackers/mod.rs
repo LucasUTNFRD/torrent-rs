@@ -4,6 +4,7 @@ use bencode::BencodeError;
 use bittorrent_common::types::{InfoHash, PeerID};
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
+use url::Url;
 
 mod http;
 mod udp;
@@ -56,12 +57,12 @@ pub struct AnnounceResponse {
 
 enum TrackerCmd {
     Announce {
-        url: String,
+        url: Url,
         data: AnnounceData,
         responder: oneshot::Sender<Result<AnnounceResponse, TrackerError>>,
     },
     Scrape {
-        url: String,
+        url: Url,
         responder: oneshot::Sender<Result<ScrapeResponse, TrackerError>>,
     },
 }
@@ -127,7 +128,7 @@ impl Tracker {
 
     pub async fn announce(
         &self,
-        url: String,
+        url: Url,
         data: AnnounceData,
     ) -> Result<AnnounceResponse, TrackerError> {
         let (tx, rx) = oneshot::channel();
@@ -157,21 +158,26 @@ impl TrackerActor {
                     url,
                     data,
                     responder,
-                } => {
-                    if url.starts_with("udp://") {
+                } => match url.scheme() {
+                    "http" | "https" => {
+                        let client = http_client.clone();
+                        tokio::spawn(async move {
+                            let result = client.announce(&url, data).await;
+                            let _ = responder.send(result);
+                        });
+                    }
+                    "udp" => {
                         let client = udp_client.clone();
                         tokio::spawn(async move {
                             let result = client.announce(&url, data).await;
                             let _ = responder.send(result);
                         });
-                    } else {
-                        let client = http_client.clone();
-                        tokio::spawn(async move {
-                            let result = client.announce(url, data).await;
-                            let _ = responder.send(result);
-                        });
                     }
-                }
+                    _ => {
+                        let _ = responder
+                            .send(Err(TrackerError::InvalidScheme(url.scheme().to_string())));
+                    }
+                },
                 TrackerCmd::Scrape { url: _, responder } => {
                     let _ = responder.send(Err(TrackerError::InvalidUrl(
                         "scrape not implemented".to_string(),
