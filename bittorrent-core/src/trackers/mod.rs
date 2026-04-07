@@ -4,6 +4,7 @@ use bencode::BencodeError;
 use bittorrent_common::types::{InfoHash, PeerID};
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
+use tracing::{debug, error, info, instrument, warn};
 use url::Url;
 
 mod http;
@@ -107,30 +108,27 @@ pub struct Tracker {
 }
 
 impl Tracker {
+    #[instrument(skip_all)]
     pub fn new() -> Self {
+        info!("Creating new tracker client");
         let (tx, rx) = mpsc::channel::<TrackerCmd>(32);
         let tracker = Self { tx };
 
-        tokio::spawn(async move {
-            match udp::UdpClient::new().await {
-                Ok(udp_client) => {
-                    let actor = TrackerActor { rx };
-                    actor.run(udp_client).await;
-                }
-                Err(e) => {
-                    tracing::error!("Failed to create UDP client: {}", e);
-                }
-            }
+        let actor = TrackerActor { rx };
+        tokio::spawn(async {
+            actor.run().await;
         });
 
         tracker
     }
 
+    #[instrument(skip(self, data))]
     pub async fn announce(
         &self,
         url: Url,
         data: AnnounceData,
     ) -> Result<AnnounceResponse, TrackerError> {
+        debug!(url = %url, event = ?data.event, "Sending announce request");
         let (tx, rx) = oneshot::channel();
         let _ = self
             .tx
@@ -149,8 +147,20 @@ struct TrackerActor {
 }
 
 impl TrackerActor {
-    pub async fn run(mut self, udp_client: udp::UdpClient) {
+    #[instrument(skip_all)]
+    pub async fn run(mut self) {
+        info!("Starting tracker actor");
         let http_client = http::HttpClient::new();
+        let udp_client = match udp::UdpClient::new().await {
+            Ok(client) => {
+                info!("UDP tracker client initialized");
+                client
+            }
+            Err(e) => {
+                error!(error = %e, "Failed to start UDP client");
+                return;
+            }
+        };
 
         while let Some(cmd) = self.rx.recv().await {
             match cmd {
@@ -158,32 +168,62 @@ impl TrackerActor {
                     url,
                     data,
                     responder,
-                } => match url.scheme() {
-                    "http" | "https" => {
-                        let client = http_client.clone();
-                        tokio::spawn(async move {
-                            let result = client.announce(&url, data).await;
-                            let _ = responder.send(result);
-                        });
+                } => {
+                    debug!(url = %url, scheme = url.scheme(), "Processing announce command");
+                    match url.scheme() {
+                        "http" | "https" => {
+                            let client = http_client.clone();
+                            tokio::spawn(async move {
+                                debug!(url = %url, "Spawning HTTP announce task");
+                                let result = client.announce(&url, data).await;
+                                match &result {
+                                    Ok(resp) => info!(
+                                        url = %url,
+                                        peer_count = resp.peers.len(),
+                                        interval = resp.interval,
+                                        seeders = resp.seeders,
+                                        leechers = resp.leechers,
+                                        "HTTP announce successful"
+                                    ),
+                                    Err(e) => warn!(url = %url, error = %e, "HTTP announce failed"),
+                                }
+                                let _ = responder.send(result);
+                            });
+                        }
+                        "udp" => {
+                            let client = udp_client.clone();
+                            tokio::spawn(async move {
+                                debug!(url = %url, "Spawning UDP announce task");
+                                let result = client.announce(&url, data).await;
+                                match &result {
+                                    Ok(resp) => info!(
+                                        url = %url,
+                                        peer_count = resp.peers.len(),
+                                        interval = resp.interval,
+                                        seeders = resp.seeders,
+                                        leechers = resp.leechers,
+                                        "UDP announce successful"
+                                    ),
+                                    Err(e) => warn!(url = %url, error = %e, "UDP announce failed"),
+                                }
+                                let _ = responder.send(result);
+                            });
+                        }
+                        _ => {
+                            warn!(url = %url, scheme = url.scheme(), "Invalid tracker URL scheme");
+                            let _ = responder
+                                .send(Err(TrackerError::InvalidScheme(url.scheme().to_string())));
+                        }
                     }
-                    "udp" => {
-                        let client = udp_client.clone();
-                        tokio::spawn(async move {
-                            let result = client.announce(&url, data).await;
-                            let _ = responder.send(result);
-                        });
-                    }
-                    _ => {
-                        let _ = responder
-                            .send(Err(TrackerError::InvalidScheme(url.scheme().to_string())));
-                    }
-                },
+                }
                 TrackerCmd::Scrape { url: _, responder } => {
+                    warn!("Scrape command not implemented");
                     let _ = responder.send(Err(TrackerError::InvalidUrl(
                         "scrape not implemented".to_string(),
                     )));
                 }
             }
         }
+        info!("Tracker actor shut down");
     }
 }

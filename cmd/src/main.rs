@@ -52,7 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let metrics_addr = cli.metrics_addr.parse().unwrap();
     cmd::metrics::install(metrics_addr).expect("Failed to install metrics exporter");
 
-    let config = SessionConfig::builder().enable_port_mapping(true).build();
+    let config = SessionConfig::builder().enable_port_mapping(false).build();
     let session = Session::new(config);
 
     match cli.command {

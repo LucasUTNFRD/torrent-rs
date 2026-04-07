@@ -1735,7 +1735,7 @@ impl Torrent {
             let data = announce_data.clone();
             let cancel_token = self.cancel_token.clone();
             self.background_tasks.spawn(async move {
-                let mut interval = Duration::from_secs(30);
+                let mut interval: Duration;
                 // Initial status: Announcing
                 let _ = torrent_tx
                     .send(TorrentMessage::TrackerUpdate {
@@ -1748,11 +1748,6 @@ impl Torrent {
                     })
                     .await;
                 loop {
-                    tokio::select! {
-                        biased;
-                        _ = cancel_token.cancelled() => return,
-                        _ = tokio::time::sleep(interval) => {}
-                    }
                     match tracker.announce(url_clone.clone(), data.clone()).await {
                         Ok(response) => {
                             interval = Duration::from_secs(response.interval.clamp(5, 300) as u64);
@@ -1784,6 +1779,12 @@ impl Torrent {
                                 .await;
                             return; // Task ends on error
                         }
+                    }
+
+                    tokio::select! {
+                        biased;
+                        _ = cancel_token.cancelled() => return,
+                        _ = tokio::time::sleep(interval) => {}
                     }
                 }
             });
