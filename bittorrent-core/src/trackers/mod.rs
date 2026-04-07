@@ -1,15 +1,14 @@
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::net::SocketAddr;
 
 use bencode::BencodeError;
+use bittorrent_common::types::{InfoHash, PeerID};
 use thiserror::Error;
-use tokio::{
-    net::UdpSocket,
-    sync::{mpsc, oneshot},
-};
-use url::Url;
+use tokio::sync::{mpsc, oneshot};
 
+mod http;
 mod udp;
 
+#[derive(Debug, Clone)]
 pub enum Events {
     None,
     Completed,
@@ -17,38 +16,57 @@ pub enum Events {
     Stopped,
 }
 
-struct ClientCtx {}
+impl Events {
+    pub fn as_int(&self) -> i32 {
+        match self {
+            Events::None => 0,
+            Events::Completed => 1,
+            Events::Started => 2,
+            Events::Stopped => 3,
+        }
+    }
 
-enum TrackerCmd {
-    Announce(Request<AnnounceRequest, AnnounceResponse>),
-    Scrape(Request<ScrapeRequest, ScrapeResponse>),
+    pub fn as_str(&self) -> Option<&'static str> {
+        match self {
+            Events::None => None,
+            Events::Started => Some("started"),
+            Events::Stopped => Some("stopped"),
+            Events::Completed => Some("completed"),
+        }
+    }
 }
-struct AnnounceRequest {}
-struct AnnounceResponse {
-    /// A list of peer addresses (IP and port) obtained from the tracker.
-    /// These are potential peers for the client to connect to for downloading/uploading data.
+
+#[derive(Debug, Clone)]
+pub struct AnnounceData {
+    pub info_hash: InfoHash,
+    pub peer_id: PeerID,
+    pub port: u16,
+    pub uploaded: i64,
+    pub downloaded: i64,
+    pub left: i64,
+    pub event: Events,
+}
+
+pub struct AnnounceResponse {
     pub peers: Vec<SocketAddr>,
-    /// The recommended interval (in seconds) that the client should wait
-    /// before sending its next regular announce request to the tracker.
     pub interval: i32,
-    /// The number of "leechers" (incomplete peers) currently in the swarm for this torrent.
     pub leechers: i32,
-    /// The number of "seeders" (complete peers) currently in the swarm for this torrent.
     pub seeders: i32,
 }
 
-struct ScrapeRequest {}
+enum TrackerCmd {
+    Announce {
+        url: String,
+        data: AnnounceData,
+        responder: oneshot::Sender<Result<AnnounceResponse, TrackerError>>,
+    },
+    Scrape {
+        url: String,
+        responder: oneshot::Sender<Result<ScrapeResponse, TrackerError>>,
+    },
+}
+
 struct ScrapeResponse {}
-
-struct Request<TrackerRequest, TrackerResponse> {
-    url: TrackerUrl,
-    request: TrackerRequest,
-    responder: oneshot::Sender<Result<TrackerResponse, TrackerError>>,
-}
-
-struct Tracker {
-    tx: mpsc::Sender<TrackerCmd>,
-}
 
 #[derive(Debug, Error)]
 pub enum TrackerError {
@@ -82,50 +100,46 @@ pub enum TrackerError {
     UnableToConnect,
 }
 
-enum TrackerUrl {
-    Udp(String),
-    Http(String),
+#[derive(Clone)]
+pub struct Tracker {
+    tx: mpsc::Sender<TrackerCmd>,
 }
 
 impl Tracker {
     pub fn new() -> Self {
         let (tx, rx) = mpsc::channel::<TrackerCmd>(32);
-        Self { tx }
+        let tracker = Self { tx };
+
+        tokio::spawn(async move {
+            match udp::UdpClient::new().await {
+                Ok(udp_client) => {
+                    let actor = TrackerActor { rx };
+                    actor.run(udp_client).await;
+                }
+                Err(e) => {
+                    tracing::error!("Failed to create UDP client: {}", e);
+                }
+            }
+        });
+
+        tracker
     }
 
     pub async fn announce(
         &self,
-        url: TrackerUrl,
-        request: AnnounceRequest,
+        url: String,
+        data: AnnounceData,
     ) -> Result<AnnounceResponse, TrackerError> {
         let (tx, rx) = oneshot::channel();
         let _ = self
             .tx
-            .send(TrackerCmd::Announce(Request {
+            .send(TrackerCmd::Announce {
                 url,
-                request,
+                data,
                 responder: tx,
-            }))
+            })
             .await;
-        rx.await.unwrap()
-    }
-
-    /// Send scrape request to a tracker and wait for response.
-    pub async fn scrape(
-        &self,
-        url: TrackerUrl,
-        request: ScrapeRequest,
-    ) -> Result<ScrapeResponse, TrackerError> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(TrackerCmd::Scrape(Request {
-                url,
-                request,
-                responder: tx,
-            }))
-            .await;
-        rx.await.unwrap()
+        rx.await.map_err(|_| TrackerError::UnableToConnect)?
     }
 }
 
@@ -134,50 +148,36 @@ struct TrackerActor {
 }
 
 impl TrackerActor {
-    pub async fn run(mut self) {
-        let http_client = HttpClient(
-            reqwest::Client::builder()
-                .gzip(true)
-                .timeout(Duration::from_secs(25))
-                .build()
-                .inspect_err(|e| tracing::warn!(?e, "proceeding without http client"))
-                .unwrap(),
-        );
-
-        let udp_socket = {
-            let socket = UdpSocket::bind("0:0").await.unwrap();
-            Arc::new(socket)
-        };
+    pub async fn run(mut self, udp_client: udp::UdpClient) {
+        let http_client = http::HttpClient::new();
 
         while let Some(cmd) = self.rx.recv().await {
             match cmd {
-                TrackerCmd::Announce(req) => match req.url {
-                    TrackerUrl::Udp(url) => {}
-                    TrackerUrl::Http(url) => {
+                TrackerCmd::Announce {
+                    url,
+                    data,
+                    responder,
+                } => {
+                    if url.starts_with("udp://") {
+                        let client = udp_client.clone();
+                        tokio::spawn(async move {
+                            let result = client.announce(&url, data).await;
+                            let _ = responder.send(result);
+                        });
+                    } else {
                         let client = http_client.clone();
                         tokio::spawn(async move {
-                            let result = client.announce(url, req.request).await;
-                            req.responder.send(result)
+                            let result = client.announce(url, data).await;
+                            let _ = responder.send(result);
                         });
                     }
-                },
-                TrackerCmd::Scrape(req) => {}
+                }
+                TrackerCmd::Scrape { url: _, responder } => {
+                    let _ = responder.send(Err(TrackerError::InvalidUrl(
+                        "scrape not implemented".to_string(),
+                    )));
+                }
             }
         }
-    }
-}
-
-#[derive(Clone)]
-struct HttpClient(reqwest::Client);
-
-impl HttpClient {
-    async fn announce(
-        &self,
-        url: String,
-        req: AnnounceRequest,
-    ) -> Result<AnnounceResponse, TrackerError> {
-        // check url
-        let url = Url::parse(&url).expect("Url parse failure"); // TODO: Create
-        let announce_url = todo!();
     }
 }

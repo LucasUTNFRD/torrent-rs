@@ -26,7 +26,6 @@ use tokio::{
 
 use mainline_dht::DhtHandler;
 use tokio_util::sync::CancellationToken;
-use tracker_client::TrackerHandler;
 
 use crate::{
     SessionConfig, TorrentProgress,
@@ -36,6 +35,7 @@ use crate::{
     protocol::peer_wire::Handshake,
     storage::{DiskStorage, DiskStorageRuntime, disk_storage_factory},
     torrent::{Torrent, TorrentContext, TorrentError, TorrentMessage, TorrentSource},
+    trackers::Tracker,
     types::TorrentId,
     verify_torrent_file::verify_content,
 };
@@ -444,7 +444,7 @@ impl SessionManager {
 
         tracing::info!("Binded to {:?}", listener.local_addr());
 
-        let tracker = Arc::new(TrackerHandler::new(*CLIENT_ID));
+        // let tracker = Arc::new(TrackerHandler::new(*CLIENT_ID));
 
         let dht = self.initialize_dht().await;
 
@@ -466,14 +466,16 @@ impl SessionManager {
             );
         }
 
+        let tracker = Tracker::new();
+
         while let Some(cmd) = self.rx.recv().await {
             match cmd {
                 SessionCommand::AddTorrent { info, resp } => {
-                    let result = self.handle_add_torrent(info, &tracker, dht.as_ref());
+                    let result = self.handle_add_torrent(info, tracker.clone(), dht.as_ref());
                     let _ = resp.send(result);
                 }
                 SessionCommand::AddMagnet { magnet, resp } => {
-                    let result = self.handle_add_magnet(magnet, &tracker, dht.as_ref());
+                    let result = self.handle_add_magnet(magnet, tracker.clone(), dht.as_ref());
                     let _ = resp.send(result);
                 }
                 SessionCommand::SeedFile {
@@ -492,7 +494,7 @@ impl SessionManager {
                     .unwrap_or(false);
 
                     let result = if is_valid {
-                        self.handle_seed_torrent(info, content_dir, &tracker, dht.as_ref())
+                        self.handle_seed_torrent(info, content_dir, tracker.clone(), dht.as_ref())
                             .await
                     } else {
                         // TODO: Given metadata did not match with contents
@@ -504,7 +506,7 @@ impl SessionManager {
                 SessionCommand::SeedTorrentUnchecked { info, resp } => {
                     // Skip verify_content — used for simulation with mock storage
                     let result = self
-                        .handle_seed_torrent(info, PathBuf::new(), &tracker, dht.as_ref())
+                        .handle_seed_torrent(info, PathBuf::new(), tracker.clone(), dht.as_ref())
                         .await;
                     let _ = resp.send(result);
                 }
@@ -617,7 +619,7 @@ impl SessionManager {
         &self,
         metainfo: TorrentInfo,
         content_dir: PathBuf,
-        tracker: &Arc<TrackerHandler>,
+        tracker: Tracker,
         dht: Option<&Arc<DhtHandler>>,
     ) -> Result<TorrentId, SessionError> {
         let info_hash = metainfo.info_hash;
@@ -644,6 +646,7 @@ impl SessionManager {
             event_bus: self.event_bus.clone(),
             unchoke_slots: self.config.unchoke_slots.get() as usize,
             max_concurrent_peers: self.config.max_connections_per_torrent.get() as usize,
+            listening_port: self.config.listen_interface.port,
         };
 
         let (torrent, tx, progress_rx) = Torrent::new(
@@ -685,7 +688,7 @@ impl SessionManager {
     fn handle_add_torrent(
         &self,
         metainfo: TorrentInfo,
-        tracker: &Arc<TrackerHandler>,
+        tracker: Tracker,
         dht: Option<&Arc<DhtHandler>>,
     ) -> Result<TorrentId, SessionError> {
         let info_hash = metainfo.info_hash;
@@ -712,6 +715,7 @@ impl SessionManager {
             event_bus: self.event_bus.clone(),
             unchoke_slots: self.config.unchoke_slots.get() as usize,
             max_concurrent_peers: self.config.max_connections_per_torrent.get() as usize,
+            listening_port: self.config.listen_interface.port,
         };
 
         let (torrent, tx, progress_rx) =
@@ -748,7 +752,7 @@ impl SessionManager {
     fn handle_add_magnet(
         &self,
         magnet: Magnet,
-        tracker: &Arc<TrackerHandler>,
+        tracker: Tracker,
         dht: Option<&Arc<DhtHandler>>,
     ) -> Result<TorrentId, SessionError> {
         let info_hash = magnet.info_hash().ok_or(SessionError::InvalidMagnet)?;
@@ -786,6 +790,7 @@ impl SessionManager {
             event_bus: self.event_bus.clone(),
             unchoke_slots: self.config.unchoke_slots.get() as usize,
             max_concurrent_peers: self.config.max_connections_per_torrent.get() as usize,
+            listening_port: self.config.listen_interface.port,
         };
 
         let (torrent, tx, progress_rx) = Torrent::new(ctx, TorrentSource::Magnet(magnet));
