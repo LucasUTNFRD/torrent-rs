@@ -122,6 +122,10 @@ pub struct SessionConfigBuilder {
     peer_id: Option<PeerID>,
 }
 
+// SAFETY: literals are non-zero.
+const DEFAULT_CONNECTION_LIMIT: NonZeroU32 = NonZeroU32::new(200).unwrap();
+const DEFAULT_UNCHOKE_SLOTS: NonZeroU32 = NonZeroU32::new(4).unwrap();
+
 impl Default for SessionConfigBuilder {
     fn default() -> Self {
         Self {
@@ -131,9 +135,8 @@ impl Default for SessionConfigBuilder {
             enable_dht: true,
             dht_bootstrap_nodes: None,
             enable_port_mapping: false,
-            // SAFETY: literals are non-zero.
-            max_connections_per_torrent: NonZeroU32::new(50).unwrap(),
-            unchoke_slots: NonZeroU32::new(4).unwrap(),
+            max_connections_per_torrent: DEFAULT_CONNECTION_LIMIT,
+            unchoke_slots: DEFAULT_UNCHOKE_SLOTS,
             peer_timeout: Duration::from_secs(120),
             peer_id: None,
         }
