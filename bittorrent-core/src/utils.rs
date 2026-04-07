@@ -1,12 +1,16 @@
-pub fn format_speed(bits_per_second: u64) -> String {
-    if bits_per_second < 1_000 {
-        format!("{} bps", bits_per_second)
-    } else if bits_per_second < 1_000_000 {
-        format!("{:.1} Kbps", bits_per_second as f64 / 1_000.0)
-    } else if bits_per_second < 1_000_000_000 {
-        format!("{:.2} Mbps", bits_per_second as f64 / 1_000_000.0)
+pub fn format_speed(bytes_per_second: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+
+    if bytes_per_second < KB {
+        format!("{} B/s", bytes_per_second)
+    } else if bytes_per_second < MB {
+        format!("{:.1} KiB/s", bytes_per_second as f64 / KB as f64)
+    } else if bytes_per_second < GB {
+        format!("{:.2} MiB/s", bytes_per_second as f64 / MB as f64)
     } else {
-        format!("{:.2} Gbps", bits_per_second as f64 / 1_000_000_000.0)
+        format!("{:.2} GiB/s", bytes_per_second as f64 / GB as f64)
     }
 }
 

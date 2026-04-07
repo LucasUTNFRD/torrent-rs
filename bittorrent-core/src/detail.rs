@@ -130,8 +130,6 @@ pub struct PeerSnapshot {
 /// Status of a tracker for a torrent.
 #[derive(Debug, Clone)]
 pub struct TrackerStatus {
-    /// Tracker announce URL
-    pub url: String,
     /// Tracker tier (lower = higher priority, None if unknown)
     pub tier: Option<usize>,
     /// Number of seeders reported by tracker (if known)
@@ -144,6 +142,15 @@ pub struct TrackerStatus {
     pub status: TrackerState,
     /// Last error message (if any)
     pub last_error: Option<String>,
+}
+
+/// Tracker status with URL, for external API/UI consumption.
+#[derive(Debug, Clone)]
+pub struct TrackerStatusWithUrl {
+    /// Tracker announce URL
+    pub url: String,
+    /// Tracker status details
+    pub status: TrackerStatus,
 }
 
 /// Connection direction for a peer.
@@ -180,6 +187,6 @@ pub struct TorrentDetail {
     pub files: Vec<FileInfo>,
     /// Connected peers
     pub peers: Vec<PeerSnapshot>,
-    /// Tracker statuses  
-    pub trackers: Vec<TrackerStatus>,
+    /// Tracker statuses with URLs
+    pub trackers: Vec<TrackerStatusWithUrl>,
 }

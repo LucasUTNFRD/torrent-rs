@@ -15,7 +15,6 @@ rand.workspace = true
 url = "2.5.4"
 urlencoding = "2.1.3"
 bencode = { path = "../bencode" }
-tracker-client = { path = "../tracker-client/" }
 sha1 = "0.10"
 bytes = "1.10.1"
 tokio-util = { version = "0.7.15", features = ["codec"] }
@@ -30,6 +29,7 @@ serde = { version = "1.0", features = ["derive"] }
 metrics.workspace = true
 igd-next = { version = "0.17.0", features = ["aio_tokio"] }
 netdev = "0.35"
+reqwest = { version = "0.13", features = ["gzip"], default-features = false }
 
 [dev-dependencies]
 async-trait = "0.1"

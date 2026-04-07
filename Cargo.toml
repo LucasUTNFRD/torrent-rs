@@ -6,7 +6,6 @@ members = [
   "cmd",
   "magnet-uri",
   "mainline-dht",
-  "tracker-client",
   "tui",
 ]
 

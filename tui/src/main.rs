@@ -724,6 +724,7 @@ fn render_peers(f: &mut Frame, area: Rect, app: &App) {
                 DirectionSnapshot::Outbound => "Outgoing",
             };
             Row::new(vec![
+                Cell::from(fmt_rate(p.info.upload_rate)).style(Style::default().fg(Color::Green)),
                 Cell::from(ul_state),
                 Cell::from(fmt_rate(p.info.download_rate)).style(Style::default().fg(Color::Blue)),
                 Cell::from(dl_state),
@@ -739,6 +740,7 @@ fn render_peers(f: &mut Frame, area: Rect, app: &App) {
         .collect();
 
     let widths = [
+        Constraint::Length(9),  // Up
         Constraint::Length(10), // UL State
         Constraint::Length(9),  // Down
         Constraint::Length(10), // DL State
@@ -752,6 +754,7 @@ fn render_peers(f: &mut Frame, area: Rect, app: &App) {
     ];
 
     let header = Row::new([
+        "Up",
         "UL State",
         "Down",
         "DL State",
@@ -790,7 +793,7 @@ fn render_trackers(f: &mut Frame, area: Rect, app: &App) {
         .trackers
         .iter()
         .map(|t| {
-            let status_style = match t.status {
+            let status_style = match t.status.status {
                 TrackerState::Ok => Style::default().fg(Color::Green),
                 TrackerState::Error => Style::default().fg(Color::Red),
                 TrackerState::Announcing => Style::default().fg(Color::Yellow),
@@ -798,9 +801,9 @@ fn render_trackers(f: &mut Frame, area: Rect, app: &App) {
             };
             Row::new(vec![
                 Cell::from(t.url.clone()),
-                Cell::from(format!("{:?}", t.status)).style(status_style),
-                Cell::from(t.peers_received.to_string()),
-                Cell::from(t.last_error.as_deref().unwrap_or("—").to_string())
+                Cell::from(format!("{:?}", t.status.status)).style(status_style),
+                Cell::from(t.status.peers_received.to_string()),
+                Cell::from(t.status.last_error.as_deref().unwrap_or("—").to_string())
                     .style(Style::default().fg(Color::Red)),
             ])
         })

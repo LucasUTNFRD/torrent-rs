@@ -1,5 +1,6 @@
 use bittorrent_core::{
-    FileInfo, PeerSnapshot, Session, TorrentMeta, TorrentProgress, TrackerStatus, types::TorrentId,
+    FileInfo, PeerSnapshot, Session, TorrentMeta, TorrentProgress, TrackerStatusWithUrl,
+    types::TorrentId,
 };
 use ratatui::widgets::TableState;
 use std::{collections::HashMap, fmt::Display};
@@ -50,7 +51,7 @@ pub struct DetailCache {
     pub meta: Option<TorrentMeta>,
     pub files: Vec<FileInfo>,
     pub peers: Vec<PeerSnapshot>,
-    pub trackers: Vec<TrackerStatus>,
+    pub trackers: Vec<TrackerStatusWithUrl>,
     pub files_table_state: std::cell::Cell<TableState>,
     pub peers_table_state: std::cell::Cell<TableState>,
 }
