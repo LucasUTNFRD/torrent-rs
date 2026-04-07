@@ -1714,31 +1714,62 @@ impl Torrent {
             },
         };
 
-        // Spawn one task per tracker
         for (url, _status) in self.trackers.iter() {
             let tracker = self.tracker_client.clone();
             let tx = discovered_peers_tx.clone();
-            let url = url.clone();
+            let torrent_tx = self.tx.clone();
+            let url_str = url.to_string();
+            let url_clone = url.clone();
             let data = announce_data.clone();
             let cancel_token = self.cancel_token.clone();
             self.background_tasks.spawn(async move {
-                let mut interval = Duration::from_secs(30); // Initial fallback
-
+                let mut interval = Duration::from_secs(30);
+                // Initial status: Announcing
+                let _ = torrent_tx
+                    .send(TorrentMessage::TrackerUpdate {
+                        url: url_clone.clone(),
+                        status: TrackerState::Announcing,
+                        seeder_count: None,
+                        leecher_count: None,
+                        peers_received: 0,
+                        error: None,
+                    })
+                    .await;
                 loop {
                     tokio::select! {
                         biased;
                         _ = cancel_token.cancelled() => return,
                         _ = tokio::time::sleep(interval) => {}
                     }
-                    match tracker.announce(url.to_string(), data.clone()).await {
+                    match tracker.announce(url_str.clone(), data.clone()).await {
                         Ok(response) => {
                             interval = Duration::from_secs(response.interval.clamp(5, 300) as u64);
+
+                            let _ = torrent_tx
+                                .send(TorrentMessage::TrackerUpdate {
+                                    url: url_clone.clone(),
+                                    status: TrackerState::Ok,
+                                    seeder_count: Some(response.seeders as u32),
+                                    leecher_count: Some(response.leechers as u32),
+                                    peers_received: response.peers.len() as u32,
+                                    error: None,
+                                })
+                                .await;
                             if !response.peers.is_empty() {
                                 let _ = tx.send(response.peers).await;
                             }
                         }
                         Err(e) => {
-                            tracing::warn!("Tracker {} failed: {}", url, e);
+                            let _ = torrent_tx
+                                .send(TorrentMessage::TrackerUpdate {
+                                    url: url_clone.clone(),
+                                    status: TrackerState::Error,
+                                    seeder_count: None,
+                                    leecher_count: None,
+                                    peers_received: 0,
+                                    error: Some(e.to_string()),
+                                })
+                                .await;
                             return; // Task ends on error
                         }
                     }
