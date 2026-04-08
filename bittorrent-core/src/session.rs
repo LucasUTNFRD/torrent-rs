@@ -34,7 +34,7 @@ use crate::{
     net::TcpListener,
     protocol::peer_wire::Handshake,
     storage::{DiskStorage, DiskStorageRuntime, disk_storage_factory},
-    torrent::{Torrent, SesssionContext, TorrentError, TorrentMessage, TorrentSource},
+    torrent::{SesssionContext, Torrent, TorrentError, TorrentMessage, TorrentSource},
     trackers::Tracker,
     verify_torrent_file::verify_content,
 };
@@ -445,8 +445,6 @@ impl SessionManager {
         };
 
         tracing::info!("Binded to {:?}", listener.local_addr());
-
-        // let tracker = Arc::new(TrackerHandler::new(*CLIENT_ID));
 
         let dht = self.initialize_dht().await;
 

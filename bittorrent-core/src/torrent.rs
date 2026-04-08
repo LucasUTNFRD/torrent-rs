@@ -53,7 +53,7 @@ const CHANNEL_SIZE: usize = 1024;
 
 /// Session-level context shared across all torrents.
 /// Contains resources and configuration that are identical for every torrent in a session.
-#[derive(Clone )]
+#[derive(Clone)]
 pub struct SesssionContext {
     pub peer_id: PeerID,
     pub tracker_client: Tracker,
@@ -297,7 +297,7 @@ const MIN_RECONNECT_TIME: Duration = Duration::from_secs(60);
 type ConnectionResult = (Result<Option<Bitfield>, ConnectionError>, Pid);
 
 pub struct Torrent {
-    session_ctx:SesssionContext,
+    session_ctx: SesssionContext,
     info_hash: InfoHash,
 
     /// metadata and metadata state of the torrent
@@ -305,7 +305,6 @@ pub struct Torrent {
     state: TorrentState,
     /// Tracker statuses, keyed by announce URL
     trackers: HashMap<Url, TrackerStatus>,
-
 
     metrics: Arc<Metrics>,
     peers: HashMap<Pid, PeerHandle>,
@@ -328,7 +327,6 @@ pub struct Torrent {
     choker: Choker,
 
     bitfield: Bitfield,
-
 
     /// Custom content directory for seeding (None for leeching)
     content_dir: Option<PathBuf>,
@@ -512,7 +510,7 @@ impl Torrent {
 
         (
             Self {
-                session_ctx:ctx.clone(),
+                session_ctx: ctx.clone(),
                 info_hash,
                 metadata,
                 state,
@@ -680,8 +678,10 @@ impl Torrent {
         pid: Pid,
         result: Result<Option<Bitfield>, ConnectionError>,
     ) {
-        // Get peer_addr before cleanup (clean_up_peer removes from self.peers)
-        let peer_addr = self.peers.get(&pid).map(|h| h.peer_addr);
+        let peer_info = self.peers.get(&pid).map(|h| {
+            let info = h.info.read().unwrap();
+            (h.peer_addr, info.source)
+        });
 
         match result {
             Ok(bitfield) => {
@@ -691,23 +691,20 @@ impl Torrent {
             Err(e) => {
                 warn!("Peer {} connection error: {}", pid, e);
 
-                if let Some(addr) = peer_addr {
-                    // Self-connection should be banned permanently
-                    if matches!(e, ConnectionError::SelfConnection) {
+                match (peer_info, &e) {
+                    (Some((addr, _)), ConnectionError::SelfConnection) => {
                         self.known_peers.remove(&addr);
                         debug!("Peer {} banned (self-connection)", addr);
-                    } else if e.is_transient() {
-                        self.schedule_retry(addr, &e);
-                    } else {
-                        // Non-transient error: record failure but don't re-add to pending
+                    }
+                    (Some((addr, Direction::Outbound)), e) if e.is_transient() => {
+                        self.schedule_retry(addr, e);
+                    }
+                    (Some((addr, Direction::Inbound)), e) if e.is_transient() => {
                         if let Some(state) = self.known_peers.get_mut(&addr) {
-                            state.record_failure(&e);
-                            debug!(
-                                "Peer {} failed {} time(s), not retrying (non-transient)",
-                                addr, state.failcount
-                            );
+                            state.record_failure(e);
                         }
                     }
+                    _ => {}
                 }
 
                 self.clean_up_peer(pid, None);
@@ -746,6 +743,9 @@ impl Torrent {
         remote_peer_id: PeerID,
         dht_enabled: bool,
     ) {
+        self.known_peers
+            .entry(remote_addr)
+            .or_insert_with(PeerConnectionState::new);
         let pid = Pid(PEER_COUNTER.fetch_add(1, Ordering::Relaxed));
         let (tx, rx) = mpsc::channel(512);
         let info = Arc::new(RwLock::new(PeerInfo::new(*CLIENT_ID, Direction::Inbound)));
@@ -889,8 +889,9 @@ impl Torrent {
 
         match &self.metadata {
             Metadata::TorrentFile(torrent_info) => {
-                if let Err(e) = self.session_ctx.
-                    storage
+                if let Err(e) = self
+                    .session_ctx
+                    .storage
                     .add_torrent(self.info_hash, torrent_info.info.clone())
                     .await
                 {
@@ -907,7 +908,12 @@ impl Torrent {
                 metadata_state: MetadataState::Complete(info),
                 ..
             } => {
-                if let Err(e) = self.session_ctx.storage.add_torrent(self.info_hash, info.clone()).await {
+                if let Err(e) = self
+                    .session_ctx
+                    .storage
+                    .add_torrent(self.info_hash, info.clone())
+                    .await
+                {
                     tracing::error!("Failed to register torrent with storage: {}", e);
                     return;
                 }
@@ -916,8 +922,9 @@ impl Torrent {
                 self.piece_mananger = Some(PieceManager::new(info.clone()));
 
                 if let Some((_, torrent_bytes)) = self.metadata.to_torrent_file() {
-                    let torrent_path = 
-                        self.session_ctx.torrents_dir
+                    let torrent_path = self
+                        .session_ctx
+                        .torrents_dir
                         .join(format!("{}.torrent", self.info_hash));
                     if let Err(e) = std::fs::write(&torrent_path, &torrent_bytes) {
                         tracing::warn!(
@@ -950,7 +957,8 @@ impl Torrent {
             }
         };
 
-        if let Err(e) = self.session_ctx
+        if let Err(e) = self
+            .session_ctx
             .storage
             .add_seed(self.info_hash, info.clone(), content_dir.clone())
             .await
@@ -970,7 +978,12 @@ impl Torrent {
                     return Ok(());
                 };
 
-                match self.session_ctx.storage.read_block(self.info_hash, block_info).await {
+                match self
+                    .session_ctx
+                    .storage
+                    .read_block(self.info_hash, block_info)
+                    .await
+                {
                     Ok(block) => {
                         let block_len = block.data.len() as u64;
                         if let Err(e) = peer
@@ -1167,6 +1180,15 @@ impl Torrent {
                 peer_id,
                 dht_enabled,
             } => {
+                if self.peers.len() >= self.session_ctx.max_concurrent_peers {
+                    tracing::debug!(
+                        peers = self.peers.len(),
+                        limit = self.session_ctx.max_concurrent_peers,
+                        "Rejecting inbound connection: at capacity"
+                    );
+                    // Drop stream - closes the TCP Connection
+                    return Ok(());
+                }
                 self.spawn_inbound_connection(
                     stream,
                     remote_addr,
@@ -1399,7 +1421,8 @@ impl Torrent {
 
         // Verify piece hash
         let valid = match self
-            .session_ctx.storage
+            .session_ctx
+            .storage
             .verify_piece(torrent_id, piece_index, piece.clone())
             .await
         {
@@ -1411,7 +1434,8 @@ impl Torrent {
                     e
                 );
                 let _ = self
-                    .session_ctx.event_bus
+                    .session_ctx
+                    .event_bus
                     .torrent_tx
                     .send(crate::events::torrent::TorrentEvent::HashFailed { piece_index });
                 self.piece_mananger
@@ -1431,7 +1455,8 @@ impl Torrent {
             );
             counters::piece_failed();
             let _ = self
-                .session_ctx.event_bus
+                .session_ctx
+                .event_bus
                 .torrent_tx
                 .send(crate::events::torrent::TorrentEvent::HashFailed { piece_index });
             self.piece_mananger
@@ -1461,8 +1486,9 @@ impl Torrent {
 
         // Write piece to disk
         tracing::debug!("GOING TO WRITE PIECE");
-        if let Err(e) = 
-            self.session_ctx.storage
+        if let Err(e) = self
+            .session_ctx
+            .storage
             .write_piece(torrent_id, piece_index, piece)
             .await
         {
@@ -1505,7 +1531,8 @@ impl Torrent {
                 },
             );
             let _ = self
-                .session_ctx.event_bus
+                .session_ctx
+                .event_bus
                 .torrent_tx
                 .send(crate::events::torrent::TorrentEvent::TorrentFinished);
 
@@ -1515,7 +1542,8 @@ impl Torrent {
                 info!("Torrent Download Completed");
             }
             let _ = self
-                .session_ctx.event_bus
+                .session_ctx
+                .event_bus
                 .session_tx
                 .send(SessionEvent::TorrentCompleted(self.info_hash));
         }
@@ -1540,9 +1568,8 @@ impl Torrent {
 
             self.broadcast_to_peers(PeerMessage::HaveMetadata(info));
             let _ = self
-                .session_ctx. event_bus
-
-
+                .session_ctx
+                .event_bus
                 .session_tx
                 .send(SessionEvent::MetadataFetched(self.info_hash));
         }
@@ -1559,13 +1586,12 @@ impl Torrent {
         }
 
         if let Some(peer_handle) = self.peers.remove(&pid) {
-            let _ = self
-                .session_ctx.event_bus
-                .peer_tx
-                .send(crate::events::peer::PeerEvent::Disconnected {
+            let _ = self.session_ctx.event_bus.peer_tx.send(
+                crate::events::peer::PeerEvent::Disconnected {
                     addr: peer_handle.peer_addr,
                     reason: crate::events::peer::DisconnectReason::Other("Clean up".to_string()),
-                });
+                },
+            );
         }
 
         let requests: Vec<_> = self
@@ -1594,12 +1620,11 @@ impl Torrent {
         for pid in to_choke {
             self.send_to_peer(pid, PeerMessage::SendChoke);
             if let Some(peer) = self.peers.get(&pid) {
-                let _ = self
-                    .session_ctx.event_bus
-                    .peer_tx
-                    .send(crate::events::peer::PeerEvent::Choked {
+                let _ = self.session_ctx.event_bus.peer_tx.send(
+                    crate::events::peer::PeerEvent::Choked {
                         addr: peer.peer_addr,
-                    });
+                    },
+                );
             }
             tracing::debug!("Periodic choker: choked peer {pid:?}");
         }
@@ -1608,12 +1633,11 @@ impl Torrent {
         for pid in to_unchoke {
             self.send_to_peer(pid, PeerMessage::SendUnchoke);
             if let Some(peer) = self.peers.get(&pid) {
-                let _ = self
-                    .session_ctx.event_bus
-                    .peer_tx
-                    .send(crate::events::peer::PeerEvent::Unchoked {
+                let _ = self.session_ctx.event_bus.peer_tx.send(
+                    crate::events::peer::PeerEvent::Unchoked {
                         addr: peer.peer_addr,
-                    });
+                    },
+                );
             }
             tracing::debug!("Periodic choker: unchoked peer {pid:?}");
         }

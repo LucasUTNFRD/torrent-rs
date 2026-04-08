@@ -8,8 +8,8 @@ use std::{
 use anyhow::Result;
 use app::{App, DetailTab, View};
 use bittorrent_core::{
-    Direction as DirectionSnapshot, Session, SessionConfig, TorrentProgress, TorrentState,
-    TrackerState, events::SessionEvent, InfoHash,
+    Direction as DirectionSnapshot, InfoHash, Session, SessionConfig, TorrentProgress,
+    TorrentState, TrackerState, events::SessionEvent,
 };
 
 use crossterm::{
