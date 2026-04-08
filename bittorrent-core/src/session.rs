@@ -34,9 +34,8 @@ use crate::{
     net::TcpListener,
     protocol::peer_wire::Handshake,
     storage::{DiskStorage, DiskStorageRuntime, disk_storage_factory},
-    torrent::{Torrent, TorrentContext, TorrentError, TorrentMessage, TorrentSource},
+    torrent::{Torrent, SesssionContext, TorrentError, TorrentMessage, TorrentSource},
     trackers::Tracker,
-    types::TorrentId,
     verify_torrent_file::verify_content,
 };
 
@@ -103,49 +102,49 @@ impl SessionBuilder {
 pub enum SessionCommand {
     AddTorrent {
         info: TorrentInfo,
-        resp: oneshot::Sender<Result<TorrentId, SessionError>>,
+        resp: oneshot::Sender<Result<InfoHash, SessionError>>,
     },
     AddMagnet {
         magnet: Magnet,
-        resp: oneshot::Sender<Result<TorrentId, SessionError>>,
+        resp: oneshot::Sender<Result<InfoHash, SessionError>>,
     },
     RemoveTorrent {
-        id: TorrentId,
+        id: InfoHash,
         resp: oneshot::Sender<Result<(), SessionError>>,
     },
     SeedFile {
         info: TorrentInfo,
         content_dir: PathBuf,
-        resp: oneshot::Sender<Result<TorrentId, SessionError>>,
+        resp: oneshot::Sender<Result<InfoHash, SessionError>>,
     },
     /// Seed a torrent without verifying content on disk.
     /// Used for simulation testing where storage is mock/in-memory.
     SeedTorrentUnchecked {
         info: TorrentInfo,
-        resp: oneshot::Sender<Result<TorrentId, SessionError>>,
+        resp: oneshot::Sender<Result<InfoHash, SessionError>>,
     },
     GetMetrics {
-        id: TorrentId,
+        id: InfoHash,
         resp: oneshot::Sender<Result<watch::Receiver<TorrentProgress>, SessionError>>,
     },
     Shutdown {
         resp: oneshot::Sender<Result<(), SessionError>>,
     },
     ConnectPeer {
-        id: TorrentId,
+        id: InfoHash,
         addr: std::net::SocketAddr,
         resp: oneshot::Sender<Result<(), SessionError>>,
     },
     GetTorrentDetail {
-        id: TorrentId,
+        id: InfoHash,
         resp: oneshot::Sender<Result<TorrentDetail, SessionError>>,
     },
     GetPeerSnapshots {
-        id: TorrentId,
+        id: InfoHash,
         resp: oneshot::Sender<Result<Vec<PeerSnapshot>, SessionError>>,
     },
     GetTrackerStatuses {
-        id: TorrentId,
+        id: InfoHash,
         resp: oneshot::Sender<Result<Vec<TrackerStatusWithUrl>, SessionError>>,
     },
 }
@@ -166,10 +165,10 @@ pub enum SessionError {
     SessionClosed,
 
     #[error("Torrent not found: {0}")]
-    TorrentNotFound(TorrentId),
+    TorrentNotFound(InfoHash),
 
     #[error("Torrent already exists: {0}")]
-    TorrentAlreadyExists(TorrentId),
+    TorrentAlreadyExists(InfoHash),
 
     #[error("Invalid magnet URI: missing info hash")]
     InvalidMagnet,
@@ -178,7 +177,7 @@ pub enum SessionError {
     NoPeerDiscovery,
 
     #[error("Metadata not yet available for torrent: {0}. Waiting for peer connection...")]
-    MetadataPending(TorrentId),
+    MetadataPending(InfoHash),
 }
 
 impl Session {
@@ -195,8 +194,8 @@ impl Session {
 
     /// Add a torrent from a .torrent file.
     ///
-    /// Returns the ``TorrentId`` on success.
-    pub async fn add_torrent(&self, path: impl AsRef<Path>) -> Result<TorrentId, SessionError> {
+    /// Returns the ``InfoHash`` on success.
+    pub async fn add_torrent(&self, path: impl AsRef<Path>) -> Result<InfoHash, SessionError> {
         let metainfo = parse_torrent_from_file(path.as_ref())?;
         let (tx, rx) = oneshot::channel();
         self.tx
@@ -212,7 +211,7 @@ impl Session {
     ///
     /// This is primarily useful for simulation testing where torrent
     /// metadata is generated programmatically.
-    pub async fn add_torrent_info(&self, info: TorrentInfo) -> Result<TorrentId, SessionError> {
+    pub async fn add_torrent_info(&self, info: TorrentInfo) -> Result<InfoHash, SessionError> {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(SessionCommand::AddTorrent { info, resp: tx })
@@ -222,8 +221,8 @@ impl Session {
 
     /// Add a torrent from a magnet URI.
     ///
-    /// Returns the ``TorrentId``  on success.
-    pub async fn add_magnet(&self, uri: impl AsRef<str>) -> Result<TorrentId, SessionError> {
+    /// Returns the ``InfoHash``  on success.
+    pub async fn add_magnet(&self, uri: impl AsRef<str>) -> Result<InfoHash, SessionError> {
         let magnet = Magnet::parse(uri)?;
         let (tx, rx) = oneshot::channel();
         self.tx
@@ -235,7 +234,7 @@ impl Session {
     /// Remove a torrent from the session.
     ///
     /// This stops the torrent but does not delete downloaded files.
-    pub async fn remove_torrent(&self, id: TorrentId) -> Result<(), SessionError> {
+    pub async fn remove_torrent(&self, id: InfoHash) -> Result<(), SessionError> {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(SessionCommand::RemoveTorrent { id, resp: tx })
@@ -248,7 +247,7 @@ impl Session {
         &self,
         info: TorrentInfo,
         content_dir: PathBuf,
-    ) -> Result<TorrentId, SessionError> {
+    ) -> Result<InfoHash, SessionError> {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(SessionCommand::SeedFile {
@@ -268,7 +267,7 @@ impl Session {
     pub async fn seed_torrent_unchecked(
         &self,
         info: TorrentInfo,
-    ) -> Result<TorrentId, SessionError> {
+    ) -> Result<InfoHash, SessionError> {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(SessionCommand::SeedTorrentUnchecked { info, resp: tx })
@@ -302,7 +301,7 @@ impl Session {
     /// Subscribe to metrics for a specific torrent.
     pub async fn subscribe_torrent(
         &self,
-        id: TorrentId,
+        id: InfoHash,
     ) -> Result<watch::Receiver<TorrentProgress>, SessionError> {
         let (tx, rx) = oneshot::channel();
         self.tx
@@ -311,7 +310,7 @@ impl Session {
         rx.await.map_err(|_| SessionError::SessionClosed)?
     }
 
-    pub async fn wait_for_completion(&self, id: TorrentId) -> Result<(), SessionError> {
+    pub async fn wait_for_completion(&self, id: InfoHash) -> Result<(), SessionError> {
         let mut rx = self.subscribe();
         while let Ok(event) = rx.recv().await {
             match event {
@@ -331,7 +330,7 @@ impl Session {
     /// simulation testing where peers are known ahead of time.
     pub async fn connect_peer(
         &self,
-        id: TorrentId,
+        id: InfoHash,
         addr: std::net::SocketAddr,
     ) -> Result<(), SessionError> {
         let (tx, rx) = oneshot::channel();
@@ -345,7 +344,7 @@ impl Session {
         self.subscribe()
     }
 
-    pub async fn get_torrent_meta(&self, id: TorrentId) -> Result<TorrentDetail, SessionError> {
+    pub async fn get_torrent_meta(&self, id: InfoHash) -> Result<TorrentDetail, SessionError> {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(SessionCommand::GetTorrentDetail { id, resp: tx })
@@ -354,7 +353,7 @@ impl Session {
     }
 
     /// Get peer connection snapshots for a torrent
-    pub async fn get_peers(&self, id: TorrentId) -> Result<Vec<PeerSnapshot>, SessionError> {
+    pub async fn get_peers(&self, id: InfoHash) -> Result<Vec<PeerSnapshot>, SessionError> {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(SessionCommand::GetPeerSnapshots { id, resp: tx })
@@ -365,7 +364,7 @@ impl Session {
     /// Get tracker statuses for a torrent
     pub async fn get_trackers(
         &self,
-        id: TorrentId,
+        id: InfoHash,
     ) -> Result<Vec<TrackerStatusWithUrl>, SessionError> {
         let (tx, rx) = oneshot::channel();
         self.tx
@@ -601,7 +600,7 @@ impl SessionManager {
     /// Handles the common pattern of: lookup entry, clone channel, send message, await response.
     async fn query_torrent<T>(
         &self,
-        id: TorrentId,
+        id: InfoHash,
         make_msg: impl FnOnce(oneshot::Sender<T>) -> TorrentMessage,
     ) -> Result<T, SessionError> {
         let (tx, rx) = oneshot::channel();
@@ -624,7 +623,7 @@ impl SessionManager {
         content_dir: PathBuf,
         tracker: Tracker,
         dht: Option<&Arc<DhtHandler>>,
-    ) -> Result<TorrentId, SessionError> {
+    ) -> Result<InfoHash, SessionError> {
         let info_hash = metainfo.info_hash;
 
         // Check for duplicates
@@ -640,7 +639,7 @@ impl SessionManager {
         let name = metainfo.info.mode.name().to_string();
         let size_bytes = u64::try_from(metainfo.info.total_size()).expect("size is non-negative");
 
-        let ctx = TorrentContext {
+        let ctx = SesssionContext {
             peer_id: self.peer_id,
             tracker_client: tracker.clone(),
             dht_client: dht.cloned(),
@@ -693,7 +692,7 @@ impl SessionManager {
         metainfo: TorrentInfo,
         tracker: Tracker,
         dht: Option<&Arc<DhtHandler>>,
-    ) -> Result<TorrentId, SessionError> {
+    ) -> Result<InfoHash, SessionError> {
         let info_hash = metainfo.info_hash;
 
         // Check for duplicates
@@ -709,7 +708,7 @@ impl SessionManager {
         let name = metainfo.info.mode.name().to_string();
         let size_bytes = u64::try_from(metainfo.info.total_size()).expect("size is non-negative");
 
-        let ctx = TorrentContext {
+        let ctx = SesssionContext {
             peer_id: self.peer_id,
             tracker_client: tracker.clone(),
             dht_client: dht.cloned(),
@@ -757,7 +756,7 @@ impl SessionManager {
         magnet: Magnet,
         tracker: Tracker,
         dht: Option<&Arc<DhtHandler>>,
-    ) -> Result<TorrentId, SessionError> {
+    ) -> Result<InfoHash, SessionError> {
         let info_hash = magnet.info_hash().ok_or(SessionError::InvalidMagnet)?;
 
         // Check for duplicates
@@ -784,7 +783,7 @@ impl SessionManager {
             .clone()
             .unwrap_or_else(|| info_hash.to_string());
 
-        let ctx = TorrentContext {
+        let ctx = SesssionContext {
             peer_id: self.peer_id,
             tracker_client: tracker.clone(),
             dht_client: dht.cloned(),
@@ -826,7 +825,7 @@ impl SessionManager {
         Ok(info_hash)
     }
 
-    async fn handle_remove_torrent(&self, id: TorrentId) -> Result<(), SessionError> {
+    async fn handle_remove_torrent(&self, id: InfoHash) -> Result<(), SessionError> {
         let entry = {
             let mut sessions = self.sessions.write().unwrap();
             sessions.remove(&id)

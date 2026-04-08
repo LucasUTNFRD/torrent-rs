@@ -53,7 +53,8 @@ const CHANNEL_SIZE: usize = 1024;
 
 /// Session-level context shared across all torrents.
 /// Contains resources and configuration that are identical for every torrent in a session.
-pub struct TorrentContext {
+#[derive(Clone )]
+pub struct SesssionContext {
     pub peer_id: PeerID,
     pub tracker_client: Tracker,
     pub dht_client: Option<Arc<DhtHandler>>,
@@ -63,7 +64,6 @@ pub struct TorrentContext {
     pub unchoke_slots: usize,
     pub max_concurrent_peers: usize,
     pub listening_port: u16,
-    // Port
 }
 
 /// Source material for creating a torrent.
@@ -297,8 +297,8 @@ const MIN_RECONNECT_TIME: Duration = Duration::from_secs(60);
 type ConnectionResult = (Result<Option<Bitfield>, ConnectionError>, Pid);
 
 pub struct Torrent {
+    session_ctx:SesssionContext,
     info_hash: InfoHash,
-    peer_id: PeerID,
 
     /// metadata and metadata state of the torrent
     metadata: Metadata,
@@ -306,9 +306,6 @@ pub struct Torrent {
     /// Tracker statuses, keyed by announce URL
     trackers: HashMap<Url, TrackerStatus>,
 
-    tracker_client: Tracker,
-    dht_client: Option<Arc<DhtHandler>>,
-    storage: DiskStorage,
 
     metrics: Arc<Metrics>,
     peers: HashMap<Pid, PeerHandle>,
@@ -320,7 +317,6 @@ pub struct Torrent {
     peer_cancel_token: CancellationToken,
 
     // Torrent-local per-peer state that PeerHandle no longer holds
-    // TODO: Maybe move this into PeerInfo field
     pending_requests: HashMap<Pid, Vec<BlockInfo>>,
 
     // channels
@@ -333,8 +329,6 @@ pub struct Torrent {
 
     bitfield: Bitfield,
 
-    /// Directory for persisting .torrent files
-    torrents_dir: PathBuf,
 
     /// Custom content directory for seeding (None for leeching)
     content_dir: Option<PathBuf>,
@@ -343,17 +337,11 @@ pub struct Torrent {
     ul_rate: EmaRate,
     dl_rate: EmaRate,
     progress_tx: watch::Sender<TorrentProgress>,
-    /// Event sender for lifecycle changes
-    event_bus: EventBus,
 
     /// Cancellation token for the torrent (from session)
     cancel_token: CancellationToken,
     /// Background tasks (tracker announce, DHT discovery)
-    // TODO: Rename this to peer_discovery_task
     background_tasks: JoinSet<()>,
-    /// Maximum concurrent peer connections.
-    max_concurrent_peers: usize,
-    port: u16,
 }
 
 const ALPHA: f64 = 0.5;
@@ -364,7 +352,7 @@ impl Torrent {
     /// The `ctx` provides session-level configuration shared across all torrents.
     /// The `source` determines the torrent type and initial state.
     pub fn new(
-        ctx: TorrentContext,
+        ctx: SesssionContext,
         source: TorrentSource,
     ) -> (
         Self,
@@ -483,7 +471,7 @@ impl Torrent {
     /// Build the Torrent instance with progress metrics computed from state
     #[allow(clippy::too_many_arguments)]
     fn build_with_progress(
-        ctx: TorrentContext,
+        ctx: SesssionContext,
         info_hash: InfoHash,
         metadata: Metadata,
         trackers: HashMap<Url, TrackerStatus>,
@@ -524,15 +512,11 @@ impl Torrent {
 
         (
             Self {
-                port: ctx.listening_port,
+                session_ctx:ctx.clone(),
                 info_hash,
-                peer_id: ctx.peer_id,
                 metadata,
                 state,
                 trackers,
-                tracker_client: ctx.tracker_client,
-                dht_client: ctx.dht_client,
-                storage: ctx.storage,
                 metrics: Arc::new(Metrics::default()),
                 peers: HashMap::default(),
                 tx: tx.clone(),
@@ -540,10 +524,8 @@ impl Torrent {
                 bitfield,
                 piece_mananger: None,
                 choker: Choker::new(ctx.unchoke_slots),
-                torrents_dir: ctx.torrents_dir,
                 content_dir,
                 progress_tx,
-                event_bus: ctx.event_bus,
                 pending_requests: HashMap::new(),
                 ul_rate: EmaRate::new(ALPHA),
                 dl_rate: EmaRate::new(ALPHA),
@@ -553,12 +535,12 @@ impl Torrent {
                 known_peers: HashMap::new(),
                 pending_peers: VecDeque::new(),
                 background_tasks: JoinSet::new(),
-                max_concurrent_peers: ctx.max_concurrent_peers,
             },
             tx,
             progress_rx,
         )
     }
+
     async fn initialize_state(&mut self) {
         match self.state {
             TorrentState::Downloading | TorrentState::Checking | TorrentState::FetchingMetadata => {
@@ -621,7 +603,7 @@ impl Torrent {
 
     fn try_spawn_pending_peers(&mut self) {
         let now = Instant::now();
-        while self.peer_tasks.len() < self.max_concurrent_peers {
+        while self.peer_tasks.len() < self.session_ctx.max_concurrent_peers {
             let Some(peer_addr) = self.pending_peers.pop_front() else {
                 break;
             };
@@ -823,7 +805,7 @@ impl Torrent {
         let peer_token = self.peer_cancel_token.child_token();
 
         let info_hash = self.info_hash;
-        let local_peer_id = self.peer_id;
+        let local_peer_id = self.session_ctx.peer_id;
 
         self.peer_tasks.spawn(async move {
             let result = async {
@@ -907,8 +889,8 @@ impl Torrent {
 
         match &self.metadata {
             Metadata::TorrentFile(torrent_info) => {
-                if let Err(e) = self
-                    .storage
+                if let Err(e) = self.session_ctx.
+                    storage
                     .add_torrent(self.info_hash, torrent_info.info.clone())
                     .await
                 {
@@ -925,7 +907,7 @@ impl Torrent {
                 metadata_state: MetadataState::Complete(info),
                 ..
             } => {
-                if let Err(e) = self.storage.add_torrent(self.info_hash, info.clone()).await {
+                if let Err(e) = self.session_ctx.storage.add_torrent(self.info_hash, info.clone()).await {
                     tracing::error!("Failed to register torrent with storage: {}", e);
                     return;
                 }
@@ -934,8 +916,8 @@ impl Torrent {
                 self.piece_mananger = Some(PieceManager::new(info.clone()));
 
                 if let Some((_, torrent_bytes)) = self.metadata.to_torrent_file() {
-                    let torrent_path = self
-                        .torrents_dir
+                    let torrent_path = 
+                        self.session_ctx.torrents_dir
                         .join(format!("{}.torrent", self.info_hash));
                     if let Err(e) = std::fs::write(&torrent_path, &torrent_bytes) {
                         tracing::warn!(
@@ -968,7 +950,7 @@ impl Torrent {
             }
         };
 
-        if let Err(e) = self
+        if let Err(e) = self.session_ctx
             .storage
             .add_seed(self.info_hash, info.clone(), content_dir.clone())
             .await
@@ -988,7 +970,7 @@ impl Torrent {
                     return Ok(());
                 };
 
-                match self.storage.read_block(self.info_hash, block_info).await {
+                match self.session_ctx.storage.read_block(self.info_hash, block_info).await {
                     Ok(block) => {
                         let block_len = block.data.len() as u64;
                         if let Err(e) = peer
@@ -1169,7 +1151,7 @@ impl Torrent {
                 }
             }
             TorrentMessage::DhtAddNode { node_addr } => {
-                if let Some(dht_client) = self.dht_client.as_ref() {
+                if let Some(dht_client) = self.session_ctx.dht_client.as_ref() {
                     let dht_client = dht_client.clone();
                     self.background_tasks.spawn(async move {
                         if let Err(e) = dht_client.try_add_node(node_addr).await {
@@ -1417,7 +1399,7 @@ impl Torrent {
 
         // Verify piece hash
         let valid = match self
-            .storage
+            .session_ctx.storage
             .verify_piece(torrent_id, piece_index, piece.clone())
             .await
         {
@@ -1429,7 +1411,7 @@ impl Torrent {
                     e
                 );
                 let _ = self
-                    .event_bus
+                    .session_ctx.event_bus
                     .torrent_tx
                     .send(crate::events::torrent::TorrentEvent::HashFailed { piece_index });
                 self.piece_mananger
@@ -1449,7 +1431,7 @@ impl Torrent {
             );
             counters::piece_failed();
             let _ = self
-                .event_bus
+                .session_ctx.event_bus
                 .torrent_tx
                 .send(crate::events::torrent::TorrentEvent::HashFailed { piece_index });
             self.piece_mananger
@@ -1479,8 +1461,8 @@ impl Torrent {
 
         // Write piece to disk
         tracing::debug!("GOING TO WRITE PIECE");
-        if let Err(e) = self
-            .storage
+        if let Err(e) = 
+            self.session_ctx.storage
             .write_piece(torrent_id, piece_index, piece)
             .await
         {
@@ -1516,14 +1498,14 @@ impl Torrent {
                 TorrentState::Downloading => crate::metrics::progress::TorrentState::Downloading,
                 _ => prev.clone(),
             };
-            let _ = self.event_bus.torrent_tx.send(
+            let _ = self.session_ctx.event_bus.torrent_tx.send(
                 crate::events::torrent::TorrentEvent::StateChanged {
                     prev: prev_metric,
                     next: crate::metrics::progress::TorrentState::Seeding,
                 },
             );
             let _ = self
-                .event_bus
+                .session_ctx.event_bus
                 .torrent_tx
                 .send(crate::events::torrent::TorrentEvent::TorrentFinished);
 
@@ -1533,7 +1515,7 @@ impl Torrent {
                 info!("Torrent Download Completed");
             }
             let _ = self
-                .event_bus
+                .session_ctx.event_bus
                 .session_tx
                 .send(SessionEvent::TorrentCompleted(self.info_hash));
         }
@@ -1558,7 +1540,9 @@ impl Torrent {
 
             self.broadcast_to_peers(PeerMessage::HaveMetadata(info));
             let _ = self
-                .event_bus
+                .session_ctx. event_bus
+
+
                 .session_tx
                 .send(SessionEvent::MetadataFetched(self.info_hash));
         }
@@ -1576,7 +1560,7 @@ impl Torrent {
 
         if let Some(peer_handle) = self.peers.remove(&pid) {
             let _ = self
-                .event_bus
+                .session_ctx.event_bus
                 .peer_tx
                 .send(crate::events::peer::PeerEvent::Disconnected {
                     addr: peer_handle.peer_addr,
@@ -1611,7 +1595,7 @@ impl Torrent {
             self.send_to_peer(pid, PeerMessage::SendChoke);
             if let Some(peer) = self.peers.get(&pid) {
                 let _ = self
-                    .event_bus
+                    .session_ctx.event_bus
                     .peer_tx
                     .send(crate::events::peer::PeerEvent::Choked {
                         addr: peer.peer_addr,
@@ -1625,7 +1609,7 @@ impl Torrent {
             self.send_to_peer(pid, PeerMessage::SendUnchoke);
             if let Some(peer) = self.peers.get(&pid) {
                 let _ = self
-                    .event_bus
+                    .session_ctx.event_bus
                     .peer_tx
                     .send(crate::events::peer::PeerEvent::Unchoked {
                         addr: peer.peer_addr,
@@ -1676,7 +1660,6 @@ impl Torrent {
             eta_seconds: None,
         };
 
-        info!("SENDING METRICS");
         let _ = self.progress_tx.send(metrics);
     }
 
@@ -1710,14 +1693,12 @@ impl Torrent {
         }
     }
 
-    // TODO: WE need to carry the Port from config
-
     // If we are seeding a file we are not interest in receiving peers
     fn announce(&mut self, discovered_peers_tx: &mpsc::Sender<Vec<SocketAddr>>) {
         let announce_data = AnnounceData {
             info_hash: self.info_hash,
-            peer_id: self.peer_id,
-            port: self.port,
+            peer_id: self.session_ctx.peer_id,
+            port: self.session_ctx.listening_port,
             uploaded: self.metrics.uploaded_bytes.load(Ordering::Relaxed) as i64,
             downloaded: self.metrics.downloaded_bytes.load(Ordering::Relaxed) as i64,
             left: 0,
@@ -1728,7 +1709,7 @@ impl Torrent {
         };
 
         for (url, _status) in self.trackers.iter() {
-            let tracker = self.tracker_client.clone();
+            let tracker = self.session_ctx.tracker_client.clone();
             let tx = discovered_peers_tx.clone();
             let torrent_tx = self.tx.clone();
             let url_clone = url.clone();
@@ -1794,12 +1775,12 @@ impl Torrent {
 
         // Start announce periodically task
 
-        if let Some(dht) = self.dht_client.clone()
+        if let Some(dht) = self.session_ctx.dht_client.clone()
             && self.state != TorrentState::Seeding
         {
             let info_hash = self.info_hash;
             let discovered_peers_tx = discovered_peers_tx.clone();
-            let port = self.port;
+            let port = self.session_ctx.listening_port;
             let cancel_token = self.cancel_token.clone();
 
             self.background_tasks.spawn(async move {

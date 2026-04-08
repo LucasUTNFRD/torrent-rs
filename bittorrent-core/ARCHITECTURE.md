@@ -66,12 +66,12 @@ The crate provides a complete BitTorrent client implementation with:
 ```rust
 impl Session {
     pub fn new(config: SessionConfig) -> Self
-    pub async fn add_torrent(&self, path: impl AsRef<Path>) -> Result<TorrentId, SessionError>
-    pub async fn add_magnet(&self, uri: impl AsRef<str>) -> Result<TorrentId, SessionError>
-    pub async fn remove_torrent(&self, id: TorrentId) -> Result<(), SessionError>
+    pub async fn add_torrent(&self, path: impl AsRef<Path>) -> Result<InfoHash, SessionError>
+    pub async fn add_magnet(&self, uri: impl AsRef<str>) -> Result<InfoHash, SessionError>
+    pub async fn remove_torrent(&self, id: InfoHash) -> Result<(), SessionError>
     pub async fn shutdown(&self) -> Result<(), SessionError>
     pub fn subscribe(&self) -> broadcast::Receiver<SessionEvent>
-    pub async fn subscribe_torrent(&self, id: TorrentId) -> Result<watch::Receiver<TorrentProgress>, SessionError>
+    pub async fn subscribe_torrent(&self, id: InfoHash) -> Result<watch::Receiver<TorrentProgress>, SessionError>
 }
 ```
 
@@ -268,7 +268,7 @@ impl Session {
 - `SessionConfig` with sensible defaults
 
 ### 3. Type Safety
-- `TorrentId` = `InfoHash` for stable identification
+- `InfoHash` = `InfoHash` for stable identification
 - `Pid` for per-torrent peer identification
 - Strongly typed message enums
 
@@ -290,7 +290,7 @@ pub use session::{Session, SessionBuilder, SessionError};
 pub use session_config::SessionConfig;
 
 // Types
-pub use types::TorrentId;
+pub use types::InfoHash;
 pub use detail::{
     Direction, FileInfo, PeerSnapshot, TorrentDetail, 
     TorrentMeta, TrackerState, TrackerStatus,

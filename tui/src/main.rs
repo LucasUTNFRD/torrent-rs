@@ -9,7 +9,7 @@ use anyhow::Result;
 use app::{App, DetailTab, View};
 use bittorrent_core::{
     Direction as DirectionSnapshot, Session, SessionConfig, TorrentProgress, TorrentState,
-    TrackerState, events::SessionEvent, types::TorrentId,
+    TrackerState, events::SessionEvent, InfoHash,
 };
 
 use crossterm::{
@@ -31,7 +31,7 @@ use tokio::time;
 enum DialogState {
     None,
     AddTorrent(String),
-    ConfirmRemove(TorrentId),
+    ConfirmRemove(InfoHash),
 }
 
 #[tokio::main]
@@ -527,7 +527,7 @@ fn torrent_row(progress: &TorrentProgress) -> Line<'static> {
     Line::from(spans)
 }
 
-fn render_detail_view(f: &mut Frame, area: Rect, app: &App, id: TorrentId, tab: DetailTab) {
+fn render_detail_view(f: &mut Frame, area: Rect, app: &App, id: InfoHash, tab: DetailTab) {
     let chunks = Layout::vertical([
         Constraint::Length(2), // tab bar
         Constraint::Min(0),    // tab content
@@ -558,7 +558,7 @@ fn render_tab_bar(f: &mut Frame, area: Rect, active: DetailTab) {
     f.render_widget(tabs, area);
 }
 
-fn render_overview(f: &mut Frame, area: Rect, app: &App, _id: TorrentId) {
+fn render_overview(f: &mut Frame, area: Rect, app: &App, _id: InfoHash) {
     let chunks = Layout::vertical([
         Constraint::Min(0),    // Details block
         Constraint::Length(7), // bottom row

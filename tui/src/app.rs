@@ -1,6 +1,5 @@
 use bittorrent_core::{
-    FileInfo, PeerSnapshot, Session, TorrentMeta, TorrentProgress, TrackerStatusWithUrl,
-    types::TorrentId,
+    FileInfo, InfoHash, PeerSnapshot, Session, TorrentMeta, TorrentProgress, TrackerStatusWithUrl,
 };
 use ratatui::widgets::TableState;
 use std::{collections::HashMap, fmt::Display};
@@ -14,7 +13,7 @@ pub enum Status {
 
 pub enum View {
     List,
-    Detail { id: TorrentId, tab: DetailTab },
+    Detail { id: InfoHash, tab: DetailTab },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -71,9 +70,9 @@ impl Default for DetailCache {
 
 pub struct App {
     pub session: Session,
-    receivers: HashMap<TorrentId, watch::Receiver<TorrentProgress>>,
-    pub progress: HashMap<TorrentId, TorrentProgress>,
-    pub torrent_order: Vec<TorrentId>,
+    receivers: HashMap<InfoHash, watch::Receiver<TorrentProgress>>,
+    pub progress: HashMap<InfoHash, TorrentProgress>,
+    pub torrent_order: Vec<InfoHash>,
     pub selected_index: usize,
     pub should_quit: bool,
     pub status: Status,
@@ -131,7 +130,7 @@ impl App {
         self.should_quit = true;
     }
 
-    pub async fn add_torrent_to_state(&mut self, id: TorrentId) -> anyhow::Result<()> {
+    pub async fn add_torrent_to_state(&mut self, id: InfoHash) -> anyhow::Result<()> {
         if !self.receivers.contains_key(&id) {
             let rx = self.session.subscribe_torrent(id).await?;
             self.progress.insert(id, rx.borrow().clone());
@@ -141,7 +140,7 @@ impl App {
         Ok(())
     }
 
-    pub fn remove_torrent_from_state(&mut self, id: TorrentId) {
+    pub fn remove_torrent_from_state(&mut self, id: InfoHash) {
         self.receivers.remove(&id);
         self.progress.remove(&id);
         self.torrent_order.retain(|&x| x != id);
@@ -150,7 +149,7 @@ impl App {
             .min(self.torrent_order.len().saturating_sub(1));
     }
 
-    pub fn selected_id(&self) -> Option<TorrentId> {
+    pub fn selected_id(&self) -> Option<InfoHash> {
         self.torrent_order.get(self.selected_index).copied()
     }
 
@@ -162,7 +161,7 @@ impl App {
         self.status = Status::Info(msg.into());
     }
 
-    pub async fn open_detail(&mut self, id: TorrentId) -> anyhow::Result<()> {
+    pub async fn open_detail(&mut self, id: InfoHash) -> anyhow::Result<()> {
         let detail = self.session.get_torrent_meta(id).await?;
         self.detail = DetailCache {
             meta: Some(detail.meta),

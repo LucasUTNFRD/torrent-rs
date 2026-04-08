@@ -17,7 +17,7 @@ Architecture: Headless daemon (`cmd/`) with multiple frontends (`tui/`, CLI plan
 **Key Entry Points**:
 - `Session` / `SessionBuilder` - Main API for controlling the daemon
 - `SessionConfig` - Configuration (listen addr, DHT, paths)
-- `TorrentId` (= `InfoHash`) - Stable torrent identifier
+- `InfoHash` (= `InfoHash`) - Stable torrent identifier
 - `StorageBackend` trait - Pluggable storage (FS, memory, test)
 
 **Architecture Pattern**: Actor model
@@ -163,7 +163,7 @@ InfoHash  // 20-byte SHA-1 hash, identifies torrents
 PeerId    // 20-byte client identifier
 
 // Used throughout
-TorrentId = InfoHash  // In bittorrent-core
+InfoHash = InfoHash  // In bittorrent-core
 info_hash: InfoHash   // In mainline-dht for get_peers
 info_hash: [u8; 20]   // In tracker-client AnnounceParams
 ```
