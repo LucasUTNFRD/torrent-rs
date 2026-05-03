@@ -1,0 +1,17 @@
+[package]
+name = "dht"
+version = "0.1.0"
+license.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]
+bytes = "1.11.1"
+futures = "0.3.32"
+socket2 = "0.6.3"
+thiserror.workspace = true
+tokio.workspace=  true
+tracing.workspace = true
+
+[lints]
+workspace = true
