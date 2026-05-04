@@ -1,8 +1,14 @@
-use crate::error::DhtError;
+use crate::{
+    error::DhtError,
+    message::{KrpcMessage, MessageBody, Query, Response, TransactionId},
+    routing_table::{InsertResult, NodeId, RoutingTable},
+};
+use bittorrent_common::types::InfoHash;
 use bytes::{Bytes, BytesMut};
 use futures::{StreamExt, stream::FuturesUnordered};
 use std::{
-    net::{Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
+    collections::HashMap,
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4},
     sync::Arc,
 };
 use tokio::{
@@ -10,11 +16,10 @@ use tokio::{
     sync::{mpsc, oneshot},
 };
 
-/// Default port for DHT.
 const DEFAULT_PORT: u16 = 6881;
 
-// BEP-32 requires max 1024-byte payloads:
 const MAX_PAYLOAD: usize = 2048;
+
 #[derive(Debug, Clone)]
 pub struct DhtConfig {
     pub port: u16,
@@ -35,8 +40,6 @@ impl Default for DhtConfig {
     }
 }
 
-/// A DHT bootstrap node (host + port, unresolved).
-/// Kept as strings because DNS resolution happens at connection time.
 #[derive(Debug, Clone)]
 pub struct BootstrapNode {
     pub host: String,
@@ -118,13 +121,16 @@ pub struct Dht {
 
 enum DhtCommand {
     Announce {
-        info_hash: [u8; 20],
+        info_hash: InfoHash,
         peer_port: u16,
         tx: oneshot::Sender<Vec<SocketAddr>>,
     },
     FindPeer {
-        info_hash: [u8; 20],
+        info_hash: InfoHash,
         tx: oneshot::Sender<Vec<SocketAddr>>,
+    },
+    AddNode {
+        addr: SocketAddr,
     },
 }
 
@@ -140,7 +146,7 @@ impl Dht {
 
     pub async fn announce(
         &self,
-        info_hash: [u8; 20],
+        info_hash: InfoHash,
         peer_port: u16,
     ) -> Result<Vec<SocketAddr>, DhtError> {
         let (tx, rx) = oneshot::channel();
@@ -151,47 +157,49 @@ impl Dht {
                 tx,
             })
             .await
-            .map_err(op)?;
-        rx.await.map_err(op)
+            .map_err(|_| DhtError::Cancelled)?;
+        rx.await.map_err(|_| DhtError::Cancelled)
     }
 
-    pub async fn find_peers(&self, info_hash: [u8; 20]) -> Result<Vec<SocketAddr>, DhtError> {
+    pub async fn find_peers(&self, info_hash: InfoHash) -> Result<Vec<SocketAddr>, DhtError> {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(DhtCommand::FindPeer { info_hash, tx })
             .await
-            .map_err(op)?;
-        rx.await.map_err(op)
+            .map_err(|_| DhtError::Cancelled)?;
+        rx.await.map_err(|_| DhtError::Cancelled)
     }
 }
 
 struct DhtActor {
     rx: mpsc::Receiver<DhtCommand>,
     node_id: NodeId,
-    dht_v4: DhtV4,
-    dht_v6: Option<DhtV6>,
+
+    // The two DHTs are independent, meaning that no IPv6 data is stored in the IPv4 DHT, and, conversely, no IPv4 data is stored in the IPv6 DHT. A node wishing to participate in both DHTs must maintain two distinct routing tables, one for IPv4 and one for IPv6.
+    socket_v4: Option<Arc<UdpSocket>>,
+    socket_v6: Option<Arc<UdpSocket>>,
+    routing_table: RoutingTable,
+
+    inflight: HashMap<InflightKey, InflightEntry>,
+    next_tid: u16,
 }
 
-// The two DHTs are independent, meaning that no IPv6 data is stored in the IPv4 DHT, and, conversely, no IPv4 data is stored in the IPv6 DHT. A node wishing to participate in both DHTs must maintain two distinct routing tables, one for IPv4 and one for IPv6.
-struct DhtV4 {
-    bucket: Vec<Bucket<SocketAddrV4>>,
-    pub socket: Arc<UdpSocket>,
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct InflightKey {
+    addr: SocketAddr,
+    t: u16,
 }
 
-impl DhtV4 {
-    pub async fn new(port: u16) -> Result<Self, DhtError> {
-        let s = UdpSocket::bind(format!("0.0.0.0:{port}")).await?;
-
-        Ok(Self {
-            socket: s.into(),
-            bucket: Vec::with_capacity(128),
-        })
-    }
+struct InflightEntry {
+    query_kind: QueryKind,
 }
 
-struct DhtV6 {
-    socket: Arc<UdpSocket>,
-    bucket: Vec<Bucket<SocketAddrV6>>,
+#[derive(Debug)]
+enum QueryKind {
+    Ping,
+    FindNode,
+    GetPeers,
+    AnnouncePeer,
 }
 
 async fn run_socket(
@@ -220,72 +228,81 @@ async fn run_socket(
     Ok(())
 }
 
-impl DhtV6 {
-    pub fn new(port: u16) -> Result<Self, DhtError> {
-        let socket = socket2::Socket::new(
-            socket2::Domain::IPV6,
-            socket2::Type::DGRAM,
-            Some(socket2::Protocol::UDP),
-        )?;
-        socket.set_only_v6(true)?;
-        socket.set_nonblocking(true)?;
-        socket.bind(&SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), port).into())?;
-        let socket = UdpSocket::from_std(socket.into())?;
-        Ok(Self {
-            socket: socket.into(),
-            bucket: Vec::with_capacity(128),
-        })
-    }
-}
-
 impl DhtActor {
     fn get_nodes_from_bootstrap_file() {}
 
     pub async fn new(cfg: &DhtConfig, rx: mpsc::Receiver<DhtCommand>) -> Result<Self, DhtError> {
-        let node_id = NodeId([0u8; 20]);
-        let dht_v4 = DhtV4::new(cfg.port).await?;
-        let dht_v6 = DhtV6::new(cfg.port)
-            .inspect_err(|e| tracing::warn!("v6 DHT unavailable: {e}"))
+        let node_id = NodeId::from_bytes([0u8; 20]);
+
+        // Bind IPv4 socket
+        let socket_v4 = UdpSocket::bind(&SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, cfg.port))
+            .await
+            .map(Arc::new)
             .ok();
+
+        // Bind IPv6 socket with IPV6_V6ONLY flag enforced
+        let socket_v6 = {
+            let socket = socket2::Socket::new(
+                socket2::Domain::IPV6,
+                socket2::Type::DGRAM,
+                Some(socket2::Protocol::UDP),
+            )?;
+            socket.set_only_v6(true)?;
+            socket.set_nonblocking(true)?;
+            socket.bind(&SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), cfg.port).into())?;
+            UdpSocket::from_std(socket.into()).map(Arc::new)
+        }
+        .ok();
+
+        if socket_v4.is_none() && socket_v6.is_none() {
+            panic!("Failed to bind any DHT sockets");
+        }
+        let routing_table = RoutingTable::new(node_id);
 
         Ok(Self {
             rx,
             node_id,
-            dht_v4,
-            dht_v6,
+            socket_v4,
+            socket_v6,
+            next_tid: 0,
+            inflight: HashMap::default(),
+            routing_table,
         })
     }
 
-    fn send_message(&self, addr: SocketAddr, message_payload: &Bytes) {
-        let socket = if let Some(v6) = &self.dht_v6
-            && addr.is_ipv6()
-        {
-            v6.socket.clone()
+    fn send_message(&self, addr: SocketAddr, message_payload: &[u8]) {
+        let socket = if addr.is_ipv4() {
+            self.socket_v4.clone()
         } else {
-            self.dht_v4.socket.clone()
+            self.socket_v6.clone()
         };
 
-        let _ = socket.try_send_to(message_payload, addr);
+        if let Some(s) = socket {
+            _ = s.try_send_to(message_payload, addr);
+        }
     }
 
-    fn build_ping_message(&self) -> Bytes {
-        let mut buf = BytesMut::with_capacity(512);
-        buf.extend_from_slice(b"d1:ad2:id20:");
-        buf.extend_from_slice(&self.node_id.0);
-
-        // rc = snprintf(buf + i, 512 - i, "e1:q4:ping1:t%d:", tid_len);
-        let tid = todo!();
-        buf.extend_from_slice(tid);
-
-        buf.split().freeze()
+    const fn next_tid(&mut self) -> u16 {
+        let id = self.next_tid;
+        self.next_tid = self.next_tid.wrapping_add(1);
+        id
     }
 
-    fn ping_node(&self, addr: SocketAddr) {
-        let ping_message: Bytes = self.build_ping_message();
-        self.send_message(addr, &ping_message);
+    fn ping_node(&mut self, addr: SocketAddr) {
+        let tx_id = self.next_tid();
+        let ping_message = KrpcMessage::ping_query(tx_id, self.node_id);
+
+        self.inflight.insert(
+            InflightKey { addr, t: tx_id },
+            InflightEntry {
+                query_kind: QueryKind::Ping,
+            },
+        );
+
+        self.send_message(addr, &ping_message.to_bytes());
     }
 
-    pub async fn run(mut self, bootstrap_nodes: Vec<BootstrapNode>) {
+    async fn bootstrap(&mut self, bootstrap_nodes: Vec<BootstrapNode>) {
         let mut addr_resolution_tasks = bootstrap_nodes
             .into_iter()
             .map(|node| async move {
@@ -299,17 +316,23 @@ impl DhtActor {
             let Some(addr) = addrs.next() else { continue };
             self.ping_node(addr);
         }
+    }
+
+    pub async fn run(mut self, bootstrap_nodes: Vec<BootstrapNode>) {
+        self.bootstrap(bootstrap_nodes).await;
 
         let (packet_tx, mut packet_rx) = mpsc::channel::<(SocketAddr, Bytes)>(128);
 
-        let socket = self.dht_v4.socket.clone();
-        let tx = packet_tx.clone();
-        tokio::spawn(async move {
-            let _ = run_socket(socket, tx).await;
-        });
+        if let Some(socket_v4) = &self.socket_v4 {
+            let socket = socket_v4.clone();
+            let tx = packet_tx.clone();
+            tokio::spawn(async move {
+                let _ = run_socket(socket, tx).await;
+            });
+        }
 
-        if let Some(v6) = &self.dht_v6 {
-            let socket = v6.socket.clone();
+        if let Some(socket_v6) = &self.socket_v6 {
+            let socket = socket_v6.clone();
             let tx = packet_tx.clone();
             tokio::spawn(async move {
                 let _ = run_socket(socket, tx).await;
@@ -320,7 +343,7 @@ impl DhtActor {
             tokio::select! {
                 cmd = self.rx.recv() => {
                     match cmd {
-                        Some(cmd) => todo!(),
+                        Some(cmd) => self.handle_command(cmd).await,
                         None => break, // command sender dropped
                     }
                 }
@@ -336,77 +359,90 @@ impl DhtActor {
         }
     }
 
+    async fn handle_command(&mut self, cmd: DhtCommand) {}
+
     async fn handle_incoming(&mut self, (addr, bytes): (SocketAddr, Bytes)) {
-        let Ok(message) = DhtMessage::from_bytes(bytes) else {
+        let Ok(msg) = KrpcMessage::from_bytes(&bytes) else {
             return;
         };
+
+        match msg.body {
+            MessageBody::Query(query) => {
+                self.handle_query(addr, msg.transaction_id, query).await;
+            }
+            MessageBody::Response(response) => {
+                let key = InflightKey { addr, t: 0 };
+                let Some(entry) = self.inflight.remove(&key) else {
+                    return;
+                };
+                self.handle_response(addr, entry, response);
+            }
+            MessageBody::Error { code, message } => {
+                tracing::error!(code, message);
+            }
+        }
     }
-}
 
-#[derive(Debug, Clone)]
-enum DhtMessage {
-    /// Query: ping
-    Ping { id: NodeId },
-    /// Response: pong  
-    Pong { id: NodeId },
-    /// Query: find nodes
-    FindNode {
-        id: NodeId,
-        target: NodeId,
-        want: Want,
-    },
-    /// Response: these are closest nodes
-    Nodes {
-        id: NodeId,
-        nodes: Vec<u8>,
-        token: Option<Vec<u8>>,
-    },
-    /// Query: get peers for this info hash
-    GetPeers {
-        id: NodeId,
-        info_hash: [u8; 20],
-        want: Want,
-    },
-    /// Response: here are peers
-    Values {
-        id: NodeId,
-        token: Option<Vec<u8>>,
-        values: Vec<SocketAddr>,
-    },
-    /// Query: announce peer
-    AnnouncePeer {
-        id: NodeId,
-        info_hash: [u8; 20],
-        port: u16,
-        token: Vec<u8>,
-    },
-    /// Response: acknowledged
-    PeerAnnounced { id: NodeId },
-    /// Error response
-    Error { message: String },
-}
+    fn handle_response(&mut self, addr: SocketAddr, entry: InflightEntry, response: Response) {
+        match (entry.query_kind, response) {
+            (QueryKind::Ping, Response::Ping { id }) => {
+                self.try_add_node(addr, id);
+            }
+            (QueryKind::FindNode, Response::FindNode { id, nodes }) => {
+                self.try_add_node(addr, id);
+                for node in nodes {
+                    // queue further pings / routing table population
+                }
+            }
+            (
+                QueryKind::GetPeers,
+                Response::GetPeers {
+                    id,
+                    token,
+                    values,
+                    nodes,
+                },
+            ) => {
+                // handle peers / closer nodes
+            }
+            _ => {
+                // response kind does not match what we sent — protocol error, ignore
+                tracing::debug!("mismatched response kind from {addr}");
+            }
+        }
+    }
 
-#[derive(Clone, Copy, Debug)]
-struct Want {}
-
-impl DhtMessage {
-    pub fn from_bytes(bytes: Bytes) -> Result<Self, DhtError> {
+    async fn handle_query(
+        &mut self,
+        addr: SocketAddr,
+        transaction_id: TransactionId,
+        query: Query,
+    ) {
         todo!()
     }
-}
 
-pub const NODE_ID_LEN: usize = 20;
-
-#[derive(Debug, Copy, Clone)]
-struct NodeId([u8; NODE_ID_LEN]);
-#[derive(Debug)]
-pub struct Node<A> {
-    pub id: NodeId,
-    pub addr: A,
-}
-
-#[derive(Debug)]
-pub struct Bucket<A> {
-    pub nodes: Vec<Node<A>>,
-    pub cache: Vec<Node<A>>,
+    fn try_add_node(&mut self, addr: SocketAddr, node_id: NodeId) {
+        match addr {
+            SocketAddr::V4(v4) => {
+                if let Some(InsertResult::NeedsPing {
+                    stale_addr,
+                    stale_id,
+                    ..
+                }) = self.routing_table.try_insert_v4(node_id, v4)
+                {
+                    self.ping_node(stale_addr.into());
+                }
+            }
+            SocketAddr::V6(v6) => {
+                if let Some(InsertResult::NeedsPing {
+                    stale_addr,
+                    stale_id,
+                    ..
+                }) = self.routing_table.try_insert_v6(node_id, v6)
+                {
+                    self.ping_node(stale_addr.into());
+                }
+            }
+        }
+    }
 }

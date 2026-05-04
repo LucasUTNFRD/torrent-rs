@@ -1,5 +1,7 @@
-mod dht;
+pub mod dht;
 mod error;
+mod message;
+mod routing_table;
 
 // ```rust
 // /// This is what users see - super simple!
