@@ -3,7 +3,7 @@ members = [
   "bencode",
   "bittorrent-common",
   "bittorrent-core",
-  "cmd",
+  "cmd", "dht",
   "magnet-uri",
   "mainline-dht",
   "tui",

@@ -116,7 +116,7 @@ impl<A: Clone> Bucket<A> {
     /// responsible for acting on `InsertResult::NeedsPing` by sending a ping
     /// to the returned address and calling `on_timeout` / `on_reply`
     /// accordingly.
-    pub fn try_insert(&mut self, id: NodeId, addr: A) -> InsertResult<A> {
+    pub fn try_insert(&mut self, id: NodeId, addr: A) -> InsertResult {
         // Already known — refresh timestamps and we're done.
         if let Some(node) = self.nodes.iter_mut().find(|n| n.id == id) {
             node.last_seen = Instant::now();
@@ -145,12 +145,13 @@ impl<A: Clone> Bucket<A> {
             .iter()
             .find(|n| n.last_seen.elapsed().as_secs() >= NODE_EXPIRY_SECS)
         {
-            return InsertResult::NeedsPing {
-                candidate_id: id,
-                candidate_addr: addr,
-                stale_addr: node.addr.clone(),
-                stale_id: node.id,
-            };
+            todo!("Need ping");
+            // return InsertResult::NeedsPing {
+            //     candidate_id: id,
+            //     candidate_addr: addr,
+            //     stale_addr: node.addr.clone(),
+            //     stale_id: node.id,
+            // };
         }
 
         // All nodes are good and recently seen — drop the newcomer.
@@ -192,38 +193,40 @@ impl RoutingTable {
         if lz == 160 { None } else { Some(lz as usize) }
     }
 
-    pub fn try_insert_v4(
-        &mut self,
-        id: NodeId,
-        addr: SocketAddrV4,
-    ) -> Option<InsertResult<SocketAddrV4>> {
+    pub fn try_insert_v4(&mut self, id: NodeId, addr: SocketAddrV4) -> Option<InsertResult> {
         let idx = self.bucket_index(id)?;
         Some(self.v4[idx].try_insert(id, addr))
     }
 
-    pub fn try_insert_v6(
-        &mut self,
-        id: NodeId,
-        addr: SocketAddrV6,
-    ) -> Option<InsertResult<SocketAddrV6>> {
+    pub fn try_insert_v6(&mut self, id: NodeId, addr: SocketAddrV6) -> Option<InsertResult> {
         let idx = self.bucket_index(id)?;
         Some(self.v6[idx].try_insert(id, addr))
+    }
+
+    pub fn good_nodes_count(&self) -> usize {
+        let mut count = 0;
+        for bucket in &self.v4 {
+            count += bucket.nodes.iter().filter(|n| n.is_good()).count();
+        }
+        for bucket in &self.v6 {
+            count += bucket.nodes.iter().filter(|n| n.is_good()).count();
+        }
+        count
     }
 }
 
 #[derive(Debug)]
-pub enum InsertResult<A> {
+pub enum InsertResult {
     /// Node was already known; timestamps refreshed.
     Updated,
     /// Node was inserted (bucket had room or a bad node was evicted).
     Inserted,
     /// Bucket is full of genuinely good nodes; newcomer was dropped.
     Dropped,
-
-    NeedsPing {
-        candidate_id: NodeId,
-        candidate_addr: A,
-        stale_addr: A,
-        stale_id: NodeId,
-    },
+    // NeedsPing {
+    //     candidate_id: NodeId,
+    //     candidate_addr: SocketAddr,
+    //     stale_addr: SocketAddr,
+    //     stale_id: NodeId,
+    // },
 }

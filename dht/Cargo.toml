@@ -8,6 +8,7 @@ repository.workspace = true
 [dependencies]
 bytes = "1.11.1"
 futures = "0.3.32"
+hex = "0.4.3"
 socket2 = "0.6.3"
 thiserror.workspace = true
 tokio.workspace=  true
@@ -16,6 +17,7 @@ tracing-subscriber.workspace =true
 bencode = { path = "../bencode" }
 bittorrent-common = { path = "../bittorrent-common/" }
 anyhow.workspace = true
+rand.workspace = true
 
 [lints]
 workspace = true

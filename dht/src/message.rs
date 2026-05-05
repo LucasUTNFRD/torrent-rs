@@ -552,6 +552,15 @@ fn parse_response(dict: &BTreeMap<Vec<u8>, Bencode>) -> Result<MessageBody, DhtE
 
     let id = parse_node_id(r, b"id")?;
 
+    // Collect nodes from both "nodes" and "nodes6" fields if present.
+    let mut nodes = Vec::new();
+    if let Some(nodes_bytes) = r.get_bytes(b"nodes") {
+        nodes.extend(decode_compact_nodes(nodes_bytes)?);
+    }
+    if let Some(nodes_bytes) = r.get_bytes(b"nodes6") {
+        nodes.extend(decode_compact_nodes(nodes_bytes)?);
+    }
+
     // Check for token → this is a get_peers response
     if let Some(token) = r.get_bytes(b"token") {
         let token = token.to_vec();
@@ -572,14 +581,11 @@ fn parse_response(dict: &BTreeMap<Vec<u8>, Bencode>) -> Result<MessageBody, DhtE
                     _ => {}
                 }
             }
-            if peers.is_empty() { None } else { Some(peers) }
-        } else {
-            None
-        };
-
-        // Parse nodes if present
-        let nodes = if let Some(nodes_bytes) = r.get_bytes(b"nodes") {
-            Some(decode_compact_nodes_v4(nodes_bytes)?)
+            if peers.is_empty() {
+                None
+            } else {
+                Some(peers)
+            }
         } else {
             None
         };
@@ -588,13 +594,12 @@ fn parse_response(dict: &BTreeMap<Vec<u8>, Bencode>) -> Result<MessageBody, DhtE
             id,
             token,
             values,
-            nodes,
+            nodes: if nodes.is_empty() { None } else { Some(nodes) },
         }));
     }
 
     // Check for nodes → FindNode response
-    if let Some(nodes_bytes) = r.get_bytes(b"nodes") {
-        let nodes = decode_compact_nodes_v4(nodes_bytes)?;
+    if !nodes.is_empty() {
         return Ok(MessageBody::Response(Response::FindNode { id, nodes }));
     }
 
