@@ -1,24 +1,26 @@
 use crate::{
     error::DhtError,
     message::{KrpcMessage, MessageBody, Query, Response, TransactionId},
-    routing_table::{InsertResult, NodeId, RoutingTable},
+    routing_table::{DHTAddr, KTable, NodeId},
 };
 use bittorrent_common::types::InfoHash;
 use bytes::{Bytes, BytesMut};
 use futures::{StreamExt, stream::FuturesUnordered};
 use std::{
-    collections::HashMap,
-    net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4},
-    sync::Arc,
+    collections::{BinaryHeap, HashMap, HashSet},
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
+    sync::{Arc, RwLock},
     time::Duration,
 };
 use tokio::{
     net::{UdpSocket, lookup_host},
     sync::{mpsc, oneshot},
+    time::sleep,
 };
 
 const DEFAULT_PORT: u16 = 6881;
 
+const ALPHA: usize = 5;
 const MAX_PAYLOAD: usize = 2048;
 
 #[derive(Debug, Clone)]
@@ -128,7 +130,8 @@ pub enum SwarmStatus {
     Good,       // Fully functional
 }
 
-enum DhtCommand {
+#[derive(Debug)]
+pub(crate) enum DhtCommand {
     Announce {
         info_hash: InfoHash,
         peer_port: u16,
@@ -139,17 +142,24 @@ enum DhtCommand {
         tx: oneshot::Sender<Vec<SocketAddr>>,
     },
     AddNode {
+        id: NodeId,
         addr: SocketAddr,
     },
     SwarmStatus {
         tx: oneshot::Sender<SwarmStatus>,
     },
+
+    /// Send an outgoing KRPC Query (Called by LookupTasks)
+    SendQuery {
+        addr: SocketAddr,
+        query: Query,
+        callback: oneshot::Sender<Response>,
+    },
 }
 
 impl Dht {
     pub async fn new(cfg: DhtConfig) -> Result<Self, DhtError> {
-        let (tx, rx) = mpsc::channel(128);
-        let dht_inner = DhtActor::new(&cfg, rx).await?;
+        let (tx, dht_inner) = DhtActor::new(&cfg).await?;
 
         tokio::spawn(async move { dht_inner.run(cfg.bootstrap_nodes).await });
 
@@ -194,33 +204,17 @@ impl Dht {
 
 struct DhtActor {
     rx: mpsc::Receiver<DhtCommand>,
+    tx: mpsc::Sender<DhtCommand>,
     node_id: NodeId,
 
-    // The two DHTs are independent, meaning that no IPv6 data is stored in the IPv4 DHT, and, conversely, no IPv4 data is stored in the IPv6 DHT. A node wishing to participate in both DHTs must maintain two distinct routing tables, one for IPv4 and one for IPv6.
     socket_v4: Option<Arc<UdpSocket>>,
     socket_v6: Option<Arc<UdpSocket>>,
-    routing_table: RoutingTable,
 
-    inflight: HashMap<InflightKey, InflightEntry>,
+    routing_table_v4: Arc<RwLock<KTable<SocketAddrV4>>>,
+    routing_table_v6: Arc<RwLock<KTable<SocketAddrV6>>>,
+
+    pending_queries: HashMap<TransactionId, oneshot::Sender<Response>>,
     next_tid: u16,
-}
-
-#[derive(Debug, PartialEq, Eq, Hash)]
-struct InflightKey {
-    addr: SocketAddr,
-    t: u16,
-}
-
-struct InflightEntry {
-    query_kind: QueryKind,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum QueryKind {
-    Ping,
-    FindNode,
-    GetPeers,
-    AnnouncePeer,
 }
 
 async fn run_socket(
@@ -230,19 +224,13 @@ async fn run_socket(
     let mut buf = BytesMut::with_capacity(MAX_PAYLOAD);
 
     loop {
-        // recv_buf_from appends the incoming data and updates the `buf` length.
         let (_len, addr) = socket.recv_buf_from(&mut buf).await?;
-
-        // .split() extracts the read bytes into a new BytesMut, leaving the original empty.
-        // .freeze() converts it to an immutable Bytes, which is cheap to clone and share.
         let bytes = buf.split().freeze();
 
         if tx.send((addr, bytes)).await.is_err() {
             break;
         }
 
-        // Ensure the buffer has enough contiguous capacity for the next read.
-        // If the previously frozen `Bytes` have been dropped, BytesMut reuses the allocation.
         buf.reserve(MAX_PAYLOAD);
     }
 
@@ -250,19 +238,15 @@ async fn run_socket(
 }
 
 impl DhtActor {
-    fn get_nodes_from_bootstrap_file() {}
-
-    pub async fn new(cfg: &DhtConfig, rx: mpsc::Receiver<DhtCommand>) -> Result<Self, DhtError> {
-        // TODO: Persist DHT Node Id
+    pub async fn new(cfg: &DhtConfig) -> Result<(mpsc::Sender<DhtCommand>, Self), DhtError> {
+        let (tx, rx) = mpsc::channel(128);
         let node_id = NodeId::from_bytes(rand::random::<[u8; 20]>());
 
-        // Bind IPv4 socket
         let socket_v4 = UdpSocket::bind(&SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, cfg.port))
             .await
             .map(Arc::new)
             .ok();
 
-        // Bind IPv6 socket with IPV6_V6ONLY flag enforced
         let socket_v6 = {
             let socket = socket2::Socket::new(
                 socket2::Domain::IPV6,
@@ -281,17 +265,23 @@ impl DhtActor {
             "Failed to bind any DHT sockets"
         );
 
-        let routing_table = RoutingTable::new(node_id);
+        let routing_table_v4 = Arc::new(RwLock::new(KTable::new(node_id)));
+        let routing_table_v6 = Arc::new(RwLock::new(KTable::new(node_id)));
 
-        Ok(Self {
-            rx,
-            node_id,
-            socket_v4,
-            socket_v6,
-            next_tid: 0,
-            inflight: HashMap::default(),
-            routing_table,
-        })
+        Ok((
+            tx.clone(),
+            Self {
+                rx,
+                tx,
+                node_id,
+                socket_v4,
+                socket_v6,
+                next_tid: 0,
+                pending_queries: HashMap::default(),
+                routing_table_v4,
+                routing_table_v6,
+            },
+        ))
     }
 
     const fn next_tid(&mut self) -> u16 {
@@ -300,103 +290,65 @@ impl DhtActor {
         id
     }
 
-    fn send_message(&self, addr: SocketAddr, message_payload: &[u8]) {
-        let socket = if addr.is_ipv4() {
-            self.socket_v4.clone()
-        } else {
-            self.socket_v6.clone()
-        };
-
-        if let Some(s) = socket {
-            if let Err(e) = s.try_send_to(message_payload, addr) {
-                tracing::warn!("Failed to send to {}: {}", addr, e);
-            }
-        } else {
-            tracing::warn!("No socket available for {}", addr);
-        }
-    }
-
-    fn ping_node(&mut self, addr: SocketAddr) {
-        let tx_id = self.next_tid();
-        let ping_message = KrpcMessage::ping_query(tx_id, self.node_id);
-
-        self.inflight.insert(
-            InflightKey { addr, t: tx_id },
-            InflightEntry {
-                query_kind: QueryKind::Ping,
-            },
-        );
-
-        tracing::debug!("Sending ping to {} (tid={})", addr, tx_id);
-        self.send_message(addr, &ping_message.to_bytes());
-    }
-
-    fn find_node(&mut self, addr: SocketAddr, target: NodeId) {
-        let tx_id = self.next_tid();
-        let msg =
-            KrpcMessage::find_node_query(tx_id, self.node_id, target /*TODO: num want arg*/);
-
-        self.inflight.insert(
-            InflightKey { addr, t: tx_id },
-            InflightEntry {
-                query_kind: QueryKind::FindNode,
-            },
-        );
-
-        self.send_message(addr, &msg.to_bytes());
-    }
-
-    fn send_get_peers(&mut self, addr: SocketAddr, info_hash: InfoHash) {
-        let tx_id = self.next_tid();
-        let msg = KrpcMessage::get_peers_query(tx_id, self.node_id, info_hash);
-
-        self.inflight.insert(
-            InflightKey { addr, t: tx_id },
-            InflightEntry {
-                query_kind: QueryKind::GetPeers,
-            },
-        );
-
-        tracing::debug!(
-            "Sending get_peers to {} for info_hash {} (tid={})",
-            addr,
-            hex::encode(info_hash.as_slice()),
-            tx_id
-        );
-        self.send_message(addr, &msg.to_bytes());
-    }
-
     async fn bootstrap(&mut self, bootstrap_nodes: Vec<BootstrapNode>) {
-        tracing::info!(
-            "Starting DHT bootstrap with {} nodes",
-            bootstrap_nodes.len()
-        );
-
-        let mut addr_resolution_tasks = bootstrap_nodes
-            .into_iter()
-            .map(|node| async move {
-                let addr_str = format!("{}:{}", node.host, node.port);
-                lookup_host(addr_str).await.map(|a| (node.host, a))
+        let bootstrap_addrs: Vec<SocketAddr> = bootstrap_nodes
+            .iter()
+            .map(|node| {
+                let addr = format!("{}:{}", node.host, node.port);
+                async move { lookup_host(addr).await }
             })
-            .collect::<FuturesUnordered<_>>();
+            .collect::<FuturesUnordered<_>>()
+            .filter_map(|result| async move { result.ok() })
+            .flat_map(futures::stream::iter)
+            .collect()
+            .await;
 
-        while let Some(result) = addr_resolution_tasks.next().await {
-            let Ok((host, mut addrs)) = result else {
-                continue;
-            };
-            let Some(addr) = addrs.next() else { continue };
-            tracing::debug!("Resolved bootstrap node {} -> {}", host, addr);
+        let dht_tx = self.tx.clone();
+        let our_node_id = self.node_id;
 
-            let info_hash =
-                InfoHash::from_slice(self.node_id.as_slice()).expect("it is our own node id");
-            self.send_get_peers(addr, info_hash);
+        if self.socket_v4.is_some() {
+            let v4_bootstrap: Vec<SocketAddrV4> = bootstrap_addrs
+                .iter()
+                .filter_map(|a| {
+                    if let SocketAddr::V4(v4) = a {
+                        Some(*v4)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            tokio::spawn(bootstrap_task(
+                our_node_id,
+                self.routing_table_v4.clone(),
+                dht_tx.clone(),
+                v4_bootstrap,
+            ));
+        }
+
+        if self.socket_v6.is_some() {
+            let v6_bootstrap: Vec<SocketAddrV6> = bootstrap_addrs
+                .iter()
+                .filter_map(|a| {
+                    if let SocketAddr::V6(v6) = a {
+                        Some(*v6)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            tokio::spawn(bootstrap_task(
+                our_node_id,
+                self.routing_table_v6.clone(),
+                dht_tx,
+                v6_bootstrap,
+            ));
         }
     }
 
-    pub async fn run(mut self, bootstrap_nodes: Vec<BootstrapNode>) {
-        self.bootstrap(bootstrap_nodes).await;
-
-        let (packet_tx, mut packet_rx) = mpsc::channel::<(SocketAddr, Bytes)>(128);
+    fn start_socket_task(&self) -> mpsc::Receiver<(SocketAddr, Bytes)> {
+        let (packet_tx, packet_rx) = mpsc::channel::<(SocketAddr, Bytes)>(128);
 
         if let Some(socket_v4) = &self.socket_v4 {
             let socket = socket_v4.clone();
@@ -408,44 +360,44 @@ impl DhtActor {
 
         if let Some(socket_v6) = &self.socket_v6 {
             let socket = socket_v6.clone();
-            let tx = packet_tx.clone();
+            let tx = packet_tx;
             tokio::spawn(async move {
                 let _ = run_socket(socket, tx).await;
             });
         }
-        let mut maintenance_interval = tokio::time::interval(Duration::from_secs(60));
-        let mut search_interval = tokio::time::interval(Duration::from_secs(5));
+
+        packet_rx
+    }
+
+    pub async fn run(mut self, bootstrap_nodes: Vec<BootstrapNode>) {
+        let mut packet_rx = self.start_socket_task();
+
+        self.bootstrap(bootstrap_nodes).await;
+
+        let mut maintenance_interval = tokio::time::interval(Duration::from_secs(5));
 
         loop {
             tokio::select! {
                 cmd = self.rx.recv() => {
                     match cmd {
                         Some(cmd) => self.handle_command(cmd).await,
-                        None => break, // command sender dropped
+                        None => break,
                     }
                 }
                 packet = packet_rx.recv() => {
                     match packet {
                         Some(packet) => {
-                            self.handle_incoming(packet).await;
+                            self.handle_incoming(packet);
                         }
-                        None => break, // All socket tasks terminated
+                        None => break,
                     }
                 }
-               // Bucket/maintenance timer
                 _ = maintenance_interval.tick() => {
-
-               }
-               // Search step timer
-               _ = search_interval.tick() => {
+                    // TODO: Maintenance
                }
             }
         }
     }
-
-    async fn maintenance_interval(&mut self) {}
-
-    async fn search_interval(&mut self) {}
 
     async fn handle_command(&mut self, cmd: DhtCommand) {
         match cmd {
@@ -453,18 +405,77 @@ impl DhtActor {
                 let status = self.compute_swarm_status();
                 let _ = tx.send(status);
             }
-            DhtCommand::AddNode { addr } => {}
-            DhtCommand::Announce {
-                info_hash,
-                peer_port,
-                tx,
-            } => {}
-            DhtCommand::FindPeer { info_hash, tx } => {}
+            DhtCommand::AddNode { id, addr } => {
+                if let SocketAddr::V4(v4_addr) = addr {
+                    if let Some(res) = self
+                        .routing_table_v4
+                        .write()
+                        .expect("lock poisoned")
+                        .try_insert(id, v4_addr)
+                    {
+                        tracing::info!("Discovered v4 node: {} ({:?})", addr, res);
+                    }
+                } else if let SocketAddr::V6(v6_addr) = addr {
+                    if let Some(res) = self
+                        .routing_table_v6
+                        .write()
+                        .expect("lock poisoned")
+                        .try_insert(id, v6_addr)
+                    {
+                        tracing::info!("Discovered v6 node: {} ({:?})", addr, res);
+                    }
+                }
+            }
+            DhtCommand::Announce { .. } => {}
+            DhtCommand::FindPeer { .. } => {}
+            DhtCommand::SendQuery {
+                addr,
+                query,
+                callback,
+            } => {
+                let tid = self.next_tid();
+                let _ = self
+                    .pending_queries
+                    .insert(TransactionId::new(tid), callback);
+
+                tracing::debug!("Sending KRPC query to {}: {:?}", addr, query);
+
+                let packet = KrpcMessage {
+                    transaction_id: TransactionId::new(tid),
+                    version: None,
+                    sender_ip: None,
+                    body: MessageBody::Query(query),
+                }
+                .to_bytes();
+
+                let socket = if addr.is_ipv4() {
+                    self.socket_v4.clone()
+                } else {
+                    self.socket_v6.clone()
+                };
+
+                if let Some(socket) = socket {
+                    let s = socket;
+                    tokio::spawn(async move {
+                        let _ = s.send_to(&packet, addr).await;
+                    });
+                }
+            }
         }
     }
 
     fn compute_swarm_status(&self) -> SwarmStatus {
-        let good_count = self.routing_table.good_nodes_count();
+        let v4_count = self
+            .routing_table_v4
+            .read()
+            .expect("lock poisoned")
+            .good_nodes_count();
+        let v6_count = self
+            .routing_table_v6
+            .read()
+            .expect("lock poisoned")
+            .good_nodes_count();
+        let good_count = v4_count + v6_count;
 
         if good_count >= 10 {
             SwarmStatus::Good
@@ -475,130 +486,189 @@ impl DhtActor {
         }
     }
 
-    async fn handle_incoming(&mut self, (addr, bytes): (SocketAddr, Bytes)) {
+    fn handle_incoming(&mut self, (addr, bytes): (SocketAddr, Bytes)) {
         let Ok(msg) = KrpcMessage::from_bytes(&bytes) else {
             return;
         };
 
-        match msg.body {
-            MessageBody::Query(query) => {
-                tracing::debug!("Received query from {}: {:?}", addr, query);
-                self.handle_query(addr, msg.transaction_id, query).await;
+        tracing::debug!("Received KRPC message from {}: {:?}", addr, msg);
+
+        if let Some(callback) = self.pending_queries.remove(&msg.transaction_id) {
+            if let MessageBody::Response(res) = msg.body {
+                let _ = callback.send(res);
             }
-            MessageBody::Response(response) => {
-                let tid = u16::from_be_bytes([msg.transaction_id.0[0], msg.transaction_id.0[1]]);
-                tracing::debug!(
-                    "Received {:?} response from {} (tid={})",
-                    response,
-                    addr,
-                    tid
-                );
-                let key = InflightKey { addr, t: tid };
-                let Some(entry) = self.inflight.remove(&key) else {
-                    tracing::warn!(
-                        "Received response from {} but no matching inflight request",
-                        addr
-                    );
-                    return;
-                };
-                self.handle_response(addr, entry, response);
-            }
-            MessageBody::Error { code, message } => {
-                tracing::error!(code, message);
-            }
+            return;
         }
-    }
 
-    fn handle_response(&mut self, addr: SocketAddr, entry: InflightEntry, response: Response) {
-        match (entry.query_kind, response) {
-            (QueryKind::Ping, Response::Ping { id })
-            | (QueryKind::GetPeers, Response::Ping { id }) => {
-                tracing::info!(
-                    "Ping-like response from {} - node_id={}",
-                    addr,
-                    hex::encode(id.as_slice())
-                );
-                let _ = self.try_add_node(addr, id);
-
-                if matches!(entry.query_kind, QueryKind::Ping) {
-                    let info_hash = InfoHash::from_slice(self.node_id.as_slice())
-                        .expect("it is our own node id");
-                    self.send_get_peers(addr, info_hash);
-                }
-            }
-            (QueryKind::FindNode, Response::FindNode { id, nodes })
-            | (QueryKind::GetPeers, Response::FindNode { id, nodes }) => {
-                tracing::info!(
-                    "FindNode-like response from {} - node_id={}",
-                    addr,
-                    hex::encode(id.as_slice())
-                );
-                self.try_add_node(addr, id);
-                tracing::debug!("Found {} nodes in response", nodes.len());
-                for node in nodes {
-                    tracing::debug!(
-                        "  - Adding discovered node {} at {}",
-                        hex::encode(node.node_id.as_slice()),
-                        node.addr
-                    );
-                    self.try_add_node(node.addr, node.node_id);
-                }
-            }
-            (
-                QueryKind::GetPeers,
-                Response::GetPeers {
+        if let MessageBody::Query(query) = msg.body {
+            match query {
+                Query::Ping { id } => {}
+                Query::FindNode { id, target, .. } => {}
+                Query::GetPeers {
                     id,
+                    info_hash,
+                    is_bootstrap,
+                } => {}
+                Query::AnnouncePeer {
+                    id,
+                    info_hash,
+                    port,
                     token,
-                    values,
-                    nodes,
-                },
-            ) => {
-                tracing::info!(
-                    "GetPeers response from {} - node_id={}, token={}",
-                    addr,
-                    hex::encode(id.as_slice()),
-                    hex::encode(&token)
-                );
-                self.try_add_node(addr, id);
-
-                if let Some(nodes) = nodes {
-                    tracing::debug!("Found {} closer nodes in GetPeers response", nodes.len());
-                    for node in nodes {
-                        tracing::debug!(
-                            "  - Adding discovered node {} at {}",
-                            hex::encode(node.node_id.as_slice()),
-                            node.addr
-                        );
-                        self.try_add_node(node.addr, node.node_id);
-                    }
-                }
-
-                if let Some(peers) = values {
-                    tracing::debug!("Found {} peer values in GetPeers response", peers.len());
-                    for peer in peers {
-                        tracing::debug!("  - Peer value: {}", peer);
-                    }
-                }
-            }
-            _ => {
-                tracing::debug!("Mismatched response kind from {addr}");
+                    implied_port,
+                } => {}
             }
         }
+
+        // if let Some(id) = msg.get_node_id() {
+        //     if let SocketAddr::V4(v4_addr) = addr {
+        //         self.routing_table_v4
+        //             .write()
+        //             .expect("lock poisoned")
+        //             .try_insert(id, v4_addr);
+        //     } else if let SocketAddr::V6(v6_addr) = addr {
+        //         self.routing_table_v6
+        //             .write()
+        //             .expect("lock poisoned")
+        //             .try_insert(id, v6_addr);
+        //     }
+        // }
     }
 
-    async fn handle_query(
-        &mut self,
-        addr: SocketAddr,
-        transaction_id: TransactionId,
-        query: Query,
-    ) {
+    async fn handle_query(&mut self, _addr: SocketAddr, _tid: TransactionId, _query: Query) {
         todo!()
     }
+}
 
-    fn try_add_node(&mut self, addr: SocketAddr, node_id: NodeId) -> Option<InsertResult> {
-        match addr {
-            SocketAddr::V4(v4) => self.routing_table.try_insert_v4(node_id, v4),
-            SocketAddr::V6(v6) => self.routing_table.try_insert_v6(node_id, v6),
+#[derive(Debug, Eq, PartialEq)]
+struct Candidate<A> {
+    addr: A,
+    distance: NodeId,
+}
+
+impl<A: DHTAddr> Candidate<A> {
+    fn new(addr: A, _target: NodeId) -> Self {
+        Self {
+            addr,
+            distance: NodeId::from_bytes([0xFF; 20]),
+        }
+    }
+
+    fn with_id(addr: A, id: NodeId, target: NodeId) -> Self {
+        Self {
+            addr,
+            distance: id ^ target,
+        }
+    }
+}
+
+impl<A: Eq> Ord for Candidate<A> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        other.distance.cmp(&self.distance)
+    }
+}
+
+impl<A: Eq> PartialOrd for Candidate<A> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+pub(crate) async fn bootstrap_task<A>(
+    local_id: NodeId,
+    table: Arc<RwLock<KTable<A>>>,
+    actor_tx: mpsc::Sender<DhtCommand>,
+    bootstrap_nodes: Vec<A>,
+) where
+    A: DHTAddr + Eq,
+{
+    let target = local_id.generate_neighbor();
+    tracing::info!("Starting bootstrap for target {:?}", target);
+
+    let mut candidates = BinaryHeap::new();
+    let mut queried = HashSet::new();
+    let mut in_flight = FuturesUnordered::new();
+
+    let initial_nodes = {
+        let rt = table.read().expect("lock poisoned");
+        if rt.is_empty() {
+            bootstrap_nodes
+        } else {
+            rt.closest_nodes(&target, 8)
+                .into_iter()
+                .map(|(_, a)| a)
+                .collect()
+        }
+    };
+
+    for addr in initial_nodes {
+        candidates.push(Candidate::new(addr, target));
+    }
+
+    loop {
+        while in_flight.len() < ALPHA {
+            if let Some(candidate) = candidates.pop() {
+                let addr = candidate.addr.to_socket_addr();
+                if queried.contains(&addr) {
+                    continue;
+                }
+                queried.insert(addr);
+
+                let tx = actor_tx.clone();
+                let (res_tx, res_rx) = oneshot::channel();
+
+                let query = Query::FindNode {
+                    id: local_id,
+                    target,
+                    is_bootstrap: true,
+                };
+
+                in_flight.push(async move {
+                    let _ = tx
+                        .send(DhtCommand::SendQuery {
+                            addr,
+                            query,
+                            callback: res_tx,
+                        })
+                        .await;
+
+                    match tokio::time::timeout(Duration::from_secs(15), res_rx).await {
+                        Ok(Ok(response)) => Ok((addr, response)),
+                        _ => Err(()),
+                    }
+                });
+            } else {
+                break;
+            }
+        }
+
+        tokio::select! {
+            Some(result) = in_flight.next() => {
+                if let Ok((addr, response)) = result {
+                    if let Response::FindNode { id, nodes } = response {
+                        let _ = actor_tx.send(DhtCommand::AddNode { id, addr }).await;
+
+                        for node in nodes {
+                            let _ = actor_tx.send(DhtCommand::AddNode { id: node.node_id, addr: node.addr }).await;
+
+                            if let Some(same_family_addr) = A::from_socket_addr(node.addr) {
+                                if !queried.contains(&node.addr) {
+                                    candidates.push(Candidate::with_id(same_family_addr, node.node_id, target));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            () = sleep(Duration::from_secs(1)) => {
+                continue;
+            }
+        }
+
+        let healthy_table = table.read().expect("lock poisoned").is_healthy();
+        let exhaustion = in_flight.is_empty() && candidates.is_empty();
+
+        if healthy_table || exhaustion {
+            break;
         }
     }
 }

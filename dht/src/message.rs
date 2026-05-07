@@ -63,10 +63,12 @@ pub enum Query {
     FindNode {
         id: NodeId,
         target: NodeId,
+        is_bootstrap: bool,
     },
     GetPeers {
         id: NodeId,
         info_hash: InfoHash,
+        is_bootstrap: bool,
     },
     AnnouncePeer {
         id: NodeId,
@@ -165,18 +167,32 @@ impl KrpcMessage {
                         args.put("id", &id.as_slice());
                         dict.insert(b"a".to_vec(), args.build());
                     }
-                    Query::FindNode { id, target } => {
+                    Query::FindNode {
+                        id,
+                        target,
+                        is_bootstrap,
+                    } => {
                         dict.put("q", &"find_node");
                         let mut args = BTreeMap::<Vec<u8>, Bencode>::new();
                         args.put("id", &id.as_slice());
                         args.put("target", &target.as_slice());
+                        if *is_bootstrap {
+                            args.insert(b"bs".to_vec(), Bencode::Int(1));
+                        }
                         dict.insert(b"a".to_vec(), args.build());
                     }
-                    Query::GetPeers { id, info_hash } => {
+                    Query::GetPeers {
+                        id,
+                        info_hash,
+                        is_bootstrap,
+                    } => {
                         dict.put("q", &"get_peers");
                         let mut args = BTreeMap::<Vec<u8>, Bencode>::new();
                         args.put("id", &id.as_slice());
                         args.put("info_hash", &info_hash.as_slice());
+                        if *is_bootstrap {
+                            args.insert(b"bs".to_vec(), Bencode::Int(1));
+                        }
                         dict.insert(b"a".to_vec(), args.build());
                     }
                     Query::AnnouncePeer {
@@ -325,7 +341,7 @@ impl KrpcMessage {
     }
 
     /// Create a find_node query message.
-    pub fn find_node_query(tx_id: u16, node_id: NodeId, target: NodeId) -> Self {
+    pub fn find_node_query(tx_id: u16, node_id: NodeId, target: NodeId, is_bootstrap: bool) -> Self {
         Self {
             transaction_id: TransactionId::new(tx_id),
             version: None,
@@ -333,6 +349,7 @@ impl KrpcMessage {
             body: MessageBody::Query(Query::FindNode {
                 id: node_id,
                 target,
+                is_bootstrap,
             }),
         }
     }
@@ -362,7 +379,12 @@ impl KrpcMessage {
     }
 
     /// Create a get_peers query message.
-    pub fn get_peers_query(tx_id: u16, node_id: NodeId, info_hash: InfoHash) -> Self {
+    pub fn get_peers_query(
+        tx_id: u16,
+        node_id: NodeId,
+        info_hash: InfoHash,
+        is_bootstrap: bool,
+    ) -> Self {
         Self {
             transaction_id: TransactionId::new(tx_id),
             version: None,
@@ -370,6 +392,7 @@ impl KrpcMessage {
             body: MessageBody::Query(Query::GetPeers {
                 id: node_id,
                 info_hash,
+                is_bootstrap,
             }),
         }
     }
@@ -484,11 +507,17 @@ fn parse_query(dict: &BTreeMap<Vec<u8>, Bencode>) -> Result<MessageBody, DhtErro
 
     let id = parse_node_id(args, b"id")?;
 
+    let is_bootstrap = args.get_i64(b"bs").map(|v| v != 0).unwrap_or(false);
+
     match method {
         "ping" => Ok(MessageBody::Query(Query::Ping { id })),
         "find_node" => {
             let target = parse_node_id(args, b"target")?;
-            Ok(MessageBody::Query(Query::FindNode { id, target }))
+            Ok(MessageBody::Query(Query::FindNode {
+                id,
+                target,
+                is_bootstrap,
+            }))
         }
         "get_peers" => {
             let info_hash_bytes = args
@@ -502,7 +531,11 @@ fn parse_query(dict: &BTreeMap<Vec<u8>, Bencode>) -> Result<MessageBody, DhtErro
             }
             let info_hash = InfoHash::from_slice(info_hash_bytes)
                 .ok_or_else(|| DhtError::Parse("invalid info_hash".to_string()))?;
-            Ok(MessageBody::Query(Query::GetPeers { id, info_hash }))
+            Ok(MessageBody::Query(Query::GetPeers {
+                id,
+                info_hash,
+                is_bootstrap,
+            }))
         }
         "announce_peer" => {
             let info_hash_bytes = args
