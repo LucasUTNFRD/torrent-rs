@@ -13,7 +13,7 @@ use std::{
 use bencode::{Bencode, BencodeBuilder, BencodeDict};
 use bittorrent_common::types::InfoHash;
 
-use crate::{error::DhtError, routing_table::NodeId};
+use crate::{error::DhtError, node_id::NodeId};
 
 ///Transaction ID for correlating requests and responses.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -26,6 +26,10 @@ impl TransactionId {
 
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
+    }
+
+    pub fn as_u16(&self) -> u16 {
+        u16::from_be_bytes(self.0)
     }
 }
 
@@ -694,7 +698,7 @@ pub fn encode_compact_nodes_v4(nodes: &[CompactNodeInfo]) -> Vec<u8> {
     let mut result = Vec::with_capacity(nodes.len() * 26);
     for node in nodes {
         if let SocketAddr::V4(v4) = node.addr {
-            result.extend_from_slice(&node.node_id.as_bytes());
+            result.extend_from_slice(node.node_id.as_bytes());
             result.extend_from_slice(&v4.ip().octets());
             result.extend_from_slice(&v4.port().to_be_bytes());
         }
@@ -706,8 +710,7 @@ pub fn encode_compact_nodes_v4(nodes: &[CompactNodeInfo]) -> Vec<u8> {
 pub fn encode_compact_nodes(nodes: &[CompactNodeInfo]) -> Vec<u8> {
     let mut result = Vec::new();
     for node in nodes {
-        result.extend_from_slice(&node.node_id.as_bytes());
-        result.extend_from_slice(&encode_compact_peer(&node.addr));
+        result.extend_from_slice(node.node_id.as_bytes());        result.extend_from_slice(&encode_compact_peer(&node.addr));
     }
     result
 }

@@ -1,11 +1,50 @@
 use rand::Rng;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use bencode::{Encode, Decode, Bencode, BencodeError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct InfoHash([u8; 20]);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PeerID([u8; 20]);
+
+impl Encode for InfoHash {
+    fn to_bencode(&self) -> Bencode {
+        Bencode::Bytes(self.0.to_vec())
+    }
+}
+
+impl Decode for InfoHash {
+    fn from_bencode(bencode: &Bencode) -> Result<Self, BencodeError> {
+        match bencode {
+            Bencode::Bytes(b) if b.len() == 20 => {
+                let mut arr = [0u8; 20];
+                arr.copy_from_slice(b);
+                Ok(Self(arr))
+            }
+            _ => Err(BencodeError::InvalidBencodeString),
+        }
+    }
+}
+
+impl Encode for PeerID {
+    fn to_bencode(&self) -> Bencode {
+        Bencode::Bytes(self.0.to_vec())
+    }
+}
+
+impl Decode for PeerID {
+    fn from_bencode(bencode: &Bencode) -> Result<Self, BencodeError> {
+        match bencode {
+            Bencode::Bytes(b) if b.len() == 20 => {
+                let mut arr = [0u8; 20];
+                arr.copy_from_slice(b);
+                Ok(Self(arr))
+            }
+            _ => Err(BencodeError::InvalidBencodeString),
+        }
+    }
+}
 
 impl Serialize for InfoHash {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>

@@ -1,6 +1,7 @@
 pub mod dht;
 mod error;
 mod message;
+mod node_id;
 mod routing_table;
 
 // ```rust
