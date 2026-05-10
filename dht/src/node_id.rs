@@ -1,5 +1,5 @@
+use bencode::{Bencode, BencodeError, Decode, Encode};
 use std::array;
-use bencode::{Encode, Decode, Bencode, BencodeError};
 
 pub const NODE_ID_LEN: usize = 20;
 
@@ -28,6 +28,10 @@ impl Decode for NodeId {
 impl NodeId {
     pub fn from_bytes(bytes: [u8; NODE_ID_LEN]) -> Self {
         Self(bytes)
+    }
+
+    pub fn random() -> Self {
+        Self(rand::random())
     }
 
     pub fn as_bytes(&self) -> &[u8; NODE_ID_LEN] {

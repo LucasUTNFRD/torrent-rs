@@ -345,7 +345,12 @@ impl KrpcMessage {
     }
 
     /// Create a find_node query message.
-    pub fn find_node_query(tx_id: u16, node_id: NodeId, target: NodeId, is_bootstrap: bool) -> Self {
+    pub fn find_node_query(
+        tx_id: u16,
+        node_id: NodeId,
+        target: NodeId,
+        is_bootstrap: bool,
+    ) -> Self {
         Self {
             transaction_id: TransactionId::new(tx_id),
             version: None,
@@ -618,11 +623,7 @@ fn parse_response(dict: &BTreeMap<Vec<u8>, Bencode>) -> Result<MessageBody, DhtE
                     _ => {}
                 }
             }
-            if peers.is_empty() {
-                None
-            } else {
-                Some(peers)
-            }
+            if peers.is_empty() { None } else { Some(peers) }
         } else {
             None
         };
@@ -710,7 +711,8 @@ pub fn encode_compact_nodes_v4(nodes: &[CompactNodeInfo]) -> Vec<u8> {
 pub fn encode_compact_nodes(nodes: &[CompactNodeInfo]) -> Vec<u8> {
     let mut result = Vec::new();
     for node in nodes {
-        result.extend_from_slice(node.node_id.as_bytes());        result.extend_from_slice(&encode_compact_peer(&node.addr));
+        result.extend_from_slice(node.node_id.as_bytes());
+        result.extend_from_slice(&encode_compact_peer(&node.addr));
     }
     result
 }

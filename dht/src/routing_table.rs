@@ -83,7 +83,7 @@ impl KBucket {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum AddressFamily {
     V6,
     V4,

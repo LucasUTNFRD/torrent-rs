@@ -11,6 +11,9 @@ pub enum DhtError {
     #[error("DHT service unavailable")]
     ServiceUnavailable,
 
+    #[error("IO error: {0}")]
+    IO(String),
+
     #[error("operation cancelled")]
     Cancelled,
 
