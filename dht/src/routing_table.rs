@@ -1,8 +1,8 @@
 use crate::node_id::NodeId;
 use std::net::SocketAddr;
 
-#[derive(Debug)]
-struct NodeEntry {
+#[derive(Debug, Clone)]
+pub(crate) struct NodeEntry {
     pub node_id: NodeId,
     pub addr: SocketAddr,
     pub status: ContactStatus,
@@ -10,8 +10,8 @@ struct NodeEntry {
     pub last_queried: Option<std::time::Instant>,
 }
 
-#[derive(Debug, PartialEq)]
-enum ContactStatus {
+#[derive(Debug, PartialEq, Clone)]
+pub(crate) enum ContactStatus {
     /// Never sent a request to this node
     Fresh,
     /// Sent at least one request, last one succeeded
@@ -124,16 +124,55 @@ impl RoutingTable {
     /// - If bucket not full: insert.
     /// - TODO: Discuss what policy implement, it comes to my mind adding the node id if full as a
     /// candidate
-    pub fn add_node(&mut self, node: NodeId) -> AddResult {
-        todo!()
+    pub fn add_node(&mut self, node_id: NodeId, addr: SocketAddr) -> AddResult {
+        let index = self.find_bucket_index(&node_id);
+        let bucket = &mut self.buckets[index];
+
+        if let Some(entry) = bucket.nodes.iter_mut().find(|n| n.node_id == node_id) {
+            entry.addr = addr;
+            entry.reset_fail_count();
+            return AddResult::Added;
+        }
+
+        if bucket.nodes.len() < K {
+            bucket.nodes.push(NodeEntry {
+                node_id,
+                addr,
+                status: ContactStatus::Confirmed {
+                    consecutive_failures: 0,
+                },
+                verified: true,
+                last_queried: None,
+            });
+            return AddResult::Added;
+        }
+
+        AddResult::Failed
     }
 
     pub fn find_closest(&self, target: &NodeId, count: usize) -> Vec<NodeEntry> {
-        todo!()
+        let mut all_nodes: Vec<NodeEntry> = self
+            .buckets
+            .iter()
+            .flat_map(|b| b.nodes.iter().cloned())
+            .collect();
+
+        all_nodes.sort_by(|a, b| {
+            let da = a.node_id.distance(target);
+            let db = b.node_id.distance(target);
+            da.cmp(&db)
+        });
+
+        all_nodes.truncate(count);
+        all_nodes
+    }
+
+    pub fn size(&self) -> usize {
+        self.buckets.iter().map(|b| b.nodes.len()).sum()
     }
 }
 
-enum AddResult {
+pub enum AddResult {
     Failed,
     Added,
     NeedSplit,

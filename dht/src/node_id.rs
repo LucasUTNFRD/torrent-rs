@@ -30,6 +30,15 @@ impl NodeId {
         Self(bytes)
     }
 
+    pub fn from_slice(slice: &[u8]) -> Option<Self> {
+        if slice.len() != NODE_ID_LEN {
+            return None;
+        }
+        let mut arr = [0u8; NODE_ID_LEN];
+        arr.copy_from_slice(slice);
+        Some(Self(arr))
+    }
+
     pub fn random() -> Self {
         Self(rand::random())
     }
@@ -40,6 +49,10 @@ impl NodeId {
 
     pub fn as_slice(&self) -> &[u8] {
         &self.0
+    }
+
+    pub fn distance(&self, other: &Self) -> Self {
+        self ^ other
     }
 
     /// Returns the "distance exponent" (159 - leading_zeros)

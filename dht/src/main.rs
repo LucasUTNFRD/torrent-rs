@@ -6,36 +6,58 @@ use tokio::time::sleep;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
+    // Set up tracing with a simple level filter
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .init();
+
+    tracing::info!("Starting DHT visualization...");
 
     let cfg = DhtConfig::default();
     let dht = Dht::new(cfg).await.context("failed to init dht")?;
 
-    // let info_hash = InfoHash::from_hex("76ED6A73E91B8A14035CA3B1F05E9F885598F0BB")
-    //     .context("failed to parse infohash")?;
+    tracing::info!("DHT initialized, starting bootstrap...");
 
-    // sleep(Duration::from_secs(60)).await;
-    // let found_peers = dht
-    //     .find_peers(info_hash)
-    //     .await
-    //     .context("failed to fetch peers")?;
+    let info_hash = InfoHash::from_hex("792B3577FED6DD95DBB03F5F0972E821230B834F").unwrap();
+
+    // Periodically display routing table sizes
+    let mut interval = tokio::time::interval(Duration::from_secs(2));
 
     loop {
-        let status = dht.get_swarm_status().await.unwrap();
-        tracing::info!("Swarm status: {:?}", status);
-        match status {
-            dht::dht::SwarmStatus::Good => {
-                tracing::info!("DHT bootstrap complete - ready to find peers");
-                break;
-            }
-            _ => {
-                sleep(Duration::from_secs(2)).await;
-            }
+        interval.tick().await;
+
+        let status = dht
+            .get_swarm_status()
+            .await
+            .unwrap_or(dht::dht::SwarmStatus::Broken);
+        let (v4_size, v6_size) = dht.get_routing_table_sizes().await.unwrap_or((0, 0));
+
+        tracing::info!(
+            "--- DHT Status ---
+            Swarm: {:?}
+            IPv4 Nodes: {}
+            IPv6 Nodes: {}
+            ------------------",
+            status,
+            v4_size,
+            v6_size
+        );
+
+        if matches!(status, dht::dht::SwarmStatus::Good) {
+            tracing::info!("DHT bootstrap complete and stable!");
+            break;
         }
     }
 
-    // Now ready to use DHT for peer discovery
-    // let found_peers = dht.find_peers(info_hash).await...;
+    tracing::info!("Finding peers for info hash: {}", info_hash.to_hex());
+    let peers = dht
+        .find_peers(info_hash)
+        .await
+        .context("failed to find peers")?;
+    tracing::info!("Found {} peers", peers.len());
+    for peer in peers {
+        tracing::info!("Peer: {}", peer);
+    }
 
     Ok(())
 }

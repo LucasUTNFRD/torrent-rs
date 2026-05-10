@@ -22,4 +22,7 @@ pub enum DhtError {
 
     #[error("Parse error: {0}")]
     Parse(String),
+
+    #[error("operation timed out")]
+    Timeout,
 }

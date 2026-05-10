@@ -68,11 +68,13 @@ pub enum Query {
         id: NodeId,
         target: NodeId,
         is_bootstrap: bool,
+        want: Option<Want>,
     },
     GetPeers {
         id: NodeId,
         info_hash: InfoHash,
         is_bootstrap: bool,
+        want: Option<Want>,
     },
     AnnouncePeer {
         id: NodeId,
@@ -85,7 +87,7 @@ pub enum Query {
 }
 
 /// BEP 32: which address families the querier wants back in the reply.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Want {
     pub n4: bool,
     pub n6: bool,
@@ -108,8 +110,6 @@ impl Want {
         Self { n4: true, n6: true }
     }
 }
-
-// TODO: Change Query::FindNode and Query::GetPeers to carry want
 
 /// DHT response types.
 #[derive(Debug)]
@@ -175,6 +175,7 @@ impl KrpcMessage {
                         id,
                         target,
                         is_bootstrap,
+                        want,
                     } => {
                         dict.put("q", &"find_node");
                         let mut args = BTreeMap::<Vec<u8>, Bencode>::new();
@@ -183,12 +184,25 @@ impl KrpcMessage {
                         if *is_bootstrap {
                             args.insert(b"bs".to_vec(), Bencode::Int(1));
                         }
+                        if let Some(want) = want {
+                            let mut want_list = Vec::new();
+                            if want.n4 {
+                                want_list.push(Bencode::Bytes(b"n4".to_vec()));
+                            }
+                            if want.n6 {
+                                want_list.push(Bencode::Bytes(b"n6".to_vec()));
+                            }
+                            if !want_list.is_empty() {
+                                args.insert(b"want".to_vec(), Bencode::List(want_list));
+                            }
+                        }
                         dict.insert(b"a".to_vec(), args.build());
                     }
                     Query::GetPeers {
                         id,
                         info_hash,
                         is_bootstrap,
+                        want,
                     } => {
                         dict.put("q", &"get_peers");
                         let mut args = BTreeMap::<Vec<u8>, Bencode>::new();
@@ -196,6 +210,18 @@ impl KrpcMessage {
                         args.put("info_hash", &info_hash.as_slice());
                         if *is_bootstrap {
                             args.insert(b"bs".to_vec(), Bencode::Int(1));
+                        }
+                        if let Some(want) = want {
+                            let mut want_list = Vec::new();
+                            if want.n4 {
+                                want_list.push(Bencode::Bytes(b"n4".to_vec()));
+                            }
+                            if want.n6 {
+                                want_list.push(Bencode::Bytes(b"n6".to_vec()));
+                            }
+                            if !want_list.is_empty() {
+                                args.insert(b"want".to_vec(), Bencode::List(want_list));
+                            }
                         }
                         dict.insert(b"a".to_vec(), args.build());
                     }
@@ -228,8 +254,17 @@ impl KrpcMessage {
                     }
                     Response::FindNode { id, nodes } => {
                         r.put("id", &id.as_slice());
-                        let compact = encode_compact_nodes_v4(nodes);
-                        r.put("nodes", &compact.as_slice());
+                        let v4_nodes: Vec<_> =
+                            nodes.iter().filter(|n| n.addr.is_ipv4()).cloned().collect();
+                        let v6_nodes: Vec<_> =
+                            nodes.iter().filter(|n| n.addr.is_ipv6()).cloned().collect();
+
+                        if !v4_nodes.is_empty() {
+                            r.put("nodes", &encode_compact_nodes_v4(&v4_nodes).as_slice());
+                        }
+                        if !v6_nodes.is_empty() {
+                            r.put("nodes6", &encode_compact_nodes_v6(&v6_nodes).as_slice());
+                        }
                     }
                     Response::GetPeers {
                         id,
@@ -248,8 +283,17 @@ impl KrpcMessage {
                             r.insert(b"values".to_vec(), Bencode::List(values_list));
                         }
                         if let Some(nodes) = nodes {
-                            let compact = encode_compact_nodes_v4(nodes);
-                            r.put("nodes", &compact.as_slice());
+                            let v4_nodes: Vec<_> =
+                                nodes.iter().filter(|n| n.addr.is_ipv4()).cloned().collect();
+                            let v6_nodes: Vec<_> =
+                                nodes.iter().filter(|n| n.addr.is_ipv6()).cloned().collect();
+
+                            if !v4_nodes.is_empty() {
+                                r.put("nodes", &encode_compact_nodes_v4(&v4_nodes).as_slice());
+                            }
+                            if !v6_nodes.is_empty() {
+                                r.put("nodes6", &encode_compact_nodes_v6(&v6_nodes).as_slice());
+                            }
                         }
                     }
                     Response::AnnouncePeer { id } => {
@@ -350,6 +394,7 @@ impl KrpcMessage {
         node_id: NodeId,
         target: NodeId,
         is_bootstrap: bool,
+        want: Option<Want>,
     ) -> Self {
         Self {
             transaction_id: TransactionId::new(tx_id),
@@ -359,6 +404,7 @@ impl KrpcMessage {
                 id: node_id,
                 target,
                 is_bootstrap,
+                want,
             }),
         }
     }
@@ -393,6 +439,7 @@ impl KrpcMessage {
         node_id: NodeId,
         info_hash: InfoHash,
         is_bootstrap: bool,
+        want: Option<Want>,
     ) -> Self {
         Self {
             transaction_id: TransactionId::new(tx_id),
@@ -402,6 +449,7 @@ impl KrpcMessage {
                 id: node_id,
                 info_hash,
                 is_bootstrap,
+                want,
             }),
         }
     }
@@ -522,10 +570,12 @@ fn parse_query(dict: &BTreeMap<Vec<u8>, Bencode>) -> Result<MessageBody, DhtErro
         "ping" => Ok(MessageBody::Query(Query::Ping { id })),
         "find_node" => {
             let target = parse_node_id(args, b"target")?;
+            let want = parse_want(args);
             Ok(MessageBody::Query(Query::FindNode {
                 id,
                 target,
                 is_bootstrap,
+                want,
             }))
         }
         "get_peers" => {
@@ -540,10 +590,12 @@ fn parse_query(dict: &BTreeMap<Vec<u8>, Bencode>) -> Result<MessageBody, DhtErro
             }
             let info_hash = InfoHash::from_slice(info_hash_bytes)
                 .ok_or_else(|| DhtError::Parse("invalid info_hash".to_string()))?;
+            let want = parse_want(args);
             Ok(MessageBody::Query(Query::GetPeers {
                 id,
                 info_hash,
                 is_bootstrap,
+                want,
             }))
         }
         "announce_peer" => {
@@ -690,6 +742,27 @@ fn parse_node_id(dict: &BTreeMap<Vec<u8>, Bencode>, key: &[u8]) -> Result<NodeId
     Ok(NodeId::from_bytes(id))
 }
 
+fn parse_want(args: &BTreeMap<Vec<u8>, Bencode>) -> Option<Want> {
+    if let Some(Bencode::List(list)) = args.get(b"want".as_slice()) {
+        let mut want = Want {
+            n4: false,
+            n6: false,
+        };
+        for b in list {
+            if let Bencode::Bytes(s) = b {
+                if s == b"n4" {
+                    want.n4 = true;
+                } else if s == b"n6" {
+                    want.n6 = true;
+                }
+            }
+        }
+        Some(want)
+    } else {
+        None
+    }
+}
+
 // ============================================================================
 // Compact encoding for nodes (26 bytes each: 20-byte ID + 4-byte IP + 2-byte port for IPv4)
 // ============================================================================
@@ -702,6 +775,19 @@ pub fn encode_compact_nodes_v4(nodes: &[CompactNodeInfo]) -> Vec<u8> {
             result.extend_from_slice(node.node_id.as_bytes());
             result.extend_from_slice(&v4.ip().octets());
             result.extend_from_slice(&v4.port().to_be_bytes());
+        }
+    }
+    result
+}
+
+/// Encode a list of nodes to compact format (38 bytes per node for IPv6).
+pub fn encode_compact_nodes_v6(nodes: &[CompactNodeInfo]) -> Vec<u8> {
+    let mut result = Vec::with_capacity(nodes.len() * 38);
+    for node in nodes {
+        if let SocketAddr::V6(v6) = node.addr {
+            result.extend_from_slice(node.node_id.as_bytes());
+            result.extend_from_slice(&v6.ip().octets());
+            result.extend_from_slice(&v6.port().to_be_bytes());
         }
     }
     result
@@ -845,9 +931,78 @@ pub fn decode_compact_peers_v4(data: &[u8]) -> Result<Vec<SocketAddr>, DhtError>
 // KRPC Error codes (BEP 0005)
 // ============================================================================
 
-pub mod error_codes {
-    pub const GENERIC_ERROR: i64 = 201;
-    pub const SERVER_ERROR: i64 = 202;
-    pub const PROTOCOL_ERROR: i64 = 203;
-    pub const METHOD_UNKNOWN: i64 = 204;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::Ipv4Addr;
+
+    #[test]
+    fn test_bep32_want_encoding() {
+        let node_id = NodeId::random();
+        let target = NodeId::random();
+        let want = Want::both();
+        let query = Query::FindNode {
+            id: node_id,
+            target,
+            is_bootstrap: false,
+            want: Some(want),
+        };
+        let msg = KrpcMessage {
+            transaction_id: TransactionId::new(123),
+            version: None,
+            sender_ip: None,
+            body: MessageBody::Query(query),
+        };
+
+        let bytes = msg.to_bytes();
+        let decoded = KrpcMessage::from_bytes(&bytes).unwrap();
+
+        if let MessageBody::Query(Query::FindNode {
+            want: Some(decoded_want),
+            ..
+        }) = decoded.body
+        {
+            assert!(decoded_want.n4);
+            assert!(decoded_want.n6);
+        } else {
+            panic!("expected FindNode query with want");
+        }
+    }
+
+    #[test]
+    fn test_bep32_response_encoding() {
+        let node_id = NodeId::random();
+        let v4_addr = SocketAddr::new(Ipv4Addr::new(1, 2, 3, 4).into(), 1234);
+        let v6_addr = SocketAddr::new("2001:db8::1".parse::<Ipv6Addr>().unwrap().into(), 5678);
+
+        let nodes = vec![
+            CompactNodeInfo {
+                node_id: NodeId::random(),
+                addr: v4_addr,
+            },
+            CompactNodeInfo {
+                node_id: NodeId::random(),
+                addr: v6_addr,
+            },
+        ];
+
+        let response = Response::FindNode { id: node_id, nodes };
+        let msg = KrpcMessage {
+            transaction_id: TransactionId::new(123),
+            version: None,
+            sender_ip: None,
+            body: MessageBody::Response(response),
+        };
+
+        let bytes = msg.to_bytes();
+        let decoded = KrpcMessage::from_bytes(&bytes).unwrap();
+
+        if let MessageBody::Response(Response::FindNode { nodes: decoded_nodes, .. }) = decoded.body {
+            assert_eq!(decoded_nodes.len(), 2);
+            assert!(decoded_nodes.iter().any(|n| n.addr == v4_addr));
+            assert!(decoded_nodes.iter().any(|n| n.addr == v6_addr));
+        } else {
+            panic!("expected FindNode response with nodes");
+        }
+    }
 }
