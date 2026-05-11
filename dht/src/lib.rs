@@ -2,6 +2,7 @@ pub mod dht;
 mod error;
 mod message;
 mod node_id;
+mod peer_store;
 mod routing_table;
 
 // ```rust

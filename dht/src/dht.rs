@@ -21,6 +21,8 @@ use tokio::{
 const DEFAULT_PORT: u16 = 6881;
 const MAX_PAYLOAD: usize = 2048;
 
+const ALPHA: usize = 5;
+const K: usize = 8;
 #[derive(Debug, Clone)]
 pub struct DhtConfig {
     pub port: u16,
@@ -139,6 +141,9 @@ pub(crate) enum DhtCommand {
     GetRoutingTableSizes {
         tx: oneshot::Sender<(usize, usize)>,
     },
+    WaitBootstrap {
+        tx: oneshot::Sender<()>,
+    },
 }
 
 #[derive(Debug)]
@@ -207,6 +212,7 @@ impl Dht {
             node_v4,
             node_v6,
             rx: coord_rx,
+            wait_bootstrap: Vec::new(),
         };
 
         tokio::spawn(async move {
@@ -256,6 +262,15 @@ impl Dht {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(DhtCommand::GetRoutingTableSizes { tx })
+            .await
+            .map_err(|_| DhtError::Cancelled)?;
+        rx.await.map_err(|_| DhtError::Cancelled)
+    }
+
+    pub async fn wait_bootstrap(&self) -> Result<(), DhtError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DhtCommand::WaitBootstrap { tx })
             .await
             .map_err(|_| DhtError::Cancelled)?;
         rx.await.map_err(|_| DhtError::Cancelled)
@@ -459,9 +474,6 @@ impl DhtNode {
         let mut candidates: Vec<Cand> = Vec::new();
         let mut seeds: Vec<SocketAddr> = bootstrap_addrs;
 
-        const ALPHA: usize = 5;
-        const K: usize = 8;
-
         let mut fut = FuturesUnordered::new();
         let mut outstanding = 0;
 
@@ -512,6 +524,7 @@ impl DhtNode {
                 break;
             }
 
+            // Why we are using a tokio select?
             tokio::select! {
                 Some((addr, res)) = fut.next() => {
                     outstanding -= 1;
@@ -550,10 +563,10 @@ impl DhtNode {
             }
 
             let responded_count = candidates.iter().filter(|n| n.responded).count();
-            if seeds.is_empty() && responded_count >= Self::K {
+            if seeds.is_empty() && responded_count >= K {
                 let k_closest_queried = candidates
                     .iter()
-                    .take(Self::K)
+                    .take(K)
                     .all(|n| n.queried && (n.responded || outstanding == 0));
                 if k_closest_queried && outstanding == 0 {
                     break;
@@ -561,8 +574,6 @@ impl DhtNode {
             }
         }
     }
-    const ALPHA: usize = 5;
-    const K: usize = 8;
 
     async fn get_peers_task(
         info_hash: InfoHash,
@@ -598,13 +609,8 @@ impl DhtNode {
                 }
             });
 
-            while outstanding < Self::ALPHA {
-                if let Some(node) = candidates
-                    .iter_mut()
-                    .take(Self::K)
-                    .filter(|n| !n.queried)
-                    .next()
-                {
+            while outstanding < ALPHA {
+                if let Some(node) = candidates.iter_mut().take(K).filter(|n| !n.queried).next() {
                     node.queried = true;
                     outstanding += 1;
                     let addr = node.addr;
@@ -673,10 +679,10 @@ impl DhtNode {
             }
 
             let responded_count = candidates.iter().filter(|n| n.responded).count();
-            if responded_count >= Self::K {
+            if responded_count >= K {
                 let k_closest_queried = candidates
                     .iter()
-                    .take(Self::K)
+                    .take(K)
                     .all(|n| n.queried && (n.responded || outstanding == 0));
                 if k_closest_queried && outstanding == 0 {
                     break;
@@ -805,6 +811,7 @@ struct DhtCoordinator {
     node_v4: Option<NodeHandle>,
     node_v6: Option<NodeHandle>,
     rx: mpsc::Receiver<DhtCommand>,
+    wait_bootstrap: Vec<oneshot::Sender<()>>,
 }
 
 impl DhtCoordinator {
@@ -867,6 +874,9 @@ impl DhtCoordinator {
                     if v4_bootstrap.is_none() && v6_bootstrap.is_none() {
                         bootstrapped = true;
                         tracing::info!("DHT bootstrap complete");
+                        for tx in self.wait_bootstrap.drain(..) {
+                            let _ = tx.send(());
+                        }
                     }
                 }
                 _res = async {
@@ -881,6 +891,9 @@ impl DhtCoordinator {
                     if v4_bootstrap.is_none() && v6_bootstrap.is_none() {
                         bootstrapped = true;
                         tracing::info!("DHT bootstrap complete");
+                        for tx in self.wait_bootstrap.drain(..) {
+                            let _ = tx.send(());
+                        }
                     }
                 }
                 cmd = self.rx.recv() => {
@@ -995,6 +1008,13 @@ impl DhtCoordinator {
                     }
                 }
                 let _ = tx.send((v4_size, v6_size));
+            }
+            DhtCommand::WaitBootstrap { tx } => {
+                if bootstrapped {
+                    let _ = tx.send(());
+                } else {
+                    self.wait_bootstrap.push(tx);
+                }
             }
         }
     }

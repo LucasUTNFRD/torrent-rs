@@ -8,7 +8,7 @@ use tokio::time::sleep;
 async fn main() -> anyhow::Result<()> {
     // Set up tracing with a simple level filter
     tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)
+        .with_max_level(tracing::Level::INFO)
         .init();
 
     tracing::info!("Starting DHT visualization...");
@@ -20,34 +20,14 @@ async fn main() -> anyhow::Result<()> {
 
     let info_hash = InfoHash::from_hex("792B3577FED6DD95DBB03F5F0972E821230B834F").unwrap();
 
-    // Periodically display routing table sizes
-    let mut interval = tokio::time::interval(Duration::from_secs(2));
+    // Wait for bootstrap to complete
+    dht.wait_bootstrap()
+        .await
+        .context("failed to wait for bootstrap")?;
+    tracing::info!("DHT bootstrap complete and stable!");
 
-    loop {
-        interval.tick().await;
-
-        let status = dht
-            .get_swarm_status()
-            .await
-            .unwrap_or(dht::dht::SwarmStatus::Broken);
-        let (v4_size, v6_size) = dht.get_routing_table_sizes().await.unwrap_or((0, 0));
-
-        tracing::info!(
-            "--- DHT Status ---
-            Swarm: {:?}
-            IPv4 Nodes: {}
-            IPv6 Nodes: {}
-            ------------------",
-            status,
-            v4_size,
-            v6_size
-        );
-
-        if matches!(status, dht::dht::SwarmStatus::Good) {
-            tracing::info!("DHT bootstrap complete and stable!");
-            break;
-        }
-    }
+    let (v4_size, v6_size) = dht.get_routing_table_sizes().await.unwrap_or((0, 0));
+    tracing::info!("Routing table size: v4={}, v6={}", v4_size, v6_size);
 
     tracing::info!("Finding peers for info hash: {}", info_hash.to_hex());
     let peers = dht
