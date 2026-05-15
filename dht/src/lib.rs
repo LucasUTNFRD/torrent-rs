@@ -4,6 +4,7 @@ mod message;
 mod node_id;
 mod peer_store;
 mod routing_table;
+mod token;
 
 // ```rust
 // /// This is what users see - super simple!

@@ -25,7 +25,9 @@ impl PeerStore {
         set.extend(addrs.iter().copied());
     }
 
-    pub fn get_peers(&self, info_hash: InfoHash) -> Option<&HashSet<SocketAddr>> {
-        self.inner.get(&info_hash)
+    pub fn get_peers(&self, info_hash: &InfoHash) -> Option<Box<[SocketAddr]>> {
+        self.inner
+            .get(info_hash)
+            .map(|set| set.iter().copied().collect::<Vec<_>>().into_boxed_slice())
     }
 }
