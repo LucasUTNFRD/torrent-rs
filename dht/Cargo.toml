@@ -18,6 +18,7 @@ bencode = { path = "../bencode" }
 bittorrent-common = { path = "../bittorrent-common/" }
 anyhow.workspace = true
 rand.workspace = true
+sha1_smol = "1.0.1"
 
 [lints]
 workspace = true

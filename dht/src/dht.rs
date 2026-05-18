@@ -1,14 +1,16 @@
 use crate::{
+    dht::tasks::{BootstrapCtx, Search},
     error::DhtError,
-    message::{CompactNodeInfo, KrpcMessage, MessageBody, Query, Response, TransactionId, Want},
+    message::{CompactNodeInfo, KrpcMessage, MessageBody, Query, Response, TransactionId},
     node_id::NodeId,
     peer_store::PeerStore,
     routing_table::{AddressFamily, RoutingTable},
+    token::TokenManager,
 };
 use bittorrent_common::types::InfoHash;
 use futures::{StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4},
     sync::{Arc, RwLock},
     time::Duration,
@@ -115,13 +117,9 @@ pub struct Dht {
 
 #[derive(Debug)]
 pub(crate) enum DhtCommand {
-    Announce {
+    Search {
         info_hash: InfoHash,
-        peer_port: u16,
-        tx: oneshot::Sender<Vec<SocketAddr>>,
-    },
-    FindPeer {
-        info_hash: InfoHash,
+        peer_port: Option<u16>,
         tx: oneshot::Sender<Vec<SocketAddr>>,
     },
     AddNode {
@@ -142,8 +140,9 @@ pub(crate) enum DhtNodeCommand {
         addrs: Vec<SocketAddr>,
         reply: oneshot::Sender<()>,
     },
-    GetPeers {
+    SearchTask {
         info_hash: InfoHash,
+        port: Option<u16>,
         reply: oneshot::Sender<Vec<SocketAddr>>,
     },
     AddNode {
@@ -169,36 +168,54 @@ impl Dht {
         let node_id = NodeId::random();
         let peer_storage = Arc::new(RwLock::new(PeerStore::default()));
 
-        let node_v4 = bind_v4(cfg.port).await.ok().map(|socket| {
-            let (tx, rx) = mpsc::channel(64);
-            let node = DhtNode::new(
-                node_id,
-                socket,
-                AddressFamily::V4,
-                tx.clone(),
-                peer_storage.clone(),
-            );
-            let task = tokio::spawn(async move { node.run(rx).await });
-            NodeHandle { tx, task }
-        });
+        let s4 = bind_v4(cfg.port).await;
+        let s6 = bind_v6(cfg.port);
 
-        let port = cfg.port;
-        let node_v6 = tokio::task::spawn_blocking(move || bind_v6(port))
-            .await
-            .unwrap_or_else(|_| Err(std::io::Error::other("spawn_blocking failed")))
+        let rt_v4 = s4
+            .as_ref()
             .ok()
-            .map(|socket| {
+            .map(|_| Arc::new(RwLock::new(RoutingTable::new_v4(node_id))));
+
+        let rt_v6 = s6
+            .as_ref()
+            .ok()
+            .map(|_| Arc::new(RwLock::new(RoutingTable::new_v6(node_id))));
+
+        let node_v4 = match (s4, rt_v4.clone()) {
+            (Ok(socket), Some(rt)) => {
+                let (tx, rx) = mpsc::channel(64);
+                let node = DhtNode::new(
+                    node_id,
+                    socket,
+                    AddressFamily::V4,
+                    rt,
+                    rt_v6.clone(),
+                    tx.clone(),
+                    peer_storage.clone(),
+                );
+                let task = tokio::spawn(async move { node.run(rx).await });
+                Some(NodeHandle { tx, task })
+            }
+            _ => None,
+        };
+
+        let node_v6 = match (s6, rt_v6.clone()) {
+            (Ok(socket), Some(rt)) => {
                 let (tx, rx) = mpsc::channel(64);
                 let node = DhtNode::new(
                     node_id,
                     socket,
                     AddressFamily::V6,
+                    rt,
+                    rt_v4.clone(),
                     tx.clone(),
                     peer_storage.clone(),
                 );
                 let task = tokio::spawn(async move { node.run(rx).await });
-                NodeHandle { tx, task }
-            });
+                Some(NodeHandle { tx, task })
+            }
+            _ => None,
+        };
 
         if node_v4.is_none() && node_v6.is_none() {
             return Err(DhtError::IO(
@@ -209,9 +226,11 @@ impl Dht {
         let coord = DhtCoordinator {
             node_v4,
             node_v6,
+            rt_v4,
+            rt_v6,
             rx: coord_rx,
             wait_bootstrap: Vec::new(),
-            peer_storage,
+            _peer_storage: peer_storage,
         };
 
         tokio::spawn(async move {
@@ -229,9 +248,9 @@ impl Dht {
     ) -> Result<Vec<SocketAddr>, DhtError> {
         let (tx, rx) = oneshot::channel();
         self.tx
-            .send(DhtCommand::Announce {
+            .send(DhtCommand::Search {
                 info_hash,
-                peer_port,
+                peer_port: Some(peer_port),
                 tx,
             })
             .await
@@ -242,7 +261,11 @@ impl Dht {
     pub async fn find_peers(&self, info_hash: InfoHash) -> Result<Vec<SocketAddr>, DhtError> {
         let (tx, rx) = oneshot::channel();
         self.tx
-            .send(DhtCommand::FindPeer { info_hash, tx })
+            .send(DhtCommand::Search {
+                info_hash,
+                peer_port: None,
+                tx,
+            })
             .await
             .map_err(|_| DhtError::Cancelled)?;
         rx.await.map_err(|_| DhtError::Cancelled)
@@ -294,36 +317,84 @@ struct BootstrapNodeState {
 struct DhtNode {
     node_id: NodeId,
     socket: Arc<UdpSocket>,
-    routing_table: RoutingTable,
+    routing_table: Arc<RwLock<RoutingTable>>,
+    remote_routing_table: Option<Arc<RwLock<RoutingTable>>>,
     family: AddressFamily,
     pending_queries: HashMap<u16, oneshot::Sender<Response>>,
     next_tid: u16,
     tx: mpsc::Sender<DhtNodeCommand>,
     peer_storage: Arc<RwLock<PeerStore>>,
+    token_manager: TokenManager,
 }
 
 impl DhtNode {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         node_id: NodeId,
         socket: UdpSocket,
         family: AddressFamily,
+        routing_table: Arc<RwLock<RoutingTable>>,
+        remote_routing_table: Option<Arc<RwLock<RoutingTable>>>,
         tx: mpsc::Sender<DhtNodeCommand>,
         peer_storage: Arc<RwLock<PeerStore>>,
     ) -> Self {
-        let routing_table = match family {
-            AddressFamily::V4 => RoutingTable::new_v4(node_id),
-            AddressFamily::V6 => RoutingTable::new_v6(node_id),
-        };
         Self {
             node_id,
             socket: Arc::new(socket),
             routing_table,
+            remote_routing_table,
             family,
             pending_queries: HashMap::new(),
             next_tid: 0,
             tx,
             peer_storage,
+            token_manager: TokenManager::new(Duration::from_secs(15 * 60)),
         }
+    }
+
+    fn get_nodes_for_target(
+        &self,
+        target: &NodeId,
+        want: Option<crate::message::Want>,
+    ) -> Vec<CompactNodeInfo> {
+        let want = want.unwrap_or_else(|| match self.family {
+            AddressFamily::V4 => crate::message::Want::v4_only(),
+            AddressFamily::V6 => crate::message::Want::v6_only(),
+        });
+
+        let mut nodes = Vec::new();
+
+        if want.n4 {
+            let rt = if self.family == AddressFamily::V4 {
+                Some(&self.routing_table)
+            } else {
+                self.remote_routing_table.as_ref()
+            };
+            if let Some(rt) = rt {
+                let closest = rt.read().unwrap().find_closest(target, 8);
+                nodes.extend(closest.into_iter().map(|n| CompactNodeInfo {
+                    node_id: n.node_id,
+                    addr: n.addr,
+                }));
+            }
+        }
+
+        if want.n6 {
+            let rt = if self.family == AddressFamily::V6 {
+                Some(&self.routing_table)
+            } else {
+                self.remote_routing_table.as_ref()
+            };
+            if let Some(rt) = rt {
+                let closest = rt.read().unwrap().find_closest(target, 8);
+                nodes.extend(closest.into_iter().map(|n| CompactNodeInfo {
+                    node_id: n.node_id,
+                    addr: n.addr,
+                }));
+            }
+        }
+
+        nodes
     }
 
     const fn next_tid(&mut self) -> u16 {
@@ -339,7 +410,7 @@ impl DhtNode {
             let _ = run_socket(socket_clone, packet_tx).await;
         });
 
-        let mut refresh_interval = tokio::time::interval(Duration::from_secs(15));
+        // let mut refresh_interval = tokio::time::interval(Duration::from_secs(15));
 
         loop {
             tokio::select! {
@@ -355,9 +426,6 @@ impl DhtNode {
                         None => break,
                     }
                 }
-                _ = refresh_interval.tick() => {
-                    self.refresh().await;
-                }
             }
         }
     }
@@ -366,38 +434,37 @@ impl DhtNode {
         match cmd {
             DhtNodeCommand::AddNode { id, addr } => {
                 tracing::info!(family = ?self.family, ?id, ?addr, "Adding node to routing table");
-                self.routing_table.add_node(id, addr);
+                self.routing_table.write().unwrap().add_node(id, addr);
             }
-            DhtNodeCommand::GetPeers { info_hash, reply } => {
-                let node_id = self.node_id;
-                let tx = self.tx.clone();
-                let family = self.family;
+            DhtNodeCommand::SearchTask {
+                info_hash,
+                port,
+                reply,
+            } => {
+                let our_node_id = self.node_id;
+                let dht_node_tx = self.tx.clone();
+                let af = self.family;
                 let target = NodeId::from_slice(info_hash.as_slice()).expect("invalid info_hash");
-                let k_closest_nodes = self.routing_table.find_closest(&target, 8);
-                let k_closest_addr = k_closest_nodes.into_iter().map(|n| n.addr).collect();
-
-                let peer_storage_ref = self.peer_storage.clone();
-                tokio::spawn(async move {
-                    let peers =
-                        Self::get_peers_task(info_hash, k_closest_addr, node_id, tx, family).await;
-                    peer_storage_ref
-                        .write()
-                        .unwrap()
-                        .add_peers(info_hash, &peers);
-                    let _ = reply.send(peers);
-                });
+                let k_closest_nodes = self.routing_table.read().unwrap().find_closest(&target, 8);
+                let jh = Search::start_search_task(
+                    target,
+                    our_node_id,
+                    dht_node_tx,
+                    port,
+                    af,
+                    &k_closest_nodes,
+                );
             }
             DhtNodeCommand::Bootstrap { addrs, reply } => {
                 let node_id = self.node_id;
                 let tx = self.tx.clone();
                 let family = self.family;
-                tokio::spawn(async move {
-                    Self::bootstrap_task(addrs, node_id, tx, family).await;
-                    let _ = reply.send(());
-                });
+                let jh = BootstrapCtx::start_boostrap(addrs, node_id, tx, family);
+                let _ = jh.await;
+                let _ = reply.send(());
             }
             DhtNodeCommand::RoutingTableSize { reply } => {
-                let _ = reply.send(self.routing_table.size());
+                let _ = reply.send(self.routing_table.read().unwrap().size());
             }
             DhtNodeCommand::QueryNode { addr, query, reply } => {
                 let tid = self.next_tid();
@@ -444,249 +511,6 @@ impl DhtNode {
         }
     }
 
-    async fn bootstrap_task(
-        bootstrap_addrs: Vec<SocketAddr>,
-        our_node_id: NodeId,
-        dht_node_tx: mpsc::Sender<DhtNodeCommand>,
-        family: AddressFamily,
-    ) {
-        #[derive(Debug, Clone)]
-        struct Cand {
-            id: NodeId,
-            addr: SocketAddr,
-            queried: bool,
-            responded: bool,
-        }
-
-        let mut candidates: Vec<Cand> = Vec::new();
-
-        let mut seen_addrs = HashSet::new();
-        let mut seeds: Vec<SocketAddr> = bootstrap_addrs
-            .into_iter()
-            .filter(|a| seen_addrs.insert(*a))
-            .collect();
-        seeds.reverse();
-
-        let mut fut = FuturesUnordered::new();
-        let bootstrap_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-
-        loop {
-            // Sort only when there are candidates to sort.
-            if !candidates.is_empty() {
-                candidates.sort_by(|a, b| {
-                    our_node_id
-                        .distance(&a.id)
-                        .cmp(&our_node_id.distance(&b.id))
-                });
-            }
-
-            while fut.len() < ALPHA {
-                let addr = if let Some(addr) = seeds.pop() {
-                    seen_addrs.insert(addr); // mark as ever-queried
-                    addr
-                } else if let Some(node) = candidates.iter_mut().take(K).find(|n| !n.queried) {
-                    node.queried = true;
-                    node.addr
-                } else {
-                    break;
-                };
-
-                let tx = dht_node_tx.clone();
-                let query = Query::FindNode {
-                    id: our_node_id,
-                    target: our_node_id,
-                    is_bootstrap: true,
-                    want: Some(match family {
-                        AddressFamily::V4 => Want::v4_only(),
-                        AddressFamily::V6 => Want::v6_only(),
-                    }),
-                };
-                fut.push(async move {
-                    let (reply_tx, reply_rx) = oneshot::channel();
-                    let _ = tx
-                        .send(DhtNodeCommand::QueryNode {
-                            addr,
-                            query,
-                            reply: reply_tx,
-                        })
-                        .await;
-                    (addr, reply_rx.await)
-                });
-            }
-
-            if fut.is_empty() {
-                break;
-            }
-
-            tokio::select! {
-                Some((addr, res)) = fut.next() => {
-                    if let Ok(Ok(Response::FindNode { id, nodes })) = res {
-                        if let Some(n) = candidates.iter_mut().find(|n| n.addr == addr) {
-                            n.id = id;
-                            n.responded = true;
-                        } else if !candidates.iter().any(|n| n.addr == addr) {
-                            candidates.push(Cand {
-                                id,
-                                addr,
-                                queried: true,
-                                responded: true,
-                            });
-                        }
-
-                        for compact in nodes {
-                            let node_id = compact.node_id;
-                            let node_addr = compact.addr;
-
-                            let _ = dht_node_tx
-                                .send(DhtNodeCommand::AddNode { id: node_id, addr: node_addr })
-                                .await;
-
-                            if seen_addrs.insert(node_addr) {
-                                candidates.push(Cand {
-                                    id: node_id,
-                                    addr: node_addr,
-                                    queried: false,
-                                    responded: false,
-                                });
-                            }
-                        }
-                    }
-                }
-                () = tokio::time::sleep_until(bootstrap_deadline) => {
-                    tracing::warn!(family = ?family, "Bootstrap timed out after 30s");
-                    break;
-                }
-            }
-
-            if fut.is_empty() && seeds.is_empty() {
-                let k_closest_all_queried = candidates.iter().take(K).all(|n| n.queried);
-                if k_closest_all_queried {
-                    break;
-                }
-            }
-        }
-    }
-
-    async fn get_peers_task(
-        info_hash: InfoHash,
-        seed_addrs: Vec<SocketAddr>,
-        our_node_id: NodeId,
-        dht_node_tx: mpsc::Sender<DhtNodeCommand>,
-        family: AddressFamily,
-    ) -> Vec<SocketAddr> {
-        let mut candidates: Vec<BootstrapNodeState> = seed_addrs
-            .into_iter()
-            .map(|addr| BootstrapNodeState {
-                id: None,
-                addr,
-                queried: false,
-                responded: false,
-            })
-            .collect();
-
-        let mut fut = FuturesUnordered::new();
-        let mut outstanding = 0;
-        let mut all_peers = Vec::new();
-        let target = NodeId::from_slice(info_hash.as_slice()).expect("invalid info_hash");
-
-        loop {
-            candidates.sort_by(|a, b| {
-                let da = a.id.map(|id| target.distance(&id));
-                let db = b.id.map(|id| target.distance(&id));
-                match (da, db) {
-                    (Some(a), Some(b)) => a.cmp(&b),
-                    (Some(_), None) => std::cmp::Ordering::Less,
-                    (None, Some(_)) => std::cmp::Ordering::Greater,
-                    (None, None) => std::cmp::Ordering::Equal,
-                }
-            });
-
-            while outstanding < ALPHA {
-                if let Some(node) = candidates.iter_mut().take(K).filter(|n| !n.queried).next() {
-                    node.queried = true;
-                    outstanding += 1;
-                    let addr = node.addr;
-                    let tx = dht_node_tx.clone();
-                    let query = Query::GetPeers {
-                        id: our_node_id,
-                        info_hash,
-                        is_bootstrap: false,
-                        want: Some(match family {
-                            AddressFamily::V4 => crate::message::Want::v4_only(),
-                            AddressFamily::V6 => crate::message::Want::v6_only(),
-                        }),
-                    };
-
-                    fut.push(async move {
-                        let (reply_tx, reply_rx) = oneshot::channel();
-                        let _ = tx
-                            .send(DhtNodeCommand::QueryNode {
-                                addr,
-                                query,
-                                reply: reply_tx,
-                            })
-                            .await;
-                        (addr, reply_rx.await)
-                    });
-                } else {
-                    break;
-                }
-            }
-
-            if outstanding == 0 {
-                break;
-            }
-
-            tokio::select! {
-                Some((addr, res)) = fut.next() => {
-                    outstanding -= 1;
-                    // TODO: response of get peers contains also a token that we must store in order
-                    // to announce to the network we are downloading such torrent
-                    if let Ok(Ok(Response::GetPeers { id, values, nodes, .. })) = res {
-                        if let Some(n) = candidates.iter_mut().find(|n| n.addr == addr) {
-                            n.id = Some(id);
-                            n.responded = true;
-                        }
-
-                        if let Some(peers) = values {
-                            all_peers.extend(peers);
-                        }
-
-                        if let Some(nodes) = nodes {
-                            for compact in nodes {
-                                if !candidates.iter().any(|n| n.addr == compact.addr) {
-                                    candidates.push(BootstrapNodeState {
-                                        id: Some(compact.node_id),
-                                        addr: compact.addr,
-                                        queried: false,
-                                        responded: false,
-                                    });
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            if all_peers.len() >= 50 {
-                break;
-            }
-
-            let responded_count = candidates.iter().filter(|n| n.responded).count();
-            if responded_count >= K {
-                let k_closest_queried = candidates
-                    .iter()
-                    .take(K)
-                    .all(|n| n.queried && (n.responded || outstanding == 0));
-                if k_closest_queried && outstanding == 0 {
-                    break;
-                }
-            }
-        }
-
-        all_peers
-    }
-
     async fn handle_packet(&mut self, addr: SocketAddr, bytes: Vec<u8>) {
         if let Ok(msg) = KrpcMessage::from_bytes(&bytes) {
             let node_id = msg.get_node_id();
@@ -701,7 +525,7 @@ impl DhtNode {
                     if let Some(tx) = self.pending_queries.remove(&tid) {
                         if let Some(id) = node_id {
                             tracing::info!(family = ?self.family, ?id, ?addr, "Updating routing table from response");
-                            self.routing_table.add_node(id, addr);
+                            self.routing_table.write().unwrap().add_node(id, addr);
                         }
                         let _ = tx.send(response);
                     }
@@ -716,13 +540,13 @@ impl DhtNode {
     async fn handle_query(&mut self, addr: SocketAddr, tid: TransactionId, query: Query) {
         // BEP 5: Add querying node to routing table
         let id = match query {
-            Query::Ping { id } => id,
-            Query::FindNode { id, .. } => id,
-            Query::GetPeers { id, .. } => id,
-            Query::AnnouncePeer { id, .. } => id,
+            Query::Ping { id }
+            | Query::FindNode { id, .. }
+            | Query::GetPeers { id, .. }
+            | Query::AnnouncePeer { id, .. } => id,
         };
 
-        self.routing_table.add_node(id, addr);
+        self.routing_table.write().unwrap().add_node(id, addr);
 
         match query {
             Query::Ping { id: _ } => {
@@ -730,20 +554,12 @@ impl DhtNode {
                 let _ = self.socket.send_to(&msg.to_bytes(), addr).await;
             }
             Query::FindNode {
-                id,
+                id: _,
                 target,
                 is_bootstrap: _,
                 want,
             } => {
-                // TODO: process want field for BEP-32
-                let closest = self.routing_table.find_closest(&target, 8);
-                let nodes: Vec<CompactNodeInfo> = closest
-                    .into_iter()
-                    .map(|n| CompactNodeInfo {
-                        node_id: n.node_id,
-                        addr: n.addr,
-                    })
-                    .collect();
+                let nodes = self.get_nodes_for_target(&target, want);
                 let msg = KrpcMessage::find_node_response(tid, self.node_id, nodes);
                 let _ = self.socket.send_to(&msg.to_bytes(), addr).await;
             }
@@ -751,50 +567,82 @@ impl DhtNode {
                 id: _,
                 info_hash,
                 is_bootstrap: _,
-                want: _,
+                want,
             } => {
-                // TODO: We need to remeber tokens because the
-                // The token value is a required argument for a future announce_peer query.
-                let token = vec![1, 2, 3, 4]; // Dummy token
-                let have_peers = self.peer_storage.read().unwrap().get_peers(&info_hash);
-                let msg = if let Some(peers) = have_peers {
-                    KrpcMessage::get_peers_response_with_values(
-                        tid,
-                        self.node_id,
-                        token,
-                        peers.into(),
-                    )
-                } else {
-                    let target =
-                        NodeId::from_slice(info_hash.as_slice()).expect("invalid info_hash");
-                    let closest = self.routing_table.find_closest(&target, K);
-                    let nodes: Vec<CompactNodeInfo> = closest
-                        .into_iter()
-                        .map(|n| CompactNodeInfo {
-                            node_id: n.node_id,
-                            addr: n.addr,
-                        })
-                        .collect();
-                    KrpcMessage::get_peers_response_with_nodes(tid, self.node_id, token, nodes)
-                };
+                let token = self
+                    .token_manager
+                    .generate_token(&addr.ip(), &info_hash)
+                    .to_vec();
+                let peers = self.peer_storage.read().unwrap().get_peers(&info_hash);
+
+                let filtered_peers = peers
+                    .map(|p| {
+                        p.into_iter()
+                            .filter(|addr| match self.family {
+                                AddressFamily::V4 => addr.is_ipv4(),
+                                AddressFamily::V6 => addr.is_ipv6(),
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .filter(|p: &Vec<SocketAddr>| !p.is_empty());
+
+                let target = NodeId::from_slice(info_hash.as_bytes()).expect("invalid info_hash");
+                let nodes = self.get_nodes_for_target(&target, want);
+
+                let nodes_opt = if nodes.is_empty() { None } else { Some(nodes) };
+
+                let msg = KrpcMessage::get_peers_response(
+                    tid,
+                    self.node_id,
+                    token,
+                    filtered_peers,
+                    nodes_opt,
+                );
 
                 let _ = self.socket.send_to(&msg.to_bytes(), addr).await;
             }
             Query::AnnouncePeer {
-                id,
+                id: _,
                 info_hash,
                 port,
                 token,
                 implied_port,
             } => {
-                // TODO: Handle other queries
-                // The queried node must verify that the token was previously sent to the same IP address as the querying node. Then the queried node should store the IP address of the querying node and the supplied port number under the infohash in its store of peer contact information.
+                // Ensure secrets rotate if necessary before validation
+                self.token_manager.check_rotation();
+
+                if !self.token_manager.validate_token(
+                    &addr.ip(),
+                    &info_hash,
+                    token.try_into().expect("It must be a u8;20)"),
+                ) {
+                    // BEP 5 Protocol Error: 203 Protocol Error (or Malicious/Expired token)
+                    let err_msg = KrpcMessage::error_response(
+                        tid,
+                        203,
+                        "Invalid or expired token".to_string(),
+                    );
+                    let _ = self.socket.send_to(&err_msg.to_bytes(), addr).await;
+                    return;
+                }
+
+                let peer_port = if implied_port { addr.port() } else { port };
+
+                let remote_peer_addr = SocketAddr::new(addr.ip(), peer_port);
+
+                self.peer_storage
+                    .write()
+                    .unwrap()
+                    .add_peer(info_hash, remote_peer_addr);
+                self.peer_storage
+                    .write()
+                    .unwrap()
+                    .add_peer(info_hash, remote_peer_addr);
+
+                let msg = KrpcMessage::announce_peer_response(tid, self.node_id);
+                let _ = self.socket.send_to(&msg.to_bytes(), addr).await;
             }
         }
-    }
-
-    async fn refresh(&mut self) {
-        // TODO: Implement refresh logic
     }
 }
 
@@ -830,9 +678,11 @@ impl Drop for NodeHandle {
 struct DhtCoordinator {
     node_v4: Option<NodeHandle>,
     node_v6: Option<NodeHandle>,
+    rt_v4: Option<Arc<RwLock<RoutingTable>>>,
+    rt_v6: Option<Arc<RwLock<RoutingTable>>>,
     rx: mpsc::Receiver<DhtCommand>,
     wait_bootstrap: Vec<oneshot::Sender<()>>,
-    peer_storage: Arc<RwLock<PeerStore>>,
+    _peer_storage: Arc<RwLock<PeerStore>>,
 }
 
 impl DhtCoordinator {
@@ -851,31 +701,32 @@ impl DhtCoordinator {
             }
         }
 
-        if let Some(ref node) = self.node_v4 {
-            if !v4_addrs.is_empty() {
-                let (tx, rx) = oneshot::channel();
-                let _ = node
-                    .tx
-                    .send(DhtNodeCommand::Bootstrap {
-                        addrs: v4_addrs,
-                        reply: tx,
-                    })
-                    .await;
-                v4_bootstrap = Some(rx);
-            }
+        if !v4_addrs.is_empty()
+            && let Some(ref node) = self.node_v4
+        {
+            let (tx, rx) = oneshot::channel();
+            let _ = node
+                .tx
+                .send(DhtNodeCommand::Bootstrap {
+                    addrs: v4_addrs,
+                    reply: tx,
+                })
+                .await;
+            v4_bootstrap = Some(rx);
         }
-        if let Some(ref node) = self.node_v6 {
-            if !v6_addrs.is_empty() {
-                let (tx, rx) = oneshot::channel();
-                let _ = node
-                    .tx
-                    .send(DhtNodeCommand::Bootstrap {
-                        addrs: v6_addrs,
-                        reply: tx,
-                    })
-                    .await;
-                v6_bootstrap = Some(rx);
-            }
+
+        if !v6_addrs.is_empty()
+            && let Some(ref node) = self.node_v6
+        {
+            let (tx, rx) = oneshot::channel();
+            let _ = node
+                .tx
+                .send(DhtNodeCommand::Bootstrap {
+                    addrs: v6_addrs,
+                    reply: tx,
+                })
+                .await;
+            v6_bootstrap = Some(rx);
         }
 
         let mut bootstrapped = false;
@@ -938,7 +789,11 @@ impl DhtCoordinator {
                     let _ = node.tx.send(DhtNodeCommand::AddNode { id, addr }).await;
                 }
             }
-            DhtCommand::FindPeer { info_hash, tx } => {
+            DhtCommand::Search {
+                info_hash,
+                tx,
+                peer_port,
+            } => {
                 if !bootstrapped {
                     tracing::warn!(
                         "FindPeer requested before bootstrap complete - results may be limited"
@@ -949,8 +804,9 @@ impl DhtCoordinator {
                     let (reply_tx, reply_rx) = oneshot::channel();
                     let _ = node
                         .tx
-                        .send(DhtNodeCommand::GetPeers {
+                        .send(DhtNodeCommand::SearchTask {
                             info_hash,
+                            port: peer_port,
                             reply: reply_tx,
                         })
                         .await;
@@ -960,8 +816,9 @@ impl DhtCoordinator {
                     let (reply_tx, reply_rx) = oneshot::channel();
                     let _ = node
                         .tx
-                        .send(DhtNodeCommand::GetPeers {
+                        .send(DhtNodeCommand::SearchTask {
                             info_hash,
+                            port: peer_port,
                             reply: reply_tx,
                         })
                         .await;
@@ -978,48 +835,17 @@ impl DhtCoordinator {
                     let _ = tx.send(all_peers);
                 });
             }
-            DhtCommand::Announce {
-                info_hash: _,
-                peer_port: _,
-                tx,
-            } => {
-                // For announce, we might want to do GetPeers first to find closer nodes
-                // For now, let's just return empty vec or similar
-                let _ = tx.send(Vec::new());
-            }
             DhtCommand::GetRoutingTableSizes { tx } => {
-                let mut v4_size = 0;
-                let mut v6_size = 0;
-                let mut futures = FuturesUnordered::<
-                    BoxFuture<'_, (usize, Result<usize, oneshot::error::RecvError>)>,
-                >::new();
-
-                if let Some(ref node) = self.node_v4 {
-                    let (reply_tx, reply_rx) = oneshot::channel();
-                    let _ = node
-                        .tx
-                        .send(DhtNodeCommand::RoutingTableSize { reply: reply_tx })
-                        .await;
-                    futures.push(Box::pin(async move { (0, reply_rx.await) }));
-                }
-                if let Some(ref node) = self.node_v6 {
-                    let (reply_tx, reply_rx) = oneshot::channel();
-                    let _ = node
-                        .tx
-                        .send(DhtNodeCommand::RoutingTableSize { reply: reply_tx })
-                        .await;
-                    futures.push(Box::pin(async move { (1, reply_rx.await) }));
-                }
-
-                while let Some((family, res)) = futures.next().await {
-                    if let Ok(size) = res {
-                        if family == 0 {
-                            v4_size = size;
-                        } else {
-                            v6_size = size;
-                        }
-                    }
-                }
+                let v4_size = self
+                    .rt_v4
+                    .as_ref()
+                    .map(|rt| rt.read().unwrap().size())
+                    .unwrap_or(0);
+                let v6_size = self
+                    .rt_v6
+                    .as_ref()
+                    .map(|rt| rt.read().unwrap().size())
+                    .unwrap_or(0);
                 let _ = tx.send((v4_size, v6_size));
             }
             DhtCommand::WaitBootstrap { tx } => {
@@ -1057,4 +883,392 @@ async fn resolve_bootstrap(bootstrap_nodes: Vec<BootstrapNode>) -> Vec<SocketAdd
         addrs.append(&mut host_addrs);
     }
     addrs
+}
+
+mod tasks {
+    use crate::{
+        dht::{ALPHA, DhtNodeCommand, K},
+        message::{Query, Response, Want},
+        node_id::NodeId,
+        routing_table::{AddressFamily, NodeEntry},
+    };
+    use bittorrent_common::types::InfoHash;
+    use futures::{StreamExt, future::join_all, stream::FuturesUnordered};
+    use std::{
+        collections::{BTreeMap, HashSet},
+        net::SocketAddr,
+        time::Duration,
+    };
+    use tokio::{
+        sync::{mpsc, oneshot},
+        task::JoinHandle,
+    };
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub enum NodeState {
+        Unqueried,
+        InFlight,
+        Responded,
+        Failed,
+    }
+
+    #[derive(Clone)]
+    struct CandidateNode {
+        // None when we start from just SocketAddr
+        id: Option<NodeId>,
+        addr: SocketAddr,
+        state: NodeState,
+        token: Option<Vec<u8>>,
+    }
+
+    struct ClosestNodes {
+        target: NodeId,
+        nodes: BTreeMap<NodeId, CandidateNode>,
+        seen: HashSet<SocketAddr>,
+    }
+
+    impl ClosestNodes {
+        fn new(target: NodeId) -> Self {
+            Self {
+                target,
+                nodes: BTreeMap::new(),
+                seen: HashSet::new(),
+            }
+        }
+
+        fn insert(&mut self, id: NodeId, addr: SocketAddr) {
+            if self.seen.insert(addr) {
+                let distance = self.target ^ id;
+                self.nodes.insert(
+                    distance,
+                    CandidateNode {
+                        id: Some(id),
+                        addr,
+                        state: NodeState::Unqueried,
+                        token: None,
+                    },
+                );
+            }
+        }
+
+        fn get_next_unqueried(&mut self, count: usize) -> Vec<SocketAddr> {
+            let mut next = Vec::new();
+
+            for node in self.nodes.values_mut() {
+                if node.state == NodeState::Unqueried {
+                    node.state = NodeState::InFlight;
+                    next.push(node.addr);
+                    if next.len() == count {
+                        break;
+                    }
+                }
+            }
+
+            next
+        }
+
+        fn update_state(&mut self, addr: SocketAddr, state: NodeState, token: Option<Vec<u8>>) {
+            if let Some(node) = self.nodes.values_mut().find(|n| n.addr == addr) {
+                node.state = state;
+                if token.is_some() {
+                    node.token = token;
+                }
+            }
+        }
+
+        fn is_complete(&self) -> bool {
+            let mut responded_count = 0;
+            let mut in_flight_count = 0;
+
+            for node in self.nodes.values().take(K) {
+                match node.state {
+                    NodeState::Responded => responded_count += 1,
+                    NodeState::InFlight => in_flight_count += 1,
+                    _ => {}
+                }
+            }
+
+            (responded_count >= K && in_flight_count == 0)
+                || self
+                    .nodes
+                    .values()
+                    .all(|n| n.state != NodeState::Unqueried && n.state != NodeState::InFlight) // Would
+            // not
+            // this
+            // be
+            // better if we use n.state == Responded?
+        }
+
+        fn get_k_closest_responded(&self) -> Vec<(SocketAddr, NodeId, Vec<u8>)> {
+            self.nodes
+                .values()
+                .filter(|n| n.state == NodeState::Responded && n.token.is_some() && n.id.is_some())
+                .take(K)
+                .map(|n| (n.addr, n.id.unwrap(), n.token.clone().unwrap()))
+                .collect()
+        }
+    }
+
+    pub(super) struct Search {
+        target: NodeId,
+        our_node_id: NodeId,
+        dht_node_tx: mpsc::Sender<DhtNodeCommand>,
+        announce_port: Option<u16>,
+        af: AddressFamily,
+        candidates: ClosestNodes,
+        discovered_peers: HashSet<SocketAddr>,
+    }
+
+    impl Search {
+        pub(super) fn start_search_task(
+            target: NodeId,
+            our_node_id: NodeId,
+            dht_node_tx: mpsc::Sender<DhtNodeCommand>,
+            announce_port: Option<u16>,
+            af: AddressFamily,
+            initial_nodes: &[NodeEntry],
+        ) -> tokio::task::JoinHandle<()> {
+            let mut candidates = ClosestNodes::new(target);
+            for node in initial_nodes {
+                let addr = node.addr;
+                let id = node.node_id;
+                candidates.insert(id, addr);
+            }
+
+            let search = Self {
+                target,
+                our_node_id,
+                dht_node_tx,
+                announce_port,
+                af,
+                candidates,
+                discovered_peers: HashSet::default(),
+            };
+
+            tokio::spawn(async move { search.run().await })
+        }
+
+        async fn run(mut self) {
+            let mut futs = FuturesUnordered::new();
+
+            loop {
+                let next_queries = self.candidates.get_next_unqueried(ALPHA - futs.len());
+                for addr in next_queries {
+                    let tx = self.dht_node_tx.clone();
+                    let query = Query::GetPeers {
+                        id: self.our_node_id,
+                        info_hash: InfoHash::from_slice(self.target.as_bytes()).unwrap(),
+                        is_bootstrap: false,
+                        want: Some(match self.af {
+                            AddressFamily::V4 => Want::v4_only(),
+                            AddressFamily::V6 => Want::v6_only(),
+                        }),
+                    };
+
+                    futs.push(async move {
+                        let (reply_tx, reply_rx) = oneshot::channel();
+                        let _ = tx
+                            .send(DhtNodeCommand::QueryNode {
+                                addr,
+                                query,
+                                reply: reply_tx,
+                            })
+                            .await;
+                        (addr, reply_rx.await)
+                    });
+                }
+
+                if futs.is_empty() {
+                    break;
+                }
+
+                tokio::select! {
+                    Some((addr, res)) = futs.next() => {
+                        match res {
+                            Ok(Ok(Response::GetPeers { id:_, values, nodes, token, .. })) => {
+                                self.candidates.update_state(addr, NodeState::Responded, Some(token));
+                                if let Some(peers) = values {
+                                    for peer in peers {
+                                        self.discovered_peers.insert(peer);
+                                    }
+                                }
+                                if let Some(nodes) = nodes {
+                                    for node in nodes {
+                                        self.candidates.insert(node.node_id, node.addr);
+                                    }
+                                }
+                            }
+                            _ => {
+                                self.candidates.update_state(addr, NodeState::Failed, None);
+                            }
+                        }
+                    }
+                }
+
+                if self.candidates.is_complete() {
+                    break;
+                }
+            }
+
+            //if non-zero, this search is intended to result in an announce_peer. Once the closest nodes are found
+            //via get_peers, the search transitions into an announce phase.
+            if let Some(port) = self.announce_port
+                && port != 0
+            {
+                let closest = self.candidates.get_k_closest_responded();
+                let mut announce_futs = Vec::with_capacity(closest.len());
+
+                for (addr, node_id, token) in closest {
+                    let tx = self.dht_node_tx.clone();
+                    let query = Query::AnnouncePeer {
+                        id: node_id,
+                        info_hash: InfoHash::from_slice(self.target.as_bytes()).unwrap(),
+                        port,
+                        token,
+                        implied_port: true,
+                    };
+
+                    announce_futs.push(async move {
+                        let (reply_tx, reply_rx) = oneshot::channel();
+                        let _ = tx
+                            .send(DhtNodeCommand::QueryNode {
+                                addr,
+                                query,
+                                reply: reply_tx,
+                            })
+                            .await;
+                        (addr, reply_rx.await)
+                    });
+                }
+
+                // Best-Effort of announce to k closest responsive nodes of the get_peers phase
+                let results = join_all(announce_futs).await;
+                for (addr, res) in results {
+                    if let Ok(Ok(Response::AnnouncePeer { .. })) = res {
+                        tracing::info!(target: "dht_search", %addr, "Successfully announced peer to node");
+                    } else {
+                        tracing::warn!(target: "dht_search", %addr, "Received unexpected response variant for AnnouncePeer");
+                    }
+                }
+            }
+        }
+    }
+
+    pub(super) struct BootstrapCtx {
+        bootstrap_addrs: Vec<SocketAddr>,
+        our_node_id: NodeId,
+        dht_node_tx: mpsc::Sender<DhtNodeCommand>,
+        family: AddressFamily,
+        candidate: ClosestNodes,
+    }
+
+    impl BootstrapCtx {
+        pub(super) fn start_boostrap(
+            bootstrap_addrs: Vec<SocketAddr>,
+            our_node_id: NodeId,
+            dht_node_tx: mpsc::Sender<DhtNodeCommand>,
+            family: AddressFamily,
+        ) -> JoinHandle<()> {
+            let boostrap = Self {
+                bootstrap_addrs,
+                our_node_id,
+                dht_node_tx,
+                family,
+                candidate: ClosestNodes::new(our_node_id),
+            };
+            tokio::spawn(async move {
+                boostrap.run().await;
+            })
+        }
+
+        async fn run(mut self) {
+            let mut futs = FuturesUnordered::new();
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+
+            loop {
+                // Fill the in-flight pipeline up to ALPHA.
+                // Seeds are consumed first; once exhausted, pull unqueried candidates
+                // from ClosestNodes (already XOR-sorted by BTreeMap key, no sort needed).
+                while futs.len() < ALPHA {
+                    let addr = if let Some(addr) = self.bootstrap_addrs.pop() {
+                        addr
+                    } else {
+                        match self.candidate.get_next_unqueried(1).into_iter().next() {
+                            Some(addr) => addr,
+                            None => break,
+                        }
+                    };
+
+                    let tx = self.dht_node_tx.clone();
+                    let our_node_id = self.our_node_id;
+                    let family = self.family;
+
+                    futs.push(async move {
+                        let (reply_tx, reply_rx) = oneshot::channel();
+                        let query = Query::FindNode {
+                            id: our_node_id,
+                            target: our_node_id,
+                            is_bootstrap: true,
+                            want: Some(match family {
+                                AddressFamily::V4 => Want::v4_only(),
+                                AddressFamily::V6 => Want::v6_only(),
+                            }),
+                        };
+                        let _ = tx
+                            .send(DhtNodeCommand::QueryNode {
+                                addr,
+                                query,
+                                reply: reply_tx,
+                            })
+                            .await;
+                        (addr, reply_rx.await)
+                    });
+                }
+
+                if futs.is_empty() {
+                    break;
+                }
+
+                tokio::select! {
+                    Some((addr, res)) = futs.next() => {
+                        match res {
+                            Ok(Ok(Response::FindNode { id, nodes })) => {
+                                // Now that we have the real NodeId, insert at correct XOR distance.
+                                // For ClosestNodes candidates this is a seen-dedup no-op on the addr.
+                                self.candidate.insert(id, addr);
+                                self.candidate.update_state(addr, NodeState::Responded, None);
+
+                                for compact in nodes {
+                                    let _ = self
+                                        .dht_node_tx
+                                        .send(DhtNodeCommand::AddNode {
+                                            id: compact.node_id,
+                                            addr: compact.addr,
+                                        })
+                                        .await;
+                                    // ClosestNodes::seen deduplicates across all inserts
+                                    self.candidate.insert(compact.node_id, compact.addr);
+                                }
+                            }
+                            _ => {
+                                // Seeds not yet in ClosestNodes: no-op — correct, they just disappear.
+                                // ClosestNodes candidates: marks Failed, won't be re-queried.
+                                self.candidate.update_state(addr, NodeState::Failed, None);
+                            }
+                        }
+                    }
+                    () = tokio::time::sleep_until(deadline) => {
+                        tracing::warn!(family = ?self.family, "Bootstrap timed out after 30s");
+                        break;
+                    }
+                }
+
+                // Only check completion once seeds are fully drained —
+                // ClosestNodes::is_complete() can't account for addr-only seeds.
+                if self.bootstrap_addrs.is_empty() && self.candidate.is_complete() {
+                    break;
+                }
+            }
+        }
+    }
 }

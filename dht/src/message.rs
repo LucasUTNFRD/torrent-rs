@@ -454,12 +454,13 @@ impl KrpcMessage {
         }
     }
 
-    /// Create a get_peers response with peer values.
-    pub fn get_peers_response_with_values(
+    /// Create a get_peers response containing values (if found) and/or nodes (as requested by want).
+    pub fn get_peers_response(
         tx_id: TransactionId,
         node_id: NodeId,
         token: Vec<u8>,
-        peers: Vec<SocketAddr>,
+        values: Option<Vec<SocketAddr>>,
+        nodes: Option<Vec<CompactNodeInfo>>,
     ) -> Self {
         Self {
             transaction_id: tx_id,
@@ -468,28 +469,8 @@ impl KrpcMessage {
             body: MessageBody::Response(Response::GetPeers {
                 id: node_id,
                 token,
-                values: Some(peers),
-                nodes: None,
-            }),
-        }
-    }
-
-    /// Create a get_peers response with closer nodes (no peers available).
-    pub fn get_peers_response_with_nodes(
-        tx_id: TransactionId,
-        node_id: NodeId,
-        token: Vec<u8>,
-        nodes: Vec<CompactNodeInfo>,
-    ) -> Self {
-        Self {
-            transaction_id: tx_id,
-            version: None,
-            sender_ip: None,
-            body: MessageBody::Response(Response::GetPeers {
-                id: node_id,
-                token,
-                values: None,
-                nodes: Some(nodes),
+                values,
+                nodes,
             }),
         }
     }

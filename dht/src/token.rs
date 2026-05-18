@@ -1,54 +1,64 @@
+use bittorrent_common::types::InfoHash;
+use rand::Rng;
+use sha1_smol::Sha1;
+use std::{net::IpAddr, time::Duration};
 use tokio::time::Instant;
 
-struct TokenManager {
-    secret: Vec<u8>,
-    interval: Instant,
+pub struct TokenManager {
+    current_secret: [u8; 20],
+    previous_secret: [u8; 20],
+    last_rotation: Instant,
+    rotation_interval: Duration,
 }
 
-// type tokenServer struct {
-// 	// Something only we know that peers can't guess, so they can't deduce valid tokens.
-// 	secret []byte
-// 	// How long between token changes.
-// 	interval time.Duration
-// 	// How many intervals may pass between the current interval, and one used to generate a token before it is invalid.
-// 	maxIntervalDelta int
-// 	timeNow          func() time.Time
-// }
-//
-// func (me tokenServer) CreateToken(addr Addr) string {
-// 	return me.createToken(addr, me.getTimeNow())
-// }
-//
-// func (me tokenServer) createToken(addr Addr, t time.Time) string {
-// 	h := sha1.New()
-// 	ip := addr.IP().To16()
-// 	if len(ip) != 16 {
-// 		panic(ip)
-// 	}
-// 	h.Write(ip)
-// 	ti := t.UnixNano() / int64(me.interval)
-// 	var b [8]byte
-// 	binary.BigEndian.PutUint64(b[:], uint64(ti))
-// 	h.Write(b[:])
-// 	h.Write(me.secret)
-// 	return string(h.Sum(nil))
-// }
-//
-// func (me *tokenServer) ValidToken(token string, addr Addr) bool {
-// 	t := me.getTimeNow()
-// 	for range iter.N(me.maxIntervalDelta + 1) {
-// 		if me.createToken(addr, t) == token {
-// 			return true
-// 		}
-// 		t = t.Add(-me.interval)
-// 	}
-// 	return false
-// }
-//
-// func (me *tokenServer) getTimeNow() time.Time {
-// 	if me.timeNow == nil {
-// 		return time.Now()
-// 	}
-// 	return me.timeNow()
-// }
-//
+impl TokenManager {
+    pub fn new(rotation_interval: Duration) -> Self {
+        let mut current = [0u8; 20];
+        let mut previous = [0u8; 20];
+        let mut rng = rand::rng();
+        rng.fill_bytes(&mut current);
+        rng.fill_bytes(&mut previous);
+
+        Self {
+            current_secret: current,
+            previous_secret: previous,
+            last_rotation: Instant::now(),
+            rotation_interval,
+        }
+    }
+    /// Generates a token without storing it. Use `IpAddr` to prevent port-spoofing bypasses.
+    pub fn generate_token(&self, addr: &IpAddr, info_hash: &InfoHash) -> [u8; 20] {
+        Self::hash_token(addr, info_hash, &self.current_secret)
+    }
+    /// Validates the token against the current and previous secrets.
+    pub fn validate_token(&self, addr: &IpAddr, info_hash: &InfoHash, token: [u8; 20]) -> bool {
+        let expected_current = Self::hash_token(addr, info_hash, &self.current_secret);
+        if token == expected_current {
+            return true;
+        }
+
+        let expected_previous = Self::hash_token(addr, info_hash, &self.previous_secret);
+        token == expected_previous
+    }
+
+    /// Rotates secrets if the interval has elapsed. Must be called before generation/validation.
+    pub fn check_rotation(&mut self) {
+        if self.last_rotation.elapsed() >= self.rotation_interval {
+            self.previous_secret = self.current_secret;
+            let mut rng = rand::rng();
+            rng.fill_bytes(&mut self.current_secret);
+            self.last_rotation = Instant::now();
+        }
+    }
+
+    fn hash_token(addr: &IpAddr, info_hash: &InfoHash, secret: &[u8; 20]) -> [u8; 20] {
+        let mut hasher = Sha1::new();
+        match addr {
+            IpAddr::V4(v4) => hasher.update(&v4.octets()),
+            IpAddr::V6(v6) => hasher.update(&v6.octets()),
+        }
+        hasher.update(info_hash.as_bytes());
+        hasher.update(secret);
+        hasher.digest().bytes()
+    }
+}
