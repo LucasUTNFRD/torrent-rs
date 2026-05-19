@@ -39,7 +39,6 @@ pub struct KrpcMessage {
     /// Transaction ID for request/response correlation.
     pub transaction_id: TransactionId,
     /// Client version string (optional, 4 bytes: 2-char client ID + 2-char version).
-    // TODO: use [u8;VERSION_STRING_LEN]
     pub version: Option<Vec<u8>>,
     /// Sender's external IP as seen by responder (BEP 42).
     pub sender_ip: Option<SocketAddr>,
@@ -627,13 +626,12 @@ fn parse_response(dict: &BTreeMap<Vec<u8>, Bencode>) -> Result<MessageBody, DhtE
 
     let id = parse_node_id(r, b"id")?;
 
-    // Collect nodes from both "nodes" and "nodes6" fields if present.
     let mut nodes = Vec::new();
     if let Some(nodes_bytes) = r.get_bytes(b"nodes") {
-        nodes.extend(decode_compact_nodes(nodes_bytes)?);
+        nodes.extend(decode_compact_nodes_v4(nodes_bytes)?);
     }
     if let Some(nodes_bytes) = r.get_bytes(b"nodes6") {
-        nodes.extend(decode_compact_nodes(nodes_bytes)?);
+        nodes.extend(decode_compact_nodes_v6(nodes_bytes)?);
     }
 
     // Check for token → this is a get_peers response
@@ -774,19 +772,9 @@ pub fn encode_compact_nodes_v6(nodes: &[CompactNodeInfo]) -> Vec<u8> {
     result
 }
 
-/// Encode a list of nodes to compact format (supports both IPv4 and IPv6).
-pub fn encode_compact_nodes(nodes: &[CompactNodeInfo]) -> Vec<u8> {
-    let mut result = Vec::new();
-    for node in nodes {
-        result.extend_from_slice(node.node_id.as_bytes());
-        result.extend_from_slice(&encode_compact_peer(&node.addr));
-    }
-    result
-}
-
 /// Decode compact node info (26 bytes per node for IPv4).
 pub fn decode_compact_nodes_v4(data: &[u8]) -> Result<Vec<CompactNodeInfo>, DhtError> {
-    if data.len() % 26 != 0 {
+    if !data.len().is_multiple_of(26) {
         return Err(DhtError::Parse(format!(
             "compact nodes length {} not divisible by 26",
             data.len()
@@ -807,29 +795,23 @@ pub fn decode_compact_nodes_v4(data: &[u8]) -> Result<Vec<CompactNodeInfo>, DhtE
     Ok(nodes)
 }
 
-/// Decode compact node info (supports both IPv4 and IPv6).
-pub fn decode_compact_nodes(data: &[u8]) -> Result<Vec<CompactNodeInfo>, DhtError> {
-    if data.len() % 26 != 0 && data.len() % 38 != 0 {
+/// Decode compact node info (38 bytes per node for IPv6).
+pub fn decode_compact_nodes_v6(data: &[u8]) -> Result<Vec<CompactNodeInfo>, DhtError> {
+    if !data.len().is_multiple_of(38) {
         return Err(DhtError::Parse(format!(
-            "compact nodes length {} not divisible by 26 or 38",
+            "compact nodes6 length {} not divisible by 38",
             data.len()
         )));
     }
 
-    let node_size = if data.len() % 38 == 0 { 38 } else { 26 };
-    let mut nodes = Vec::with_capacity(data.len() / node_size);
-
-    for chunk in data.chunks_exact(node_size) {
+    let mut nodes = Vec::with_capacity(data.len() / 38);
+    for chunk in data.chunks_exact(38) {
         let mut id_bytes = [0u8; 20];
         id_bytes.copy_from_slice(&chunk[0..20]);
         let node_id = NodeId::from_bytes(id_bytes);
 
-        let addr = if node_size == 38 {
-            decode_compact_addr_v6(&chunk[20..38])
-                .ok_or_else(|| DhtError::Parse("Invalid IPv6 address".to_string()))?
-        } else {
-            SocketAddr::V4(decode_compact_addr_v4(&chunk[20..26]))
-        };
+        let addr = decode_compact_addr_v6(&chunk[20..38])
+            .ok_or_else(|| DhtError::Parse("invalid compact IPv6 address".to_string()))?;
 
         nodes.push(CompactNodeInfo { node_id, addr });
     }
@@ -880,32 +862,6 @@ pub fn encode_compact_peer(addr: &SocketAddr) -> Vec<u8> {
         }
     }
     result
-}
-
-/// Encode a single peer to compact format (6 bytes).
-#[allow(dead_code)]
-fn encode_compact_peer_v4(addr: &SocketAddrV4) -> Vec<u8> {
-    let mut result = Vec::with_capacity(6);
-    result.extend_from_slice(&addr.ip().octets());
-    result.extend_from_slice(&addr.port().to_be_bytes());
-    result
-}
-
-/// Decode compact peer info (6 bytes per peer - IPv4 only).
-pub fn decode_compact_peers_v4(data: &[u8]) -> Result<Vec<SocketAddr>, DhtError> {
-    if data.len() % 6 != 0 {
-        return Err(DhtError::Parse(format!(
-            "compact peers length {} not divisible by 6",
-            data.len()
-        )));
-    }
-
-    let mut peers = Vec::with_capacity(data.len() / 6);
-    for chunk in data.chunks_exact(6) {
-        peers.push(SocketAddr::V4(decode_compact_addr_v4(chunk)));
-    }
-
-    Ok(peers)
 }
 
 // ============================================================================
@@ -978,7 +934,11 @@ mod tests {
         let bytes = msg.to_bytes();
         let decoded = KrpcMessage::from_bytes(&bytes).unwrap();
 
-        if let MessageBody::Response(Response::FindNode { nodes: decoded_nodes, .. }) = decoded.body {
+        if let MessageBody::Response(Response::FindNode {
+            nodes: decoded_nodes,
+            ..
+        }) = decoded.body
+        {
             assert_eq!(decoded_nodes.len(), 2);
             assert!(decoded_nodes.iter().any(|n| n.addr == v4_addr));
             assert!(decoded_nodes.iter().any(|n| n.addr == v6_addr));

@@ -56,9 +56,9 @@ The implementation establishes a solid foundation for the KRPC protocol and dual
 
 To achieve full specification correctness, the following actions are required:
 
-1.  **Fix IPv6 Encoding**: Update `src/message.rs` to use `nodes6` and `values6` for IPv6 addresses and implement the 38-byte compact format.
-2.  **Fix AnnouncePeer ID**: Update `tasks::Search::run` in `src/dht.rs` to use the correct sender Node ID.
-3.  **Implement Health Propagation**: Ensure query timeouts are reported to the `RoutingTable` to allow removal of dead nodes.
-4.  **Enforce MTU**: Add checks to ensure outgoing UDP packets stay within the 1024-octet limit for IPv6.
-5.  **Add Peer Expiration**: Implement a background cleanup task for `PeerStore`.
-6.  **Align Token Rotation**: Change the rotation interval to 5 minutes and trigger it on both `GetPeers` and `AnnouncePeer` requests.
+- [x]  **Fix IPv6 Encoding**: Update `src/message.rs` to use `nodes6` and `values6` for IPv6 addresses and implement the 38-byte compact format.
+- [x]  **Fix AnnouncePeer ID**: Update `tasks::Search::run` in `src/dht.rs` to use the correct sender Node ID.
+- [ ]  **Implement Health Propagation**: Ensure query timeouts are reported to the `RoutingTable` to allow removal of dead nodes.
+- [ ]  **Enforce MTU**: Add checks to ensure outgoing UDP packets stay within the 1024-octet limit for IPv6.
+- [ ]  **Add Peer Expiration**: Implement a background cleanup task for `PeerStore`.
+- [ ]  **Align Token Rotation**: Change the rotation interval to 5 minutes and trigger it on both `GetPeers` and `AnnouncePeer` requests.

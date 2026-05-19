@@ -19,13 +19,13 @@ use tokio::{
     net::{UdpSocket, lookup_host},
     sync::{mpsc, oneshot},
     task::JoinHandle,
+    time::Instant,
 };
 
 const DEFAULT_PORT: u16 = 6881;
 const MAX_PAYLOAD: usize = 2048;
 
 const ALPHA: usize = 5;
-const K: usize = 8;
 #[derive(Debug, Clone)]
 pub struct DhtConfig {
     pub port: u16,
@@ -306,6 +306,9 @@ fn bind_v6(port: u16) -> tokio::io::Result<UdpSocket> {
     UdpSocket::from_std(socket.into())
 }
 
+const REFRESH_TABLE_INTERVAL: Duration = Duration::from_secs(15 * 60);
+const PING_TABLE_INTERVAL: Duration = Duration::from_secs(5 * 60);
+
 #[derive(Debug, Clone)]
 struct BootstrapNodeState {
     id: Option<NodeId>,
@@ -410,7 +413,10 @@ impl DhtNode {
             let _ = run_socket(socket_clone, packet_tx).await;
         });
 
-        // let mut refresh_interval = tokio::time::interval(Duration::from_secs(15));
+        let mut last_table_ping = tokio::time::interval(PING_TABLE_INTERVAL);
+        let mut last_table_refresh = tokio::time::interval(REFRESH_TABLE_INTERVAL);
+        last_table_ping.tick().await;
+        last_table_refresh.tick().await;
 
         loop {
             tokio::select! {
@@ -426,9 +432,21 @@ impl DhtNode {
                         None => break,
                     }
                 }
+                _ = last_table_ping.tick() => {
+                    self.run_periodic_ping().await;
+                }
+                _ = last_table_refresh.tick() => {
+                    self.refresh_table().await;
+                }
             }
         }
     }
+
+    async fn refresh_table(&self) {
+        // It is basically run a find node task
+    }
+
+    async fn run_periodic_ping(&self) {}
 
     async fn handle_command(&mut self, cmd: DhtNodeCommand) {
         match cmd {
@@ -893,10 +911,10 @@ async fn resolve_bootstrap(bootstrap_nodes: Vec<BootstrapNode>) -> Vec<SocketAdd
 
 mod tasks {
     use crate::{
-        dht::{ALPHA, DhtNodeCommand, K},
+        dht::{ALPHA, DhtNodeCommand},
         message::{Query, Response, Want},
         node_id::NodeId,
-        routing_table::{AddressFamily, NodeEntry},
+        routing_table::{AddressFamily, K, NodeEntry},
     };
     use bittorrent_common::types::InfoHash;
     use futures::{StreamExt, future::join_all, stream::FuturesUnordered};
@@ -927,9 +945,10 @@ mod tasks {
         token: Option<Vec<u8>>,
     }
 
+    type DistanceToTarget = NodeId;
     struct ClosestNodes {
         target: NodeId,
-        nodes: BTreeMap<NodeId, CandidateNode>,
+        nodes: BTreeMap<DistanceToTarget, CandidateNode>,
         seen: HashSet<SocketAddr>,
     }
 
@@ -1174,6 +1193,9 @@ mod tasks {
         family: AddressFamily,
         candidate: ClosestNodes,
     }
+
+    // Maybe refactor this into wide abstraction on top of FindNode.
+    // Where a special case is running a boostrap or the other is juts a FindNode task?
 
     impl BootstrapCtx {
         pub(super) fn start_boostrap(

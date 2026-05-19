@@ -6,7 +6,6 @@ pub struct NodeEntry {
     pub node_id: NodeId,
     pub addr: SocketAddr,
     pub status: ContactStatus,
-    pub verified: bool,
     pub last_queried: Option<std::time::Instant>,
 }
 
@@ -76,7 +75,7 @@ struct KBucket {
     pub replacement_candidates: Vec<NodeEntry>,
 }
 
-const K: usize = 8;
+pub const K: usize = 14;
 
 impl KBucket {
     fn new() -> Self {
@@ -96,46 +95,11 @@ pub enum AddressFamily {
 #[derive(Debug)]
 pub struct RoutingTable {
     local_id: NodeId,
+    // TODO Use
+    // buckets: BTreeMap<u8,KBucket>,
     buckets: [KBucket; 160],
     address_family: AddressFamily,
 }
-
-// Routing Table Maintenance (The "Heartbeat")
-//   This is the most critical task. It ensures your "address book" doesn't become filled with dead nodes.
-//
-//    * Bucket Refreshing (Active):
-//        * Logic: Every bucket that hasn't seen a lookup in the last 15 minutes must be refreshed.
-//        * Action: Find the node that hasn't been queried for the longest time (last_queried). Generate a random ID within its bucket's range and perform a find_node or get_peers search for that ID.
-//    * Neighborhood Deepening (Self-Bootstrap):
-//        * Condition: If your routing table depth is low (e.g., depth < 4), your knowledge of your immediate neighbors is too thin.
-//        * Action: Trigger a bootstrap search for your own Node ID.
-//    * Stale Node Pruning:
-//        * Logic: If a node's timeout_count reaches your threshold (libtorrent uses 20, but some use 3 or 5 for faster cleanup), it is dead.
-//        * Action: Remove it. If you have a healthy node in the replacements cache for that bucket, promote it to the active list immediately.
-//
-//   2. Security Maintenance
-//   These tasks protect your node from being used in amplification attacks or token-hijacking.
-//
-//    * Token Secret Rotation:
-//        * Logic: Libtorrent rotates the "write token" secret every 5 minutes.
-//        * Action: Generate a new random secret. Keep the previous secret for another 5 minutes (so that in-flight requests don't fail) but use the new one for all new requests.
-//    * DoS Blocker Cleanup:
-//        * Logic: Your DoS blocker keeps a list of "banned" IPs.
-//        * Action: Periodically clear entries for IPs that have stopped flooding you so they can eventually rejoin the network.
-//
-//   3. Traffic & Resource Management
-//    * Rate Limit Replenishment:
-//        * Logic: You likely have an upload quota (e.g., 8KB/s).
-//        * Action: Every tick, add "tokens" to your token-bucket based on how much time has passed.
-//    * Round-Trip Time (RTT) Decay:
-//        * Logic: Latency changes over time.
-//        * Action: Libtorrent uses an exponential moving average. When a node responds, update its RTT: new_rtt = (old_rtt * 2 + measured_rtt) / 3.
-//
-//   4. Data Storage Maintenance (The storage tick)
-//   If your Rust port will also store peers (becoming a "tracker"), you must clean up data periodically (usually every 2 minutes):
-//
-//    * Peer Expiration: Standard BitTorrent peers expire from the DHT after 30 minutes. If they haven't "re-announced," delete them.
-//    * Item Expiration: For BEP 44 (mutable/immutable items), items typically expire after 2 hours unless they are re-put.
 
 impl RoutingTable {
     fn new(local_id: NodeId, family: AddressFamily) -> Self {
@@ -154,26 +118,23 @@ impl RoutingTable {
         Self::new(local_id, AddressFamily::V6)
     }
 
-    /// 1. Find the bucket index for a target ID
     fn find_bucket_index(&self, id: &NodeId) -> usize {
         self.local_id.distance_exp(id)
     }
 
-    /// 2. Add or update a node in the table
-    /// Logic:
-    /// - If node exists: update last seen,
-    /// - If bucket not full: insert.
-    /// - TODO: Discuss what policy implement, it comes to my mind adding the node id if full as a
-    /// candidate
-    pub fn add_node(&mut self, node_id: NodeId, addr: SocketAddr) -> AddResult {
+    pub fn add_node(&mut self, node_id: NodeId, addr: SocketAddr) -> bool {
         let index = self.find_bucket_index(&node_id);
+        if index == 0 {
+            return false;
+        }
+
         let bucket = &mut self.buckets[index];
 
         if let Some(entry) = bucket.nodes.iter_mut().find(|n| n.node_id == node_id) {
             entry.addr = addr;
             entry.reset_fail_count();
             entry.last_queried = Some(Instant::now());
-            return AddResult::Updated;
+            return true;
         }
 
         if bucket.nodes.len() < K {
@@ -183,21 +144,19 @@ impl RoutingTable {
                 status: ContactStatus::Confirmed {
                     consecutive_failures: 0,
                 },
-                verified: true,
                 last_queried: None,
             });
-            return AddResult::Added;
+            return true;
         }
 
         bucket.replacement_candidates.push(NodeEntry {
             node_id,
             addr,
             status: ContactStatus::Fresh,
-            verified: false,
             last_queried: None,
         });
 
-        AddResult::MarkedAsAck
+        false
     }
 
     pub fn find_closest(&self, target: &NodeId, count: usize) -> Vec<NodeEntry> {
@@ -220,10 +179,4 @@ impl RoutingTable {
     pub fn size(&self) -> usize {
         self.buckets.iter().map(|b| b.nodes.len()).sum()
     }
-}
-
-pub enum AddResult {
-    Added,
-    Updated,
-    MarkedAsAck,
 }

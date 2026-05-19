@@ -1,3 +1,0 @@
-- Naive serialization and desirialization
-- Do boostrap 
-- Get nodes for a given infohash
