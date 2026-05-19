@@ -1116,12 +1116,7 @@ mod tasks {
                     }
                 }
 
-                // If we dont have a bound of how many peers discover this task never ends
-                let reached_discovery_target = false;
-                // self.discovered_peers.len() >= 50;
-                // if reached_discovery_target
-
-                if self.candidates.is_complete() || reached_discovery_target {
+                if self.candidates.is_complete() {
                     break;
                 }
             }
@@ -1134,10 +1129,10 @@ mod tasks {
                 let closest = self.candidates.get_k_closest_responded();
                 let mut announce_futs = Vec::with_capacity(closest.len());
 
-                for (addr, node_id, token) in closest {
+                for (addr, _node_id, token) in closest {
                     let tx = self.dht_node_tx.clone();
                     let query = Query::AnnouncePeer {
-                        id: node_id,
+                        id: self.our_node_id,
                         info_hash: InfoHash::from_slice(self.target.as_bytes()).unwrap(),
                         port,
                         token,
