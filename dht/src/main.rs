@@ -1,14 +1,12 @@
 use anyhow::Context;
 use bittorrent_common::types::InfoHash;
 use dht::dht::{Dht, DhtConfig};
-use std::time::Duration;
-use tokio::time::sleep;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Set up tracing with a simple level filter
     tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
+        .with_max_level(tracing::Level::DEBUG)
         .init();
 
     tracing::info!("Starting DHT visualization...");

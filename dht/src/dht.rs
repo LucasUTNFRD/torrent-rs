@@ -8,7 +8,7 @@ use crate::{
     token::TokenManager,
 };
 use bittorrent_common::types::InfoHash;
-use futures::{StreamExt, future::BoxFuture, stream::FuturesUnordered};
+use futures::{StreamExt, stream::FuturesUnordered};
 use std::{
     collections::HashMap,
     net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4},
@@ -454,14 +454,20 @@ impl DhtNode {
                     af,
                     &k_closest_nodes,
                 );
+                tokio::spawn(async move {
+                    let adrs = jh.await.unwrap();
+                    let _ = reply.send(adrs);
+                });
             }
             DhtNodeCommand::Bootstrap { addrs, reply } => {
                 let node_id = self.node_id;
                 let tx = self.tx.clone();
                 let family = self.family;
                 let jh = BootstrapCtx::start_boostrap(addrs, node_id, tx, family);
-                let _ = jh.await;
-                let _ = reply.send(());
+                tokio::spawn(async move {
+                    let _ = jh.await;
+                    let _ = reply.send(());
+                });
             }
             DhtNodeCommand::RoutingTableSize { reply } => {
                 let _ = reply.send(self.routing_table.read().unwrap().size());
@@ -980,7 +986,9 @@ mod tasks {
             let mut responded_count = 0;
             let mut in_flight_count = 0;
 
-            for node in self.nodes.values().take(K) {
+            let top_k_nodes: Vec<_> = self.nodes.values().take(K).collect();
+
+            for node in &top_k_nodes {
                 match node.state {
                     NodeState::Responded => responded_count += 1,
                     NodeState::InFlight => in_flight_count += 1,
@@ -988,15 +996,18 @@ mod tasks {
                 }
             }
 
-            (responded_count >= K && in_flight_count == 0)
-                || self
-                    .nodes
-                    .values()
-                    .all(|n| n.state != NodeState::Unqueried && n.state != NodeState::InFlight) // Would
-            // not
-            // this
-            // be
-            // better if we use n.state == Responded?
+            // 1. Condition A: We found K good nodes and no better candidates are pending
+            let reached_full_k = responded_count >= K && in_flight_count == 0;
+
+            let is_processed = |n: &&CandidateNode| {
+                n.state == NodeState::Responded || n.state == NodeState::Failed
+            };
+
+            // 2. Condition B: We've exhausted all possible candidates among the top K
+            // (This handles cases where we know fewer than K nodes total)
+            let exhausted_top_k = top_k_nodes.iter().all(is_processed);
+
+            reached_full_k || exhausted_top_k
         }
 
         fn get_k_closest_responded(&self) -> Vec<(SocketAddr, NodeId, Vec<u8>)> {
@@ -1027,7 +1038,7 @@ mod tasks {
             announce_port: Option<u16>,
             af: AddressFamily,
             initial_nodes: &[NodeEntry],
-        ) -> tokio::task::JoinHandle<()> {
+        ) -> tokio::task::JoinHandle<Vec<SocketAddr>> {
             let mut candidates = ClosestNodes::new(target);
             for node in initial_nodes {
                 let addr = node.addr;
@@ -1048,7 +1059,7 @@ mod tasks {
             tokio::spawn(async move { search.run().await })
         }
 
-        async fn run(mut self) {
+        async fn run(mut self) -> Vec<SocketAddr> {
             let mut futs = FuturesUnordered::new();
 
             loop {
@@ -1105,7 +1116,12 @@ mod tasks {
                     }
                 }
 
-                if self.candidates.is_complete() {
+                // If we dont have a bound of how many peers discover this task never ends
+                let reached_discovery_target = false;
+                // self.discovered_peers.len() >= 50;
+                // if reached_discovery_target
+
+                if self.candidates.is_complete() || reached_discovery_target {
                     break;
                 }
             }
@@ -1151,6 +1167,8 @@ mod tasks {
                     }
                 }
             }
+
+            self.discovered_peers.iter().copied().collect()
         }
     }
 
