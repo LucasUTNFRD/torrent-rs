@@ -821,8 +821,9 @@ pub fn decode_compact_nodes_v6(data: &[u8]) -> Result<Vec<CompactNodeInfo>, DhtE
 
 /// Decode 6-byte compact address (4-byte IP + 2-byte port).
 fn decode_compact_addr_v4(data: &[u8]) -> SocketAddrV4 {
-    let ip = Ipv4Addr::new(data[0], data[1], data[2], data[3]);
-    let port = u16::from_be_bytes([data[4], data[5]]);
+    // data is exactly 6 bytes, guaranteed by caller (chunks_exact(26)[20..26])
+    let ip = Ipv4Addr::from(<[u8; 4]>::try_from(&data[..4]).unwrap());
+    let port = u16::from_be_bytes(<[u8; 2]>::try_from(&data[4..6]).unwrap());
     SocketAddrV4::new(ip, port)
 }
 
@@ -831,11 +832,8 @@ fn decode_compact_addr_v6(data: &[u8]) -> Option<SocketAddr> {
     if data.len() != 18 {
         return None;
     }
-    let ip = Ipv6Addr::from([
-        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7], data[8], data[9],
-        data[10], data[11], data[12], data[13], data[14], data[15],
-    ]);
-    let port = u16::from_be_bytes([data[16], data[17]]);
+    let ip = Ipv6Addr::from(<[u8; 16]>::try_from(&data[..16]).unwrap());
+    let port = u16::from_be_bytes(<[u8; 2]>::try_from(&data[16..18]).unwrap());
     Some(SocketAddr::new(ip.into(), port))
 }
 
