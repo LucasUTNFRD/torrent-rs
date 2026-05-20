@@ -1,17 +1,23 @@
 use crate::{
     dht::tasks::{BootstrapCtx, Search},
     error::DhtError,
-    message::{CompactNodeInfo, KrpcMessage, MessageBody, Query, Response, TransactionId},
+    message::{
+        CompactNodeInfo, KrpcMessage, MessageBody, Query, Response, TransactionId,
+        decode_compact_nodes_v4, decode_compact_nodes_v6, encode_compact_nodes_v4,
+        encode_compact_nodes_v6,
+    },
     node_id::NodeId,
     peer_store::PeerStore,
     routing_table::{AddressFamily, RoutingTable},
     token::TokenManager,
 };
+use bencode::{Bencode, BencodeBuilder, BencodeDict};
 use bittorrent_common::types::InfoHash;
 use futures::{StreamExt, stream::FuturesUnordered};
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4},
+    path::{Path, PathBuf},
     sync::{Arc, RwLock},
     time::Duration,
 };
@@ -19,17 +25,33 @@ use tokio::{
     net::{UdpSocket, lookup_host},
     sync::{mpsc, oneshot},
     task::JoinHandle,
-    time::Instant,
 };
 
 const DEFAULT_PORT: u16 = 6881;
 const MAX_PAYLOAD: usize = 2048;
 
 const ALPHA: usize = 5;
+
+/// Well-known bootstrap nodes for the public BitTorrent DHT.
+/// Used as a last resort when no cached nodes are available.
+const DEFAULT_BOOTSTRAP_HOSTS: &[(&str, u16)] = &[
+    ("router.bittorrent.com", 6881),
+    ("dht.transmissionbt.com", 6881),
+    ("dht.libtorrent.org", 25401),
+    ("router.utorrent.com", 6881),
+];
+
+/// The fixed filename used for persisted routing table state.
+const STATE_FILENAME: &str = "dht.dat";
+
 #[derive(Debug, Clone)]
 pub struct DhtConfig {
     pub port: u16,
-    pub bootstrap_nodes: Vec<BootstrapNode>,
+    /// Directory where the DHT state file (`dht.dat`) is stored.
+    /// When set, the DHT will try to load cached nodes from this
+    /// directory on startup (skipping DNS bootstrap if successful)
+    /// and will write current routing table state here on `shutdown()`.
+    pub state_dir: Option<PathBuf>,
 }
 
 impl DhtConfig {
@@ -45,40 +67,16 @@ impl Default for DhtConfig {
 }
 
 #[derive(Debug, Clone)]
-pub struct BootstrapNode {
-    pub host: String,
-    pub port: u16,
-}
-
-impl BootstrapNode {
-    pub fn new(host: impl Into<String>, port: u16) -> Self {
-        Self {
-            host: host.into(),
-            port,
-        }
-    }
-}
-
-pub fn default_dht_bootstrap_nodes() -> Vec<BootstrapNode> {
-    vec![
-        BootstrapNode::new("router.bittorrent.com", 6881),
-        BootstrapNode::new("dht.transmissionbt.com", 6881),
-        BootstrapNode::new("dht.libtorrent.org", 25401),
-        BootstrapNode::new("router.utorrent.com", 6881),
-    ]
-}
-
-#[derive(Debug, Clone)]
 pub struct DhtConfigBuilder {
     port: u16,
-    bootstrap_nodes: Option<Vec<BootstrapNode>>,
+    state_dir: Option<PathBuf>,
 }
 
 impl Default for DhtConfigBuilder {
     fn default() -> Self {
         Self {
             port: DEFAULT_PORT,
-            bootstrap_nodes: None,
+            state_dir: None,
         }
     }
 }
@@ -89,30 +87,27 @@ impl DhtConfigBuilder {
         self
     }
 
-    pub fn bootstrap_nodes(mut self, nodes: Vec<BootstrapNode>) -> Self {
-        self.bootstrap_nodes = Some(nodes);
-        self
-    }
-
-    pub fn bootstrap_node(mut self, host: impl Into<String>, port: u16) -> Self {
-        self.bootstrap_nodes
-            .get_or_insert_with(default_dht_bootstrap_nodes)
-            .push(BootstrapNode::new(host, port));
+    /// Set the directory where DHT state (`dht.dat`) will be persisted
+    /// across restarts. The file is written on `shutdown()` and loaded
+    /// automatically on the next startup.
+    pub fn state_dir(mut self, path: impl Into<PathBuf>) -> Self {
+        self.state_dir = Some(path.into());
         self
     }
 
     pub fn build(self) -> DhtConfig {
         DhtConfig {
             port: self.port,
-            bootstrap_nodes: self
-                .bootstrap_nodes
-                .unwrap_or_else(default_dht_bootstrap_nodes),
+            state_dir: self.state_dir,
         }
     }
 }
 
 pub struct Dht {
     tx: mpsc::Sender<DhtCommand>,
+    rt_v4: Option<Arc<RwLock<RoutingTable>>>,
+    rt_v6: Option<Arc<RwLock<RoutingTable>>>,
+    state_dir: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -181,6 +176,46 @@ impl Dht {
             .ok()
             .map(|_| Arc::new(RwLock::new(RoutingTable::new_v6(node_id))));
 
+        // ==================================================================
+        // Try loading cached nodes from a previous session's dht.dat.
+        // If the file exists and parses successfully, we pre-populate the
+        // routing tables and use the cached addresses for bootstrapping
+        // instead of doing DNS lookups to well-known bootstrap nodes.
+        // ==================================================================
+        let cached = cfg.state_dir.as_ref().and_then(|dir| {
+            match load_cached_nodes(&dir.join(STATE_FILENAME)) {
+                Ok(cached) => {
+                    tracing::info!(
+                        v4 = cached.0.len(),
+                        v6 = cached.1.len(),
+                        "Loaded cached nodes from dht.dat"
+                    );
+                    Some(cached)
+                }
+                Err(e) => {
+                    tracing::debug!(?e, "No cached nodes available, will use DNS bootstrap");
+                    None
+                }
+            }
+        });
+
+        // Pre-populate routing tables with cached nodes so the bootstrap
+        // task starts with a populated table rather than an empty one.
+        if let Some((ref v4_nodes, ref v6_nodes)) = cached {
+            if let Some(ref rt) = rt_v4 {
+                let mut table = rt.write().expect("rt_v4 lock poisoned");
+                for node in v4_nodes {
+                    table.add_node(node.node_id, node.addr);
+                }
+            }
+            if let Some(ref rt) = rt_v6 {
+                let mut table = rt.write().expect("rt_v6 lock poisoned");
+                for node in v6_nodes {
+                    table.add_node(node.node_id, node.addr);
+                }
+            }
+        }
+
         let node_v4 = match (s4, rt_v4.clone()) {
             (Ok(socket), Some(rt)) => {
                 let (tx, rx) = mpsc::channel(64);
@@ -226,19 +261,36 @@ impl Dht {
         let coord = DhtCoordinator {
             node_v4,
             node_v6,
-            rt_v4,
-            rt_v6,
+            rt_v4: rt_v4.clone(),
+            rt_v6: rt_v6.clone(),
             rx: coord_rx,
             wait_bootstrap: Vec::new(),
             _peer_storage: peer_storage,
         };
 
+        // Decide bootstrap source: use cached SocketAddrs when available,
+        // otherwise resolve well-known DNS bootstrap hosts.
+        let use_cached = cached.is_some();
         tokio::spawn(async move {
-            let addrs = resolve_bootstrap(cfg.bootstrap_nodes).await;
-            coord.run(addrs).await;
+            let addrs = if use_cached {
+                let (v4, v6) = cached.expect("cached is Some when use_cached is true");
+                v4.iter().chain(v6.iter()).map(|n| n.addr).collect()
+            } else {
+                resolve_bootstrap(DEFAULT_BOOTSTRAP_HOSTS).await
+            };
+            // When starting from cached nodes, the routing tables are
+            // already populated so searches can proceed immediately.
+            // We still run bootstrap in the background to refresh stale
+            // entries and discover nodes closer to our own NodeId.
+            coord.run(addrs, use_cached).await;
         });
 
-        Ok(Self { tx: coord_tx })
+        Ok(Self {
+            tx: coord_tx,
+            rt_v4,
+            rt_v6,
+            state_dir: cfg.state_dir,
+        })
     }
 
     pub async fn announce(
@@ -288,6 +340,26 @@ impl Dht {
             .map_err(|_| DhtError::Cancelled)?;
         rx.await.map_err(|_| DhtError::Cancelled)
     }
+
+    /// Persist the current routing table state to disk and shut down the
+    /// DHT actor.
+    ///
+    /// Call this before dropping the `Dht` handle so that the next
+    /// startup can skip DNS-based bootstrap and resume from cached
+    /// nodes. Without calling this, the DHT will need to re-bootstrap
+    /// from scratch on the next run.
+    pub async fn shutdown(self) -> Result<(), DhtError> {
+        if let Some(ref dir) = self.state_dir {
+            persist_routing_tables(
+                &dir.join(STATE_FILENAME),
+                self.rt_v4.as_ref(),
+                self.rt_v6.as_ref(),
+            )?;
+        }
+        // Dropping `self` (and therefore `self.tx`) signals the
+        // coordinator to stop its event loop.
+        Ok(())
+    }
 }
 
 async fn bind_v4(port: u16) -> tokio::io::Result<UdpSocket> {
@@ -308,14 +380,6 @@ fn bind_v6(port: u16) -> tokio::io::Result<UdpSocket> {
 
 const REFRESH_TABLE_INTERVAL: Duration = Duration::from_secs(15 * 60);
 const PING_TABLE_INTERVAL: Duration = Duration::from_secs(5 * 60);
-
-#[derive(Debug, Clone)]
-struct BootstrapNodeState {
-    id: Option<NodeId>,
-    addr: SocketAddr,
-    queried: bool,
-    responded: bool,
-}
 
 struct DhtNode {
     node_id: NodeId,
@@ -451,7 +515,7 @@ impl DhtNode {
     async fn handle_command(&mut self, cmd: DhtNodeCommand) {
         match cmd {
             DhtNodeCommand::AddNode { id, addr } => {
-                tracing::info!(family = ?self.family, ?id, ?addr, "Adding node to routing table");
+                // tracing::info!(family = ?self.family, ?id, ?addr, "Adding node to routing table");
                 self.routing_table.write().unwrap().add_node(id, addr);
             }
             DhtNodeCommand::SearchTask {
@@ -540,15 +604,15 @@ impl DhtNode {
             let node_id = msg.get_node_id();
             match msg.body {
                 MessageBody::Query(query) => {
-                    tracing::info!(family = ?self.family, ?addr, ?query, tid = %msg.transaction_id.as_u16(), "Received query");
+                    // tracing::info!(family = ?self.family, ?addr, ?query, tid = %msg.transaction_id.as_u16(), "Received query");
                     self.handle_query(addr, msg.transaction_id, query).await;
                 }
                 MessageBody::Response(response) => {
                     let tid = msg.transaction_id.as_u16();
-                    tracing::info!(family = ?self.family, ?addr, ?response, tid, "Received response");
+                    // tracing::info!(family = ?self.family, ?addr, ?response, tid, "Received response");
                     if let Some(tx) = self.pending_queries.remove(&tid) {
                         if let Some(id) = node_id {
-                            tracing::info!(family = ?self.family, ?id, ?addr, "Updating routing table from response");
+                            // tracing::info!(family = ?self.family, ?id, ?addr, "Updating routing table from response");
                             self.routing_table.write().unwrap().add_node(id, addr);
                         }
                         let _ = tx.send(response);
@@ -658,10 +722,6 @@ impl DhtNode {
                     .write()
                     .unwrap()
                     .add_peer(info_hash, remote_peer_addr);
-                self.peer_storage
-                    .write()
-                    .unwrap()
-                    .add_peer(info_hash, remote_peer_addr);
 
                 let msg = KrpcMessage::announce_peer_response(tid, self.node_id);
                 let _ = self.socket.send_to(&msg.to_bytes(), addr).await;
@@ -710,7 +770,7 @@ struct DhtCoordinator {
 }
 
 impl DhtCoordinator {
-    async fn run(mut self, addrs: Vec<SocketAddr>) {
+    async fn run(mut self, addrs: Vec<SocketAddr>, pre_bootstrapped: bool) {
         let mut v4_bootstrap = None;
         let mut v6_bootstrap = None;
 
@@ -753,7 +813,31 @@ impl DhtCoordinator {
             v6_bootstrap = Some(rx);
         }
 
-        let mut bootstrapped = false;
+        // When starting from cached nodes (`pre_bootstrapped = true`), the
+        // routing tables are already populated so we treat the DHT as ready
+        // immediately. The bootstrap tasks still run in the background to
+        // verify liveness and discover closer nodes, but they don't block
+        // `wait_bootstrap()` or `get_peers()` callers.
+        //
+        // Also handle the edge case where no bootstrap tasks were spawned at
+        // all (empty addrs, or addrs didn't match any bound address family).
+        let mut bootstrapped =
+            pre_bootstrapped || (v4_bootstrap.is_none() && v6_bootstrap.is_none());
+
+        if bootstrapped {
+            tracing::info!(
+                from_cache = pre_bootstrapped,
+                "DHT ready (bootstrap {})",
+                if pre_bootstrapped {
+                    "running in background"
+                } else {
+                    "skipped"
+                }
+            );
+            for tx in self.wait_bootstrap.drain(..) {
+                let _ = tx.send(());
+            }
+        }
 
         loop {
             tokio::select! {
@@ -863,13 +947,11 @@ impl DhtCoordinator {
                 let v4_size = self
                     .rt_v4
                     .as_ref()
-                    .map(|rt| rt.read().unwrap().size())
-                    .unwrap_or(0);
+                    .map_or(0, |rt| rt.read().unwrap().size());
                 let v6_size = self
                     .rt_v6
                     .as_ref()
-                    .map(|rt| rt.read().unwrap().size())
-                    .unwrap_or(0);
+                    .map_or(0, |rt| rt.read().unwrap().size());
                 let _ = tx.send((v4_size, v6_size));
             }
             DhtCommand::WaitBootstrap { tx } => {
@@ -883,11 +965,9 @@ impl DhtCoordinator {
     }
 }
 
-async fn resolve_bootstrap(bootstrap_nodes: Vec<BootstrapNode>) -> Vec<SocketAddr> {
+async fn resolve_bootstrap(hosts: &[(&str, u16)]) -> Vec<SocketAddr> {
     let mut futures = FuturesUnordered::new();
-    for node in bootstrap_nodes {
-        let host = node.host;
-        let port = node.port;
+    for &(host, port) in hosts {
         futures.push(async move {
             let res = lookup_host(format!("{host}:{port}"))
                 .await
@@ -907,6 +987,94 @@ async fn resolve_bootstrap(bootstrap_nodes: Vec<BootstrapNode>) -> Vec<SocketAdd
         addrs.append(&mut host_addrs);
     }
     addrs
+}
+
+// ============================================================================
+// Routing table persistence
+// ============================================================================
+
+/// Persist both routing tables as bencoded compact nodes to the state file.
+///
+/// File format (bencode dict):
+///   n4: <compact IPv4 nodes — 26 bytes each: 20-byte ``NodeId`` + 4-byte IP + 2-byte port>
+///   n6: <compact IPv6 nodes — 38 bytes each: 20-byte ``NodeId`` + 16-byte IP + 2-byte port>
+fn persist_routing_tables(
+    path: &Path,
+    rt_v4: Option<&Arc<RwLock<RoutingTable>>>,
+    rt_v6: Option<&Arc<RwLock<RoutingTable>>>,
+) -> Result<(), DhtError> {
+    let mut dict = BTreeMap::<Vec<u8>, Bencode>::new();
+
+    if let Some(rt) = rt_v4 {
+        let nodes: Vec<CompactNodeInfo> = rt
+            .read()
+            .expect("rt_v4 lock poisoned")
+            .iter()
+            .map(|entry| CompactNodeInfo {
+                node_id: entry.node_id,
+                addr: entry.addr,
+            })
+            .collect();
+        dict.put("n4", &encode_compact_nodes_v4(&nodes).as_slice());
+    }
+
+    if let Some(rt) = rt_v6 {
+        let nodes: Vec<CompactNodeInfo> = rt
+            .read()
+            .expect("rt_v6 lock poisoned")
+            .iter()
+            .map(|entry| CompactNodeInfo {
+                node_id: entry.node_id,
+                addr: entry.addr,
+            })
+            .collect();
+        dict.put("n6", &encode_compact_nodes_v6(&nodes).as_slice());
+    }
+
+    let bytes = Bencode::encoder(&dict.build());
+
+    // Ensure the parent directory exists.
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            DhtError::IO(format!("create state directory {}: {e}", parent.display()))
+        })?;
+    }
+
+    std::fs::write(path, bytes)
+        .map_err(|e| DhtError::IO(format!("write state file {}: {e}", path.display())))?;
+
+    tracing::info!(path = %path.display(), "Persisted DHT routing tables");
+    Ok(())
+}
+
+/// Try to load cached nodes from a bencoded state file.
+///
+/// Returns `(v4_nodes, v6_nodes)`. Either list may be empty if the
+/// corresponding key is missing from the file.
+fn load_cached_nodes(
+    path: &Path,
+) -> Result<(Vec<CompactNodeInfo>, Vec<CompactNodeInfo>), DhtError> {
+    let bytes = std::fs::read(path)
+        .map_err(|e| DhtError::IO(format!("read state file {}: {e}", path.display())))?;
+
+    let bencode = Bencode::decode(&bytes)?;
+    let Bencode::Dict(dict) = bencode else {
+        return Err(DhtError::Parse("dht.dat: expected dictionary".to_string()));
+    };
+
+    let v4_nodes = dict
+        .get_bytes(b"n4")
+        .map(decode_compact_nodes_v4)
+        .transpose()?
+        .unwrap_or_default();
+
+    let v6_nodes = dict
+        .get_bytes(b"n6")
+        .map(decode_compact_nodes_v6)
+        .transpose()?
+        .unwrap_or_default();
+
+    Ok((v4_nodes, v6_nodes))
 }
 
 mod tasks {

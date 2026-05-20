@@ -179,4 +179,35 @@ impl RoutingTable {
     pub fn size(&self) -> usize {
         self.buckets.iter().map(|b| b.nodes.len()).sum()
     }
+
+    /// Iterate over all nodes in the routing table, across every k-bucket.
+    pub fn iter(&self) -> RoutingTableIter<'_> {
+        RoutingTableIter {
+            buckets: self.buckets.iter(),
+            current: [].iter(),
+        }
+    }
+}
+
+/// Iterator over all `&NodeEntry` items in a `RoutingTable`.
+///
+/// Yields entries from each k-bucket in order of bucket index
+/// (closest distance exponent first).
+pub struct RoutingTableIter<'a> {
+    buckets: std::slice::Iter<'a, KBucket>,
+    current: std::slice::Iter<'a, NodeEntry>,
+}
+
+impl<'a> Iterator for RoutingTableIter<'a> {
+    type Item = &'a NodeEntry;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(entry) = self.current.next() {
+                return Some(entry);
+            }
+            let bucket = self.buckets.next()?;
+            self.current = bucket.nodes.iter();
+        }
+    }
 }

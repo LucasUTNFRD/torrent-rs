@@ -11,17 +11,16 @@ mod token;
 // #[tokio::main]
 // async fn main() {
 //     // Build DHT with one line
-//     let dht = DhtConfig::new()
-//         .peer_port(6881)
-//         .with_default_bootstraps()
-//         .state_file("./dht.dat")
+//     let dht = DhtConfig::builder()
+//         .state_dir("./data")
 //         .build();
+//     let dht = Dht::new(cfg).await.unwrap();
 //
 //     // Search for peers - just one call!
-//     let peers = dht.search(info_hash, 6881).await;
+//     let peers = dht.announce(info_hash, 6881).await;
 //     println!("Found {} peers", peers.len());
 //
-//     // Or don't announce, just search
-//     let peers = dht.find_peers(info_hash).await;
+//     // Persist routing table and shut down.
+//     dht.shutdown().await.unwrap();
 // }
 // ```

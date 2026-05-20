@@ -11,8 +11,8 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("Starting DHT visualization...");
 
-    let cfg = DhtConfig::default();
-    let dht = Dht::new(cfg).await.context("failed to init dht")?;
+    let cfg = DhtConfig::builder().state_dir(".").build();
+    let dht = Dht::new(cfg).await.context("init dht")?;
 
     tracing::info!("DHT initialized, starting bootstrap...");
 
@@ -36,6 +36,9 @@ async fn main() -> anyhow::Result<()> {
     for peer in peers {
         tracing::info!("Peer: {}", peer);
     }
+
+    // Persist the routing table for faster startup next time.
+    dht.shutdown().await.context("shutdown dht")?;
 
     Ok(())
 }
