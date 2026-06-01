@@ -149,6 +149,7 @@ pub(crate) enum DhtNodeCommand {
     },
     QueryNode {
         addr: SocketAddr,
+        node_id: Option<NodeId>,
         query: Query,
         reply: oneshot::Sender<Result<Response, DhtError>>,
     },
@@ -182,39 +183,8 @@ impl Dht {
         // routing tables and use the cached addresses for bootstrapping
         // instead of doing DNS lookups to well-known bootstrap nodes.
         // ==================================================================
-        let cached = cfg.state_dir.as_ref().and_then(|dir| {
-            match load_cached_nodes(&dir.join(STATE_FILENAME)) {
-                Ok(cached) => {
-                    tracing::info!(
-                        v4 = cached.0.len(),
-                        v6 = cached.1.len(),
-                        "Loaded cached nodes from dht.dat"
-                    );
-                    Some(cached)
-                }
-                Err(e) => {
-                    tracing::debug!(?e, "No cached nodes available, will use DNS bootstrap");
-                    None
-                }
-            }
-        });
-
-        // Pre-populate routing tables with cached nodes so the bootstrap
-        // task starts with a populated table rather than an empty one.
-        if let Some((ref v4_nodes, ref v6_nodes)) = cached {
-            if let Some(ref rt) = rt_v4 {
-                let mut table = rt.write().expect("rt_v4 lock poisoned");
-                for node in v4_nodes {
-                    table.add_node(node.node_id, node.addr);
-                }
-            }
-            if let Some(ref rt) = rt_v6 {
-                let mut table = rt.write().expect("rt_v6 lock poisoned");
-                for node in v6_nodes {
-                    table.add_node(node.node_id, node.addr);
-                }
-            }
-        }
+        let cached =
+            load_and_populate_cached_nodes(cfg.state_dir.as_ref(), rt_v4.as_ref(), rt_v6.as_ref());
 
         let node_v4 = match (s4, rt_v4.clone()) {
             (Ok(socket), Some(rt)) => {
@@ -381,13 +351,19 @@ fn bind_v6(port: u16) -> tokio::io::Result<UdpSocket> {
 const REFRESH_TABLE_INTERVAL: Duration = Duration::from_secs(15 * 60);
 const PING_TABLE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
+struct PendingQuery {
+    reply: oneshot::Sender<Response>,
+    node_id: Option<NodeId>,
+    addr: SocketAddr,
+}
+
 struct DhtNode {
     node_id: NodeId,
     socket: Arc<UdpSocket>,
     routing_table: Arc<RwLock<RoutingTable>>,
     remote_routing_table: Option<Arc<RwLock<RoutingTable>>>,
     family: AddressFamily,
-    pending_queries: HashMap<u16, oneshot::Sender<Response>>,
+    pending_queries: HashMap<u16, PendingQuery>,
     next_tid: u16,
     tx: mpsc::Sender<DhtNodeCommand>,
     peer_storage: Arc<RwLock<PeerStore>>,
@@ -507,16 +483,107 @@ impl DhtNode {
     }
 
     async fn refresh_table(&self) {
-        // It is basically run a find node task
+        let mut buckets_to_refresh = Vec::new();
+        {
+            let rt = self.routing_table.read().unwrap();
+            for (idx, bucket) in rt.buckets.iter().enumerate() {
+                if idx == 0 {
+                    continue;
+                }
+                if bucket.last_changed.elapsed() >= Duration::from_secs(15 * 60) {
+                    buckets_to_refresh.push(idx);
+                }
+            }
+        }
+
+        if buckets_to_refresh.is_empty() {
+            return;
+        }
+
+        tracing::info!(
+            family = ?self.family,
+            count = buckets_to_refresh.len(),
+            "Refreshing inactive buckets: {:?}",
+            buckets_to_refresh
+        );
+
+        for idx in buckets_to_refresh {
+            let target = self.routing_table.read().unwrap().random_id_in_bucket(idx);
+            let our_node_id = self.node_id;
+            let dht_node_tx = self.tx.clone();
+            let af = self.family;
+            let k_closest_nodes = self.routing_table.read().unwrap().find_closest(&target, 8);
+
+            if !k_closest_nodes.is_empty() {
+                tasks::RefreshCtx::start_refresh(
+                    target,
+                    our_node_id,
+                    dht_node_tx,
+                    af,
+                    &k_closest_nodes,
+                );
+            }
+        }
     }
 
-    async fn run_periodic_ping(&self) {}
+    async fn run_periodic_ping(&mut self) {
+        let questionable_nodes: Vec<(NodeId, SocketAddr)> = self
+            .routing_table
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|n| n.is_questionable())
+            .map(|n| (n.node_id, n.addr))
+            .collect();
+
+        if questionable_nodes.is_empty() {
+            return;
+        }
+
+        tracing::debug!(
+            family = ?self.family,
+            count = questionable_nodes.len(),
+            "Pinging questionable nodes to verify liveness"
+        );
+
+        for (id, addr) in questionable_nodes {
+            let tx = self.tx.clone();
+            let query = Query::Ping { id: self.node_id };
+            let (reply_tx, _) = oneshot::channel();
+            let _ = tx
+                .send(DhtNodeCommand::QueryNode {
+                    addr,
+                    node_id: Some(id),
+                    query,
+                    reply: reply_tx,
+                })
+                .await;
+        }
+    }
 
     async fn handle_command(&mut self, cmd: DhtNodeCommand) {
         match cmd {
             DhtNodeCommand::AddNode { id, addr } => {
-                // tracing::info!(family = ?self.family, ?id, ?addr, "Adding node to routing table");
-                self.routing_table.write().unwrap().add_node(id, addr);
+                let result = self.routing_table.write().unwrap().add_node(id, addr);
+                if let crate::routing_table::AddNodeResult::PingQuestionable {
+                    questionable_node,
+                    ..
+                } = result
+                {
+                    let tx = self.tx.clone();
+                    let our_node_id = self.node_id;
+                    tokio::spawn(async move {
+                        let (reply_tx, _) = oneshot::channel();
+                        let _ = tx
+                            .send(DhtNodeCommand::QueryNode {
+                                addr: questionable_node.addr,
+                                node_id: Some(questionable_node.node_id),
+                                query: Query::Ping { id: our_node_id },
+                                reply: reply_tx,
+                            })
+                            .await;
+                    });
+                }
             }
             DhtNodeCommand::SearchTask {
                 info_hash,
@@ -554,7 +621,12 @@ impl DhtNode {
             DhtNodeCommand::RoutingTableSize { reply } => {
                 let _ = reply.send(self.routing_table.read().unwrap().size());
             }
-            DhtNodeCommand::QueryNode { addr, query, reply } => {
+            DhtNodeCommand::QueryNode {
+                addr,
+                node_id,
+                query,
+                reply,
+            } => {
                 let tid = self.next_tid();
 
                 tracing::debug!(family = ?self.family, ?addr, ?query, tid, "Sending query");
@@ -567,7 +639,14 @@ impl DhtNode {
                 };
 
                 let (tx, rx) = oneshot::channel();
-                self.pending_queries.insert(tid, tx);
+                self.pending_queries.insert(
+                    tid,
+                    PendingQuery {
+                        reply: tx,
+                        node_id,
+                        addr,
+                    },
+                );
 
                 if self.socket.send_to(&msg.to_bytes(), addr).await.is_err() {
                     self.pending_queries.remove(&tid);
@@ -594,7 +673,19 @@ impl DhtNode {
                 });
             }
             DhtNodeCommand::TimeoutQuery { tid } => {
-                self.pending_queries.remove(&tid);
+                if let Some(pending) = self.pending_queries.remove(&tid) {
+                    if let Some(id) = pending.node_id {
+                        let evicted = self.routing_table.write().unwrap().mark_failed(&id);
+                        if let Some((evicted_node, replacement_node)) = evicted {
+                            tracing::info!(
+                                family = ?self.family,
+                                ?evicted_node.node_id,
+                                ?replacement_node.node_id,
+                                "Evicted bad node and promoted replacement candidate"
+                            );
+                        }
+                    }
+                }
             }
         }
     }
@@ -610,12 +701,12 @@ impl DhtNode {
                 MessageBody::Response(response) => {
                     let tid = msg.transaction_id.as_u16();
                     // tracing::info!(family = ?self.family, ?addr, ?response, tid, "Received response");
-                    if let Some(tx) = self.pending_queries.remove(&tid) {
+                    if let Some(pending) = self.pending_queries.remove(&tid) {
                         if let Some(id) = node_id {
                             // tracing::info!(family = ?self.family, ?id, ?addr, "Updating routing table from response");
                             self.routing_table.write().unwrap().add_node(id, addr);
                         }
-                        let _ = tx.send(response);
+                        let _ = pending.reply.send(response);
                     }
                 }
                 MessageBody::Error { code, ref message } => {
@@ -1047,6 +1138,43 @@ fn persist_routing_tables(
     Ok(())
 }
 
+/// Try to load cached nodes from `dht.dat` in the state directory and pre-populate the routing tables.
+fn load_and_populate_cached_nodes(
+    state_dir: Option<&PathBuf>,
+    rt_v4: Option<&Arc<RwLock<RoutingTable>>>,
+    rt_v6: Option<&Arc<RwLock<RoutingTable>>>,
+) -> Option<(Vec<CompactNodeInfo>, Vec<CompactNodeInfo>)> {
+    let dir = state_dir?;
+    let path = dir.join(STATE_FILENAME);
+
+    load_cached_nodes(&path)
+        .inspect(|(v4, v6)| {
+            tracing::info!(
+                v4 = v4.len(),
+                v6 = v6.len(),
+                "Loaded cached nodes from dht.dat"
+            );
+        })
+        .inspect_err(|e| {
+            tracing::debug!(?e, "No cached nodes available, will use DNS bootstrap");
+        })
+        .ok()
+        .inspect(|(v4_nodes, v6_nodes)| {
+            if let Some(rt) = rt_v4 {
+                let mut table = rt.write().expect("rt_v4 lock poisoned");
+                for node in v4_nodes {
+                    table.add_node(node.node_id, node.addr);
+                }
+            }
+            if let Some(rt) = rt_v6 {
+                let mut table = rt.write().expect("rt_v6 lock poisoned");
+                for node in v6_nodes {
+                    table.add_node(node.node_id, node.addr);
+                }
+            }
+        })
+}
+
 /// Try to load cached nodes from a bencoded state file.
 ///
 /// Returns `(v4_nodes, v6_nodes)`. Either list may be empty if the
@@ -1253,6 +1381,12 @@ mod tasks {
                 let next_queries = self.candidates.get_next_unqueried(ALPHA - futs.len());
                 for addr in next_queries {
                     let tx = self.dht_node_tx.clone();
+                    let node_id = self
+                        .candidates
+                        .nodes
+                        .values()
+                        .find(|n| n.addr == addr)
+                        .and_then(|n| n.id);
                     let query = Query::GetPeers {
                         id: self.our_node_id,
                         info_hash: InfoHash::from_slice(self.target.as_bytes()).unwrap(),
@@ -1268,6 +1402,7 @@ mod tasks {
                         let _ = tx
                             .send(DhtNodeCommand::QueryNode {
                                 addr,
+                                node_id,
                                 query,
                                 reply: reply_tx,
                             })
@@ -1316,7 +1451,7 @@ mod tasks {
                 let closest = self.candidates.get_k_closest_responded();
                 let mut announce_futs = Vec::with_capacity(closest.len());
 
-                for (addr, _node_id, token) in closest {
+                for (addr, node_id, token) in closest {
                     let tx = self.dht_node_tx.clone();
                     let query = Query::AnnouncePeer {
                         id: self.our_node_id,
@@ -1331,6 +1466,7 @@ mod tasks {
                         let _ = tx
                             .send(DhtNodeCommand::QueryNode {
                                 addr,
+                                node_id: Some(node_id),
                                 query,
                                 reply: reply_tx,
                             })
@@ -1405,6 +1541,12 @@ mod tasks {
                     let tx = self.dht_node_tx.clone();
                     let our_node_id = self.our_node_id;
                     let family = self.family;
+                    let node_id = self
+                        .candidate
+                        .nodes
+                        .values()
+                        .find(|n| n.addr == addr)
+                        .and_then(|n| n.id);
 
                     futs.push(async move {
                         let (reply_tx, reply_rx) = oneshot::channel();
@@ -1420,6 +1562,7 @@ mod tasks {
                         let _ = tx
                             .send(DhtNodeCommand::QueryNode {
                                 addr,
+                                node_id,
                                 query,
                                 reply: reply_tx,
                             })
@@ -1469,6 +1612,104 @@ mod tasks {
                 // Only check completion once seeds are fully drained —
                 // ClosestNodes::is_complete() can't account for addr-only seeds.
                 if self.bootstrap_addrs.is_empty() && self.candidate.is_complete() {
+                    break;
+                }
+            }
+        }
+    }
+
+    pub(super) struct RefreshCtx {
+        target: NodeId,
+        our_node_id: NodeId,
+        dht_node_tx: mpsc::Sender<DhtNodeCommand>,
+        family: AddressFamily,
+    }
+
+    impl RefreshCtx {
+        pub(super) fn start_refresh(
+            target: NodeId,
+            our_node_id: NodeId,
+            dht_node_tx: mpsc::Sender<DhtNodeCommand>,
+            family: AddressFamily,
+            initial_nodes: &[NodeEntry],
+        ) -> JoinHandle<()> {
+            let mut candidate = ClosestNodes::new(target);
+            for node in initial_nodes {
+                candidate.insert(node.node_id, node.addr);
+            }
+
+            let refresh = Self {
+                target,
+                our_node_id,
+                dht_node_tx,
+                family,
+            };
+            tokio::spawn(async move {
+                refresh.run(candidate).await;
+            })
+        }
+
+        async fn run(self, mut candidate: ClosestNodes) {
+            let mut futs = FuturesUnordered::new();
+
+            loop {
+                let next_queries = candidate.get_next_unqueried(ALPHA - futs.len());
+                for addr in next_queries {
+                    let tx = self.dht_node_tx.clone();
+                    let query = Query::FindNode {
+                        id: self.our_node_id,
+                        target: self.target,
+                        is_bootstrap: false,
+                        want: Some(match self.family {
+                            AddressFamily::V4 => Want::v4_only(),
+                            AddressFamily::V6 => Want::v6_only(),
+                        }),
+                    };
+
+                    futs.push(async move {
+                        let (reply_tx, reply_rx) = oneshot::channel();
+                        let _ = tx
+                            .send(DhtNodeCommand::QueryNode {
+                                addr,
+                                node_id: None,
+                                query,
+                                reply: reply_tx,
+                            })
+                            .await;
+                        (addr, reply_rx.await)
+                    });
+                }
+
+                if futs.is_empty() {
+                    break;
+                }
+
+                tokio::select! {
+                    Some((addr, res)) = futs.next() => {
+                        match res {
+                            Ok(Ok(Response::FindNode { id, nodes })) => {
+                                candidate.insert(id, addr);
+                                candidate.update_state(addr, NodeState::Responded, None);
+
+                                for compact in nodes {
+                                    let _ = self
+                                        .dht_node_tx
+                                        .send(DhtNodeCommand::AddNode {
+                                            id: compact.node_id,
+                                            addr: compact.addr,
+                                        })
+                                        .await;
+                                    candidate.insert(compact.node_id, compact.addr);
+                                }
+                            }
+                            _ => {
+                                candidate.update_state(addr, NodeState::Failed, None);
+                            }
+                        }
+                    }
+                }
+
+                if candidate.is_complete() {
                     break;
                 }
             }

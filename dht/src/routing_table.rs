@@ -1,17 +1,24 @@
 use crate::node_id::NodeId;
-use std::{net::SocketAddr, time::Instant};
+use std::{
+    net::SocketAddr,
+    time::{Duration, Instant},
+};
 
 #[derive(Debug, Clone)]
 pub struct NodeEntry {
     pub node_id: NodeId,
     pub addr: SocketAddr,
     pub status: ContactStatus,
-    pub last_queried: Option<std::time::Instant>,
+    /// The timestamp of the last successful interaction (when they responded to us,
+    /// or when they successfully queried us).
+    pub last_seen: Option<Instant>,
+    /// The timestamp of the last query we sent to them.
+    pub last_queried: Option<Instant>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum ContactStatus {
-    /// Never sent a request to this node
+    /// Never successfully sent/received a request to/from this node
     Fresh,
     /// Sent at least one request, last one succeeded
     Confirmed { consecutive_failures: u8 },
@@ -29,21 +36,24 @@ impl NodeEntry {
             }
     }
 
-    pub const fn timed_out(&mut self) {
+    pub fn timed_out(&mut self) {
         if let ContactStatus::Confirmed {
             ref mut consecutive_failures,
         } = self.status
         {
             *consecutive_failures = consecutive_failures.saturating_add(1);
+        } else if self.status == ContactStatus::Fresh {
+            self.status = ContactStatus::Confirmed {
+                consecutive_failures: 1,
+            };
         }
     }
 
     pub fn set_pinged(&mut self) {
-        if self.status == ContactStatus::Fresh {
-            self.status = ContactStatus::Confirmed {
-                consecutive_failures: 0,
-            };
-        }
+        self.status = ContactStatus::Confirmed {
+            consecutive_failures: 0,
+        };
+        self.last_seen = Some(Instant::now());
     }
 
     pub const fn reset_fail_count(&mut self) {
@@ -64,24 +74,43 @@ impl NodeEntry {
         }
     }
 
-    // TODO : IsGood fn
-    // 	return time.Since(n.lastGotResponse) < 15*time.Minute ||
-    // !n.lastGotResponse.IsZero() && time.Since(n.lastGotQuery) < 15*time.Minute
+    /// A node is considered "Good" if it has responded to a query or sent a query
+    /// to us in the last 15 minutes.
+    pub fn is_good(&self) -> bool {
+        if let Some(seen) = self.last_seen {
+            seen.elapsed() < Duration::from_secs(15 * 60) && self.fail_count() == 0
+        } else {
+            false
+        }
+    }
+
+    /// A node is considered "Bad" if it has failed to respond to multiple consecutive queries (2 or more).
+    pub fn is_bad(&self) -> bool {
+        self.fail_count() >= 2
+    }
+
+    /// A node is considered "Questionable" if it hasn't responded or queried in the last 15 minutes,
+    /// but hasn't failed to respond to multiple consecutive queries either.
+    pub fn is_questionable(&self) -> bool {
+        !self.is_good() && !self.is_bad()
+    }
 }
 
 #[derive(Debug)]
-struct KBucket {
+pub struct KBucket {
     pub nodes: Vec<NodeEntry>,
     pub replacement_candidates: Vec<NodeEntry>,
+    pub last_changed: Instant,
 }
 
-pub const K: usize = 14;
+pub const K: usize = 8;
 
 impl KBucket {
     fn new() -> Self {
         Self {
             nodes: Vec::with_capacity(K),
             replacement_candidates: Vec::new(),
+            last_changed: Instant::now(),
         }
     }
 }
@@ -97,8 +126,24 @@ pub struct RoutingTable {
     local_id: NodeId,
     // TODO Use
     // buckets: BTreeMap<u8,KBucket>,
-    buckets: [KBucket; 160],
+    pub(crate) buckets: [KBucket; 160],
     address_family: AddressFamily,
+}
+
+#[derive(Debug, Clone)]
+pub enum AddNodeResult {
+    /// The node was successfully added or updated in the main bucket.
+    Added,
+    /// The bucket is full, but we identified a questionable node that should be pinged.
+    /// Contains both the questionable node to ping and the candidate triggering it.
+    PingQuestionable {
+        questionable_node: NodeEntry,
+        candidate_node: NodeEntry,
+    },
+    /// The node was added to the replacement candidates because the bucket is full and all nodes are good.
+    Cached,
+    /// Ignored (e.g. self ID).
+    Ignored,
 }
 
 impl RoutingTable {
@@ -122,21 +167,24 @@ impl RoutingTable {
         self.local_id.distance_exp(id)
     }
 
-    pub fn add_node(&mut self, node_id: NodeId, addr: SocketAddr) -> bool {
+    pub fn add_node(&mut self, node_id: NodeId, addr: SocketAddr) -> AddNodeResult {
         let index = self.find_bucket_index(&node_id);
         if index == 0 {
-            return false;
+            return AddNodeResult::Ignored;
         }
 
         let bucket = &mut self.buckets[index];
 
+        // 1. If node already exists, update address and reset fail count
         if let Some(entry) = bucket.nodes.iter_mut().find(|n| n.node_id == node_id) {
             entry.addr = addr;
             entry.reset_fail_count();
-            entry.last_queried = Some(Instant::now());
-            return true;
+            entry.last_seen = Some(Instant::now());
+            bucket.last_changed = Instant::now();
+            return AddNodeResult::Added;
         }
 
+        // 2. If bucket has room, insert node
         if bucket.nodes.len() < K {
             bucket.nodes.push(NodeEntry {
                 node_id,
@@ -144,19 +192,118 @@ impl RoutingTable {
                 status: ContactStatus::Confirmed {
                     consecutive_failures: 0,
                 },
+                last_seen: Some(Instant::now()),
                 last_queried: None,
             });
-            return true;
+            bucket.last_changed = Instant::now();
+            return AddNodeResult::Added;
         }
 
-        bucket.replacement_candidates.push(NodeEntry {
+        // 3. Bucket is full. Check if any existing node is Bad
+        if let Some(bad_pos) = bucket.nodes.iter().position(|n| n.is_bad()) {
+            bucket.nodes.remove(bad_pos);
+            bucket.nodes.push(NodeEntry {
+                node_id,
+                addr,
+                status: ContactStatus::Confirmed {
+                    consecutive_failures: 0,
+                },
+                last_seen: Some(Instant::now()),
+                last_queried: None,
+            });
+            bucket.last_changed = Instant::now();
+            return AddNodeResult::Added;
+        }
+
+        // 4. Check if any existing node is Questionable. Find the oldest questionable node to ping.
+        // We find the one with the earliest last_seen timestamp.
+        let oldest_questionable = bucket
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.is_questionable())
+            .min_by_key(|(_, n)| n.last_seen.unwrap_or_else(Instant::now));
+
+        let candidate = NodeEntry {
             node_id,
             addr,
             status: ContactStatus::Fresh,
+            last_seen: None,
             last_queried: None,
-        });
+        };
 
-        false
+        // Cache the candidate in replacement_candidates (limit to K entries to avoid unbounded growth)
+        if !bucket
+            .replacement_candidates
+            .iter()
+            .any(|c| c.node_id == node_id)
+        {
+            if bucket.replacement_candidates.len() >= K {
+                bucket.replacement_candidates.remove(0);
+            }
+            bucket.replacement_candidates.push(candidate.clone());
+        }
+
+        if let Some((_, questionable)) = oldest_questionable {
+            return AddNodeResult::PingQuestionable {
+                questionable_node: questionable.clone(),
+                candidate_node: candidate,
+            };
+        }
+
+        AddNodeResult::Cached
+    }
+
+    /// Mark a node as failed (timed out).
+    /// Returns the NodeEntry that was evicted and replaced (if any), along with its replacement.
+    pub fn mark_failed(&mut self, node_id: &NodeId) -> Option<(NodeEntry, NodeEntry)> {
+        let index = self.find_bucket_index(node_id);
+        if index == 0 {
+            return None;
+        }
+
+        let bucket = &mut self.buckets[index];
+        if let Some(pos) = bucket.nodes.iter().position(|n| n.node_id == *node_id) {
+            let entry = &mut bucket.nodes[pos];
+            entry.timed_out();
+
+            // If the node is now bad and we have replacement candidates, evict and promote
+            if entry.is_bad() && !bucket.replacement_candidates.is_empty() {
+                let evicted = bucket.nodes.remove(pos);
+                let mut replacement = bucket.replacement_candidates.remove(0);
+                replacement.status = ContactStatus::Confirmed {
+                    consecutive_failures: 0,
+                };
+                replacement.last_seen = Some(Instant::now());
+                bucket.nodes.push(replacement.clone());
+                bucket.last_changed = Instant::now();
+                return Some((evicted, replacement));
+            }
+        }
+        None
+    }
+
+    /// Generate a random NodeId that falls into the bucket at the given index.
+    pub fn random_id_in_bucket(&self, index: usize) -> NodeId {
+        assert!(index > 0 && index < 160);
+        let d = NodeId::random();
+        let lz = 159 - index;
+        let mut bytes = *d.as_bytes();
+
+        // Zero out bits before lz
+        for i in 0..lz {
+            let byte_idx = i / 8;
+            let bit_idx = i % 8;
+            bytes[byte_idx] &= !(0x80 >> bit_idx);
+        }
+
+        // Set the lz-th bit to 1
+        let byte_idx = lz / 8;
+        let bit_idx = lz % 8;
+        bytes[byte_idx] |= 0x80 >> bit_idx;
+
+        let d_modified = NodeId::from_bytes(bytes);
+        self.local_id ^ d_modified
     }
 
     pub fn find_closest(&self, target: &NodeId, count: usize) -> Vec<NodeEntry> {
@@ -209,5 +356,130 @@ impl<'a> Iterator for RoutingTableIter<'a> {
             let bucket = self.buckets.next()?;
             self.current = bucket.nodes.iter();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::SocketAddr;
+
+    #[test]
+    fn test_random_id_in_bucket() {
+        let local_id = NodeId::random();
+        let table = RoutingTable::new_v4(local_id);
+
+        for index in 1..160 {
+            let target_id = table.random_id_in_bucket(index);
+            let dist_exp = local_id.distance_exp(&target_id);
+            assert_eq!(
+                dist_exp, index,
+                "Random ID at index {} had unexpected distance exponent {}",
+                index, dist_exp
+            );
+        }
+    }
+
+    #[test]
+    fn test_add_node_bucket_flow() {
+        let local_id = NodeId::random();
+        let mut table = RoutingTable::new_v4(local_id);
+        let addr: SocketAddr = "127.0.0.1:8000".parse().unwrap();
+
+        // 1. Generate nodes that fall into the exact same bucket (e.g. index 150)
+        let mut bucket_nodes = Vec::new();
+        for _ in 0..K {
+            let id = table.random_id_in_bucket(150);
+            bucket_nodes.push(id);
+            let res = table.add_node(id, addr);
+            assert!(matches!(res, AddNodeResult::Added));
+        }
+
+        assert_eq!(table.buckets[150].nodes.len(), K);
+        assert_eq!(table.buckets[150].replacement_candidates.len(), 0);
+
+        // 2. Add K+1-th node, which should be cached since all existing are good/confirmed
+        let extra_id = table.random_id_in_bucket(150);
+        let res = table.add_node(extra_id, addr);
+        assert!(matches!(res, AddNodeResult::Cached));
+        assert_eq!(table.buckets[150].nodes.len(), K);
+        assert_eq!(table.buckets[150].replacement_candidates.len(), 1);
+        assert_eq!(
+            table.buckets[150].replacement_candidates[0].node_id,
+            extra_id
+        );
+
+        // 3. Mark one active node as failed twice (making it Bad)
+        let failed_id = bucket_nodes[0];
+        let evicted = table.mark_failed(&failed_id);
+
+        // Since we have a replacement candidate (extra_id), marking failed_id as failed once
+        // makes consecutive_failures = 1. It is not bad yet (needs >= 2).
+        assert!(evicted.is_none());
+        assert_eq!(table.buckets[150].nodes[0].fail_count(), 1);
+
+        // Mark it failed again, it should become bad and get evicted, promoting the replacement candidate!
+        let evicted = table.mark_failed(&failed_id);
+        assert!(evicted.is_some());
+        let (evicted_node, replacement_node) = evicted.unwrap();
+        assert_eq!(evicted_node.node_id, failed_id);
+        assert_eq!(replacement_node.node_id, extra_id);
+
+        // Verify the routing table structure matches the eviction and promotion
+        assert_eq!(table.buckets[150].nodes.len(), K);
+        assert_eq!(table.buckets[150].replacement_candidates.len(), 0);
+        assert!(
+            table.buckets[150]
+                .nodes
+                .iter()
+                .any(|n| n.node_id == extra_id)
+        );
+        assert!(
+            !table.buckets[150]
+                .nodes
+                .iter()
+                .any(|n| n.node_id == failed_id)
+        );
+    }
+
+    #[test]
+    fn test_ping_questionable_node() {
+        let local_id = NodeId::random();
+        let mut table = RoutingTable::new_v4(local_id);
+        let addr: SocketAddr = "127.0.0.1:8000".parse().unwrap();
+
+        // 1. Fill a bucket (index 150)
+        let mut bucket_nodes = Vec::new();
+        for _ in 0..K {
+            let id = table.random_id_in_bucket(150);
+            bucket_nodes.push(id);
+            table.add_node(id, addr);
+        }
+
+        // 2. Make one node Questionable by setting its last_seen to > 15 minutes ago
+        let questionable_pos = 2;
+        let questionable_id = bucket_nodes[questionable_pos];
+        table.buckets[150].nodes[questionable_pos].last_seen =
+            Some(Instant::now() - Duration::from_secs(20 * 60));
+        assert!(table.buckets[150].nodes[questionable_pos].is_questionable());
+
+        // 3. Adding a new node should now trigger a PingQuestionable result for that node
+        let new_id = table.random_id_in_bucket(150);
+        let res = table.add_node(new_id, addr);
+
+        if let AddNodeResult::PingQuestionable {
+            questionable_node,
+            candidate_node,
+        } = res
+        {
+            assert_eq!(questionable_node.node_id, questionable_id);
+            assert_eq!(candidate_node.node_id, new_id);
+        } else {
+            panic!("Expected PingQuestionable, got {:?}", res);
+        }
+
+        // Verify it was added to the replacement candidates
+        assert_eq!(table.buckets[150].replacement_candidates.len(), 1);
+        assert_eq!(table.buckets[150].replacement_candidates[0].node_id, new_id);
     }
 }
