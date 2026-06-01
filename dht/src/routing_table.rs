@@ -12,8 +12,6 @@ pub struct NodeEntry {
     /// The timestamp of the last successful interaction (when they responded to us,
     /// or when they successfully queried us).
     pub last_seen: Option<Instant>,
-    /// The timestamp of the last query we sent to them.
-    pub last_queried: Option<Instant>,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -133,10 +131,9 @@ pub enum AddNodeResult {
     /// The node was successfully added or updated in the main bucket.
     Added,
     /// The bucket is full, but we identified a questionable node that should be pinged.
-    /// Contains both the questionable node to ping and the candidate triggering it.
+    /// Contains the questionable node to ping.
     PingQuestionable {
         questionable_node: NodeEntry,
-        candidate_node: NodeEntry,
     },
     /// The node was added to the replacement candidates because the bucket is full and all nodes are good.
     Cached,
@@ -191,7 +188,6 @@ impl RoutingTable {
                     consecutive_failures: 0,
                 },
                 last_seen: Some(Instant::now()),
-                last_queried: None,
             });
             bucket.last_changed = Instant::now();
             return AddNodeResult::Added;
@@ -207,7 +203,6 @@ impl RoutingTable {
                     consecutive_failures: 0,
                 },
                 last_seen: Some(Instant::now()),
-                last_queried: None,
             });
             bucket.last_changed = Instant::now();
             return AddNodeResult::Added;
@@ -227,7 +222,6 @@ impl RoutingTable {
             addr,
             status: ContactStatus::Fresh,
             last_seen: None,
-            last_queried: None,
         };
 
         // Cache the candidate in replacement_candidates (limit to K entries to avoid unbounded growth)
@@ -245,7 +239,6 @@ impl RoutingTable {
         if let Some((_, questionable)) = oldest_questionable {
             return AddNodeResult::PingQuestionable {
                 questionable_node: questionable.clone(),
-                candidate_node: candidate,
             };
         }
 
@@ -467,13 +460,8 @@ mod tests {
         let new_id = table.random_id_in_bucket(150);
         let res = table.add_node(new_id, addr);
 
-        if let AddNodeResult::PingQuestionable {
-            questionable_node,
-            candidate_node,
-        } = res
-        {
+        if let AddNodeResult::PingQuestionable { questionable_node } = res {
             assert_eq!(questionable_node.node_id, questionable_id);
-            assert_eq!(candidate_node.node_id, new_id);
         } else {
             panic!("Expected PingQuestionable, got {res:?}");
         }

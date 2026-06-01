@@ -566,10 +566,8 @@ impl DhtNode {
         match cmd {
             DhtNodeCommand::AddNode { id, addr } => {
                 let result = self.routing_table.write().unwrap().add_node(id, addr);
-                if let crate::routing_table::AddNodeResult::PingQuestionable {
-                    questionable_node,
-                    ..
-                } = result
+                if let crate::routing_table::AddNodeResult::PingQuestionable { questionable_node } =
+                    result
                 {
                     let tx = self.tx.clone();
                     let our_node_id = self.node_id;
