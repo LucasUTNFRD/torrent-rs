@@ -16,7 +16,7 @@ pub struct NodeEntry {
     pub last_queried: Option<Instant>,
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum ContactStatus {
     /// Never successfully sent/received a request to/from this node
     Fresh,
@@ -77,15 +77,13 @@ impl NodeEntry {
     /// A node is considered "Good" if it has responded to a query or sent a query
     /// to us in the last 15 minutes.
     pub fn is_good(&self) -> bool {
-        if let Some(seen) = self.last_seen {
+        self.last_seen.is_some_and(|seen| {
             seen.elapsed() < Duration::from_secs(15 * 60) && self.fail_count() == 0
-        } else {
-            false
-        }
+        })
     }
 
     /// A node is considered "Bad" if it has failed to respond to multiple consecutive queries (2 or more).
-    pub fn is_bad(&self) -> bool {
+    pub const fn is_bad(&self) -> bool {
         self.fail_count() >= 2
     }
 
@@ -200,7 +198,7 @@ impl RoutingTable {
         }
 
         // 3. Bucket is full. Check if any existing node is Bad
-        if let Some(bad_pos) = bucket.nodes.iter().position(|n| n.is_bad()) {
+        if let Some(bad_pos) = bucket.nodes.iter().position(NodeEntry::is_bad) {
             bucket.nodes.remove(bad_pos);
             bucket.nodes.push(NodeEntry {
                 node_id,
@@ -255,7 +253,7 @@ impl RoutingTable {
     }
 
     /// Mark a node as failed (timed out).
-    /// Returns the NodeEntry that was evicted and replaced (if any), along with its replacement.
+    /// Returns the `NodeEntry` that was evicted and replaced (if any), along with its replacement.
     pub fn mark_failed(&mut self, node_id: &NodeId) -> Option<(NodeEntry, NodeEntry)> {
         let index = self.find_bucket_index(node_id);
         if index == 0 {
@@ -283,7 +281,7 @@ impl RoutingTable {
         None
     }
 
-    /// Generate a random NodeId that falls into the bucket at the given index.
+    /// Generate a random `NodeId` that falls into the bucket at the given index.
     pub fn random_id_in_bucket(&self, index: usize) -> NodeId {
         assert!(index > 0 && index < 160);
         let d = NodeId::random();
@@ -374,8 +372,7 @@ mod tests {
             let dist_exp = local_id.distance_exp(&target_id);
             assert_eq!(
                 dist_exp, index,
-                "Random ID at index {} had unexpected distance exponent {}",
-                index, dist_exp
+                "Random ID at index {index} had unexpected distance exponent {dist_exp}"
             );
         }
     }
@@ -459,8 +456,11 @@ mod tests {
         // 2. Make one node Questionable by setting its last_seen to > 15 minutes ago
         let questionable_pos = 2;
         let questionable_id = bucket_nodes[questionable_pos];
-        table.buckets[150].nodes[questionable_pos].last_seen =
-            Some(Instant::now() - Duration::from_secs(20 * 60));
+        table.buckets[150].nodes[questionable_pos].last_seen = Some(
+            Instant::now()
+                .checked_sub(Duration::from_secs(20 * 60))
+                .unwrap(),
+        );
         assert!(table.buckets[150].nodes[questionable_pos].is_questionable());
 
         // 3. Adding a new node should now trigger a PingQuestionable result for that node
@@ -475,7 +475,7 @@ mod tests {
             assert_eq!(questionable_node.node_id, questionable_id);
             assert_eq!(candidate_node.node_id, new_id);
         } else {
-            panic!("Expected PingQuestionable, got {:?}", res);
+            panic!("Expected PingQuestionable, got {res:?}");
         }
 
         // Verify it was added to the replacement candidates

@@ -318,6 +318,7 @@ impl Dht {
     /// startup can skip DNS-based bootstrap and resume from cached
     /// nodes. Without calling this, the DHT will need to re-bootstrap
     /// from scratch on the next run.
+    #[allow(clippy::unused_async)]
     pub async fn shutdown(self) -> Result<(), DhtError> {
         if let Some(ref dir) = self.state_dir {
             persist_routing_tables(
@@ -476,13 +477,13 @@ impl DhtNode {
                     self.run_periodic_ping().await;
                 }
                 _ = last_table_refresh.tick() => {
-                    self.refresh_table().await;
+                    self.refresh_table();
                 }
             }
         }
     }
 
-    async fn refresh_table(&self) {
+    fn refresh_table(&self) {
         let mut buckets_to_refresh = Vec::new();
         {
             let rt = self.routing_table.read().unwrap();
@@ -526,7 +527,7 @@ impl DhtNode {
         }
     }
 
-    async fn run_periodic_ping(&mut self) {
+    async fn run_periodic_ping(&self) {
         let questionable_nodes: Vec<(NodeId, SocketAddr)> = self
             .routing_table
             .read()
