@@ -29,6 +29,37 @@ pub trait Encode {
     fn to_bencode(&self) -> Bencode;
 }
 
+pub trait Decode: Sized {
+    fn from_bencode(bencode: &Bencode) -> Result<Self, BencodeError>;
+}
+
+impl Decode for String {
+    fn from_bencode(bencode: &Bencode) -> Result<Self, BencodeError> {
+        match bencode {
+            Bencode::Bytes(b) => String::from_utf8(b.clone()).map_err(|_| BencodeError::InvalidBencodeString),
+            _ => Err(BencodeError::InvalidBencodeString),
+        }
+    }
+}
+
+impl Decode for i64 {
+    fn from_bencode(bencode: &Bencode) -> Result<Self, BencodeError> {
+        match bencode {
+            Bencode::Int(i) => Ok(*i),
+            _ => Err(BencodeError::InvalidBencodeNumber),
+        }
+    }
+}
+
+impl Decode for Vec<u8> {
+    fn from_bencode(bencode: &Bencode) -> Result<Self, BencodeError> {
+        match bencode {
+            Bencode::Bytes(b) => Ok(b.clone()),
+            _ => Err(BencodeError::InvalidBencodeString),
+        }
+    }
+}
+
 impl Encode for String {
     fn to_bencode(&self) -> Bencode {
         Bencode::Bytes(self.as_bytes().to_vec())

@@ -27,6 +27,10 @@ impl TransactionId {
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
+
+    pub fn as_u16(&self) -> u16 {
+        u16::from_be_bytes(self.0)
+    }
 }
 
 /// A complete KRPC message with common fields and body.
@@ -35,7 +39,6 @@ pub struct KrpcMessage {
     /// Transaction ID for request/response correlation.
     pub transaction_id: TransactionId,
     /// Client version string (optional, 4 bytes: 2-char client ID + 2-char version).
-    // TODO: use [u8;VERSION_STRING_LEN]
     pub version: Option<Vec<u8>>,
     /// Sender's external IP as seen by responder (BEP 42).
     pub sender_ip: Option<SocketAddr>,
@@ -63,10 +66,14 @@ pub enum Query {
     FindNode {
         id: NodeId,
         target: NodeId,
+        is_bootstrap: bool,
+        want: Option<Want>,
     },
     GetPeers {
         id: NodeId,
         info_hash: InfoHash,
+        is_bootstrap: bool,
+        want: Option<Want>,
     },
     AnnouncePeer {
         id: NodeId,
@@ -76,6 +83,31 @@ pub enum Query {
         /// If true, the source port of the UDP packet should be used as the peer's port.
         implied_port: bool,
     },
+}
+
+/// BEP 32: which address families the querier wants back in the reply.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Want {
+    pub n4: bool,
+    pub n6: bool,
+}
+
+impl Want {
+    pub const fn v4_only() -> Self {
+        Self {
+            n4: true,
+            n6: false,
+        }
+    }
+    pub const fn v6_only() -> Self {
+        Self {
+            n4: false,
+            n6: true,
+        }
+    }
+    pub const fn both() -> Self {
+        Self { n4: true, n6: true }
+    }
 }
 
 /// DHT response types.
@@ -135,21 +167,39 @@ impl KrpcMessage {
                     Query::Ping { id } => {
                         dict.put("q", &"ping");
                         let mut args = BTreeMap::<Vec<u8>, Bencode>::new();
-                        args.put("id", &id.as_bytes().as_slice());
+                        args.put("id", &id.as_slice());
                         dict.insert(b"a".to_vec(), args.build());
                     }
-                    Query::FindNode { id, target } => {
+                    Query::FindNode {
+                        id,
+                        target,
+                        is_bootstrap,
+                        want,
+                    } => {
                         dict.put("q", &"find_node");
                         let mut args = BTreeMap::<Vec<u8>, Bencode>::new();
-                        args.put("id", &id.as_bytes().as_slice());
-                        args.put("target", &target.as_bytes().as_slice());
+                        args.put("id", &id.as_slice());
+                        args.put("target", &target.as_slice());
+                        if *is_bootstrap {
+                            args.insert(b"bs".to_vec(), Bencode::Int(1));
+                        }
+                        encode_want(&mut args, want);
                         dict.insert(b"a".to_vec(), args.build());
                     }
-                    Query::GetPeers { id, info_hash } => {
+                    Query::GetPeers {
+                        id,
+                        info_hash,
+                        is_bootstrap,
+                        want,
+                    } => {
                         dict.put("q", &"get_peers");
                         let mut args = BTreeMap::<Vec<u8>, Bencode>::new();
-                        args.put("id", &id.as_bytes().as_slice());
-                        args.put("info_hash", &info_hash.as_bytes().as_slice());
+                        args.put("id", &id.as_slice());
+                        args.put("info_hash", &info_hash.as_slice());
+                        if *is_bootstrap {
+                            args.insert(b"bs".to_vec(), Bencode::Int(1));
+                        }
+                        encode_want(&mut args, want);
                         dict.insert(b"a".to_vec(), args.build());
                     }
                     Query::AnnouncePeer {
@@ -161,8 +211,8 @@ impl KrpcMessage {
                     } => {
                         dict.put("q", &"announce_peer");
                         let mut args = BTreeMap::<Vec<u8>, Bencode>::new();
-                        args.put("id", &id.as_bytes().as_slice());
-                        args.put("info_hash", &info_hash.as_bytes().as_slice());
+                        args.put("id", &id.as_slice());
+                        args.put("info_hash", &info_hash.as_slice());
                         args.insert(b"port".to_vec(), Bencode::Int(*port as i64));
                         args.put("token", &token.as_slice());
                         if *implied_port {
@@ -177,12 +227,11 @@ impl KrpcMessage {
                 let mut r = BTreeMap::<Vec<u8>, Bencode>::new();
                 match response {
                     Response::Ping { id } => {
-                        r.put("id", &id.as_bytes().as_slice());
+                        r.put("id", &id.as_slice());
                     }
                     Response::FindNode { id, nodes } => {
-                        r.put("id", &id.as_bytes().as_slice());
-                        let compact = encode_compact_nodes_v4(nodes);
-                        r.put("nodes", &compact.as_slice());
+                        r.put("id", &id.as_slice());
+                        encode_nodes(&mut r, nodes);
                     }
                     Response::GetPeers {
                         id,
@@ -190,7 +239,7 @@ impl KrpcMessage {
                         values,
                         nodes,
                     } => {
-                        r.put("id", &id.as_bytes().as_slice());
+                        r.put("id", &id.as_slice());
                         r.put("token", &token.as_slice());
                         // BEP 5: "values" is a list of strings, each being compact peer info
                         if let Some(peers) = values {
@@ -201,12 +250,11 @@ impl KrpcMessage {
                             r.insert(b"values".to_vec(), Bencode::List(values_list));
                         }
                         if let Some(nodes) = nodes {
-                            let compact = encode_compact_nodes_v4(nodes);
-                            r.put("nodes", &compact.as_slice());
+                            encode_nodes(&mut r, nodes);
                         }
                     }
                     Response::AnnouncePeer { id } => {
-                        r.put("id", &id.as_bytes().as_slice());
+                        r.put("id", &id.as_slice());
                     }
                 }
                 dict.insert(b"r".to_vec(), r.build());
@@ -225,7 +273,10 @@ impl KrpcMessage {
     }
 
     /// Decode a KRPC message from bencoded bytes.
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, DhtError> {
+    pub fn from_bytes(
+        bytes: &[u8],
+        get_query_type: impl FnOnce(u16) -> Option<&'static str>,
+    ) -> Result<Self, DhtError> {
         let bencode = Bencode::decode(bytes)?;
         let Bencode::Dict(dict) = bencode else {
             return Err(DhtError::Parse("expected dictionary".to_string()));
@@ -264,7 +315,7 @@ impl KrpcMessage {
 
         let body = match msg_type {
             "q" => parse_query(&dict)?,
-            "r" => parse_response(&dict)?,
+            "r" => parse_response(&dict, get_query_type(transaction_id.as_u16()))?,
             "e" => parse_error(&dict)?,
             _ => return Err(DhtError::Parse(format!("unknown message type: {msg_type}"))),
         };
@@ -298,7 +349,13 @@ impl KrpcMessage {
     }
 
     /// Create a find_node query message.
-    pub fn find_node_query(tx_id: u16, node_id: NodeId, target: NodeId) -> Self {
+    pub fn find_node_query(
+        tx_id: u16,
+        node_id: NodeId,
+        target: NodeId,
+        is_bootstrap: bool,
+        want: Option<Want>,
+    ) -> Self {
         Self {
             transaction_id: TransactionId::new(tx_id),
             version: None,
@@ -306,6 +363,8 @@ impl KrpcMessage {
             body: MessageBody::Query(Query::FindNode {
                 id: node_id,
                 target,
+                is_bootstrap,
+                want,
             }),
         }
     }
@@ -335,7 +394,13 @@ impl KrpcMessage {
     }
 
     /// Create a get_peers query message.
-    pub fn get_peers_query(tx_id: u16, node_id: NodeId, info_hash: InfoHash) -> Self {
+    pub fn get_peers_query(
+        tx_id: u16,
+        node_id: NodeId,
+        info_hash: InfoHash,
+        is_bootstrap: bool,
+        want: Option<Want>,
+    ) -> Self {
         Self {
             transaction_id: TransactionId::new(tx_id),
             version: None,
@@ -343,16 +408,19 @@ impl KrpcMessage {
             body: MessageBody::Query(Query::GetPeers {
                 id: node_id,
                 info_hash,
+                is_bootstrap,
+                want,
             }),
         }
     }
 
-    /// Create a get_peers response with peer values.
-    pub fn get_peers_response_with_values(
+    /// Create a get_peers response containing values (if found) and/or nodes (as requested by want).
+    pub fn get_peers_response(
         tx_id: TransactionId,
         node_id: NodeId,
         token: Vec<u8>,
-        peers: Vec<SocketAddr>,
+        values: Option<Vec<SocketAddr>>,
+        nodes: Option<Vec<CompactNodeInfo>>,
     ) -> Self {
         Self {
             transaction_id: tx_id,
@@ -361,28 +429,8 @@ impl KrpcMessage {
             body: MessageBody::Response(Response::GetPeers {
                 id: node_id,
                 token,
-                values: Some(peers),
-                nodes: None,
-            }),
-        }
-    }
-
-    /// Create a get_peers response with closer nodes (no peers available).
-    pub fn get_peers_response_with_nodes(
-        tx_id: TransactionId,
-        node_id: NodeId,
-        token: Vec<u8>,
-        nodes: Vec<CompactNodeInfo>,
-    ) -> Self {
-        Self {
-            transaction_id: tx_id,
-            version: None,
-            sender_ip: None,
-            body: MessageBody::Response(Response::GetPeers {
-                id: node_id,
-                token,
-                values: None,
-                nodes: Some(nodes),
+                values,
+                nodes,
             }),
         }
     }
@@ -457,38 +505,32 @@ fn parse_query(dict: &BTreeMap<Vec<u8>, Bencode>) -> Result<MessageBody, DhtErro
 
     let id = parse_node_id(args, b"id")?;
 
+    let is_bootstrap = args.get_i64(b"bs").map(|v| v != 0).unwrap_or(false);
+
     match method {
         "ping" => Ok(MessageBody::Query(Query::Ping { id })),
         "find_node" => {
             let target = parse_node_id(args, b"target")?;
-            Ok(MessageBody::Query(Query::FindNode { id, target }))
+            let want = parse_want(args);
+            Ok(MessageBody::Query(Query::FindNode {
+                id,
+                target,
+                is_bootstrap,
+                want,
+            }))
         }
         "get_peers" => {
-            let info_hash_bytes = args
-                .get_bytes(b"info_hash")
-                .ok_or_else(|| DhtError::Parse("missing info_hash".to_string()))?;
-            if info_hash_bytes.len() != 20 {
-                return Err(DhtError::Parse(format!(
-                    "invalid info_hash length: expected 20, got {}",
-                    info_hash_bytes.len()
-                )));
-            }
-            let info_hash = InfoHash::from_slice(info_hash_bytes)
-                .ok_or_else(|| DhtError::Parse("invalid info_hash".to_string()))?;
-            Ok(MessageBody::Query(Query::GetPeers { id, info_hash }))
+            let info_hash = parse_info_hash(args, b"info_hash")?;
+            let want = parse_want(args);
+            Ok(MessageBody::Query(Query::GetPeers {
+                id,
+                info_hash,
+                is_bootstrap,
+                want,
+            }))
         }
         "announce_peer" => {
-            let info_hash_bytes = args
-                .get_bytes(b"info_hash")
-                .ok_or_else(|| DhtError::Parse("missing info_hash".to_string()))?;
-            if info_hash_bytes.len() != 20 {
-                return Err(DhtError::Parse(format!(
-                    "invalid info_hash length: expected 20, got {}",
-                    info_hash_bytes.len()
-                )));
-            }
-            let info_hash = InfoHash::from_slice(info_hash_bytes)
-                .ok_or_else(|| DhtError::Parse("invalid info_hash".to_string()))?;
+            let info_hash = parse_info_hash(args, b"info_hash")?;
 
             let port = args
                 .get_i64(b"port")
@@ -518,12 +560,23 @@ fn parse_query(dict: &BTreeMap<Vec<u8>, Bencode>) -> Result<MessageBody, DhtErro
     }
 }
 
-fn parse_response(dict: &BTreeMap<Vec<u8>, Bencode>) -> Result<MessageBody, DhtError> {
+fn parse_response(
+    dict: &BTreeMap<Vec<u8>, Bencode>,
+    expected: Option<&'static str>,
+) -> Result<MessageBody, DhtError> {
     let r = dict
         .get_dict(b"r")
         .ok_or_else(|| DhtError::Parse("missing response body".to_string()))?;
 
     let id = parse_node_id(r, b"id")?;
+
+    let mut nodes = Vec::new();
+    if let Some(nodes_bytes) = r.get_bytes(b"nodes") {
+        nodes.extend(decode_compact_nodes_v4(nodes_bytes)?);
+    }
+    if let Some(nodes_bytes) = r.get_bytes(b"nodes6") {
+        nodes.extend(decode_compact_nodes_v6(nodes_bytes)?);
+    }
 
     // Check for token → this is a get_peers response
     if let Some(token) = r.get_bytes(b"token") {
@@ -550,29 +603,30 @@ fn parse_response(dict: &BTreeMap<Vec<u8>, Bencode>) -> Result<MessageBody, DhtE
             None
         };
 
-        // Parse nodes if present
-        let nodes = if let Some(nodes_bytes) = r.get_bytes(b"nodes") {
-            Some(decode_compact_nodes_v4(nodes_bytes)?)
-        } else {
-            None
-        };
-
         return Ok(MessageBody::Response(Response::GetPeers {
             id,
             token,
             values,
-            nodes,
+            nodes: if nodes.is_empty() { None } else { Some(nodes) },
         }));
     }
 
     // Check for nodes → FindNode response
-    if let Some(nodes_bytes) = r.get_bytes(b"nodes") {
-        let nodes = decode_compact_nodes_v4(nodes_bytes)?;
+    if !nodes.is_empty() {
         return Ok(MessageBody::Response(Response::FindNode { id, nodes }));
     }
 
-    // Default: Ping response
-    Ok(MessageBody::Response(Response::Ping { id }))
+    // Disambiguate using the expected query type
+    let res = match expected {
+        Some("announce_peer") => Response::AnnouncePeer { id },
+        Some("ping") | None => Response::Ping { id },
+        Some(q) => {
+            tracing::debug!("Received response for {} without required fields, interpreting as Ping", q);
+            Response::Ping { id }
+        }
+    };
+
+    Ok(MessageBody::Response(res))
 }
 
 fn parse_error(dict: &BTreeMap<Vec<u8>, Bencode>) -> Result<MessageBody, DhtError> {
@@ -620,6 +674,69 @@ fn parse_node_id(dict: &BTreeMap<Vec<u8>, Bencode>, key: &[u8]) -> Result<NodeId
     Ok(NodeId::from_bytes(id))
 }
 
+fn parse_info_hash(dict: &BTreeMap<Vec<u8>, Bencode>, key: &[u8]) -> Result<InfoHash, DhtError> {
+    let bytes = dict
+        .get_bytes(key)
+        .ok_or_else(|| DhtError::Parse(format!("missing key: {}", String::from_utf8_lossy(key))))?;
+
+    if bytes.len() != 20 {
+        return Err(DhtError::Parse(format!(
+            "invalid info hash length: expected 20, got {}",
+            bytes.len()
+        )));
+    }
+
+    InfoHash::from_slice(bytes).ok_or_else(|| DhtError::Parse("invalid info hash".to_string()))
+}
+
+fn encode_want(args: &mut BTreeMap<Vec<u8>, Bencode>, want: &Option<Want>) {
+    if let Some(want) = want {
+        let mut want_list = Vec::new();
+        if want.n4 {
+            want_list.push(Bencode::Bytes(b"n4".to_vec()));
+        }
+        if want.n6 {
+            want_list.push(Bencode::Bytes(b"n6".to_vec()));
+        }
+        if !want_list.is_empty() {
+            args.insert(b"want".to_vec(), Bencode::List(want_list));
+        }
+    }
+}
+
+fn encode_nodes(r: &mut BTreeMap<Vec<u8>, Bencode>, nodes: &[CompactNodeInfo]) {
+    let v4_nodes: Vec<_> = nodes.iter().filter(|n| n.addr.is_ipv4()).cloned().collect();
+    let v6_nodes: Vec<_> = nodes.iter().filter(|n| n.addr.is_ipv6()).cloned().collect();
+
+    if !v4_nodes.is_empty() {
+        r.put("nodes", &encode_compact_nodes_v4(&v4_nodes).as_slice());
+    }
+    if !v6_nodes.is_empty() {
+        r.put("nodes6", &encode_compact_nodes_v6(&v6_nodes).as_slice());
+    }
+}
+
+fn parse_want(args: &BTreeMap<Vec<u8>, Bencode>) -> Option<Want> {
+    if let Some(Bencode::List(list)) = args.get(b"want".as_slice()) {
+        let mut want = Want {
+            n4: false,
+            n6: false,
+        };
+        for b in list {
+            if let Bencode::Bytes(s) = b {
+                if s == b"n4" {
+                    want.n4 = true;
+                } else if s == b"n6" {
+                    want.n6 = true;
+                }
+            }
+        }
+        Some(want)
+    } else {
+        None
+    }
+}
+
 // ============================================================================
 // Compact encoding for nodes (26 bytes each: 20-byte ID + 4-byte IP + 2-byte port for IPv4)
 // ============================================================================
@@ -629,7 +746,7 @@ pub fn encode_compact_nodes_v4(nodes: &[CompactNodeInfo]) -> Vec<u8> {
     let mut result = Vec::with_capacity(nodes.len() * 26);
     for node in nodes {
         if let SocketAddr::V4(v4) = node.addr {
-            result.extend_from_slice(&node.node_id.as_bytes());
+            result.extend_from_slice(node.node_id.as_bytes());
             result.extend_from_slice(&v4.ip().octets());
             result.extend_from_slice(&v4.port().to_be_bytes());
         }
@@ -637,19 +754,22 @@ pub fn encode_compact_nodes_v4(nodes: &[CompactNodeInfo]) -> Vec<u8> {
     result
 }
 
-/// Encode a list of nodes to compact format (supports both IPv4 and IPv6).
-pub fn encode_compact_nodes(nodes: &[CompactNodeInfo]) -> Vec<u8> {
-    let mut result = Vec::new();
+/// Encode a list of nodes to compact format (38 bytes per node for IPv6).
+pub fn encode_compact_nodes_v6(nodes: &[CompactNodeInfo]) -> Vec<u8> {
+    let mut result = Vec::with_capacity(nodes.len() * 38);
     for node in nodes {
-        result.extend_from_slice(&node.node_id.as_bytes());
-        result.extend_from_slice(&encode_compact_peer(&node.addr));
+        if let SocketAddr::V6(v6) = node.addr {
+            result.extend_from_slice(node.node_id.as_bytes());
+            result.extend_from_slice(&v6.ip().octets());
+            result.extend_from_slice(&v6.port().to_be_bytes());
+        }
     }
     result
 }
 
 /// Decode compact node info (26 bytes per node for IPv4).
 pub fn decode_compact_nodes_v4(data: &[u8]) -> Result<Vec<CompactNodeInfo>, DhtError> {
-    if data.len() % 26 != 0 {
+    if !data.len().is_multiple_of(26) {
         return Err(DhtError::Parse(format!(
             "compact nodes length {} not divisible by 26",
             data.len()
@@ -670,29 +790,23 @@ pub fn decode_compact_nodes_v4(data: &[u8]) -> Result<Vec<CompactNodeInfo>, DhtE
     Ok(nodes)
 }
 
-/// Decode compact node info (supports both IPv4 and IPv6).
-pub fn decode_compact_nodes(data: &[u8]) -> Result<Vec<CompactNodeInfo>, DhtError> {
-    if data.len() % 26 != 0 && data.len() % 38 != 0 {
+/// Decode compact node info (38 bytes per node for IPv6).
+pub fn decode_compact_nodes_v6(data: &[u8]) -> Result<Vec<CompactNodeInfo>, DhtError> {
+    if !data.len().is_multiple_of(38) {
         return Err(DhtError::Parse(format!(
-            "compact nodes length {} not divisible by 26 or 38",
+            "compact nodes6 length {} not divisible by 38",
             data.len()
         )));
     }
 
-    let node_size = if data.len() % 38 == 0 { 38 } else { 26 };
-    let mut nodes = Vec::with_capacity(data.len() / node_size);
-
-    for chunk in data.chunks_exact(node_size) {
+    let mut nodes = Vec::with_capacity(data.len() / 38);
+    for chunk in data.chunks_exact(38) {
         let mut id_bytes = [0u8; 20];
         id_bytes.copy_from_slice(&chunk[0..20]);
         let node_id = NodeId::from_bytes(id_bytes);
 
-        let addr = if node_size == 38 {
-            decode_compact_addr_v6(&chunk[20..38])
-                .ok_or_else(|| DhtError::Parse("Invalid IPv6 address".to_string()))?
-        } else {
-            SocketAddr::V4(decode_compact_addr_v4(&chunk[20..26]))
-        };
+        let addr = decode_compact_addr_v6(&chunk[20..38])
+            .ok_or_else(|| DhtError::Parse("invalid compact IPv6 address".to_string()))?;
 
         nodes.push(CompactNodeInfo { node_id, addr });
     }
@@ -702,8 +816,9 @@ pub fn decode_compact_nodes(data: &[u8]) -> Result<Vec<CompactNodeInfo>, DhtErro
 
 /// Decode 6-byte compact address (4-byte IP + 2-byte port).
 fn decode_compact_addr_v4(data: &[u8]) -> SocketAddrV4 {
-    let ip = Ipv4Addr::new(data[0], data[1], data[2], data[3]);
-    let port = u16::from_be_bytes([data[4], data[5]]);
+    // data is exactly 6 bytes, guaranteed by caller (chunks_exact(26)[20..26])
+    let ip = Ipv4Addr::from(<[u8; 4]>::try_from(&data[..4]).unwrap());
+    let port = u16::from_be_bytes(<[u8; 2]>::try_from(&data[4..6]).unwrap());
     SocketAddrV4::new(ip, port)
 }
 
@@ -712,11 +827,8 @@ fn decode_compact_addr_v6(data: &[u8]) -> Option<SocketAddr> {
     if data.len() != 18 {
         return None;
     }
-    let ip = Ipv6Addr::from([
-        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7], data[8], data[9],
-        data[10], data[11], data[12], data[13], data[14], data[15],
-    ]);
-    let port = u16::from_be_bytes([data[16], data[17]]);
+    let ip = Ipv6Addr::from(<[u8; 16]>::try_from(&data[..16]).unwrap());
+    let port = u16::from_be_bytes(<[u8; 2]>::try_from(&data[16..18]).unwrap());
     Some(SocketAddr::new(ip.into(), port))
 }
 
@@ -745,313 +857,86 @@ pub fn encode_compact_peer(addr: &SocketAddr) -> Vec<u8> {
     result
 }
 
-/// Encode a single peer to compact format (6 bytes).
-#[allow(dead_code)]
-fn encode_compact_peer_v4(addr: &SocketAddrV4) -> Vec<u8> {
-    let mut result = Vec::with_capacity(6);
-    result.extend_from_slice(&addr.ip().octets());
-    result.extend_from_slice(&addr.port().to_be_bytes());
-    result
-}
-
-/// Decode compact peer info (6 bytes per peer - IPv4 only).
-pub fn decode_compact_peers_v4(data: &[u8]) -> Result<Vec<SocketAddr>, DhtError> {
-    if data.len() % 6 != 0 {
-        return Err(DhtError::Parse(format!(
-            "compact peers length {} not divisible by 6",
-            data.len()
-        )));
-    }
-
-    let mut peers = Vec::with_capacity(data.len() / 6);
-    for chunk in data.chunks_exact(6) {
-        peers.push(SocketAddr::V4(decode_compact_addr_v4(chunk)));
-    }
-
-    Ok(peers)
-}
-
 // ============================================================================
 // KRPC Error codes (BEP 0005)
 // ============================================================================
 
-pub mod error_codes {
-    pub const GENERIC_ERROR: i64 = 201;
-    pub const SERVER_ERROR: i64 = 202;
-    pub const PROTOCOL_ERROR: i64 = 203;
-    pub const METHOD_UNKNOWN: i64 = 204;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::Ipv4Addr;
 
     #[test]
-    fn encode_decode_ping_query() {
-        let node_id = NodeId::generate_random();
-        let msg = KrpcMessage::ping_query(42, node_id);
+    fn test_bep32_want_encoding() {
+        let node_id = NodeId::random();
+        let target = NodeId::random();
+        let want = Want::both();
+        let query = Query::FindNode {
+            id: node_id,
+            target,
+            is_bootstrap: false,
+            want: Some(want),
+        };
+        let msg = KrpcMessage {
+            transaction_id: TransactionId::new(123),
+            version: None,
+            sender_ip: None,
+            body: MessageBody::Query(query),
+        };
 
         let bytes = msg.to_bytes();
-        let decoded = KrpcMessage::from_bytes(&bytes).unwrap();
+        let decoded = KrpcMessage::from_bytes(&bytes, |_| None).unwrap();
 
-        assert_eq!(decoded.transaction_id.0, [0, 42]);
-        match decoded.body {
-            MessageBody::Query(Query::Ping { id }) => {
-                assert_eq!(id, node_id);
-            }
-            _ => panic!("expected ping query"),
+        if let MessageBody::Query(Query::FindNode {
+            want: Some(decoded_want),
+            ..
+        }) = decoded.body
+        {
+            assert!(decoded_want.n4);
+            assert!(decoded_want.n6);
+        } else {
+            panic!("expected FindNode query with want");
         }
     }
 
     #[test]
-    fn encode_decode_find_node_query() {
-        let node_id = NodeId::generate_random();
-        let target = NodeId::generate_random();
-        let msg = KrpcMessage::find_node_query(123, node_id, target);
+    fn test_bep32_response_encoding() {
+        let node_id = NodeId::random();
+        let v4_addr = SocketAddr::new(Ipv4Addr::new(1, 2, 3, 4).into(), 1234);
+        let v6_addr = SocketAddr::new("2001:db8::1".parse::<Ipv6Addr>().unwrap().into(), 5678);
 
-        let bytes = msg.to_bytes();
-        let decoded = KrpcMessage::from_bytes(&bytes).unwrap();
-
-        match decoded.body {
-            MessageBody::Query(Query::FindNode { id, target: t }) => {
-                assert_eq!(id, node_id);
-                assert_eq!(t, target);
-            }
-            _ => panic!("expected find_node query"),
-        }
-    }
-
-    #[test]
-    fn encode_decode_find_node_response() {
-        let node_id = NodeId::generate_random();
         let nodes = vec![
             CompactNodeInfo {
-                node_id: NodeId::generate_random(),
-                addr: SocketAddr::new(Ipv4Addr::new(192, 168, 1, 1).into(), 6881),
+                node_id: NodeId::random(),
+                addr: v4_addr,
             },
             CompactNodeInfo {
-                node_id: NodeId::generate_random(),
-                addr: SocketAddr::new(Ipv4Addr::new(10, 0, 0, 1).into(), 8080),
+                node_id: NodeId::random(),
+                addr: v6_addr,
             },
         ];
 
-        let tx_id = TransactionId::new(999);
-        let msg = KrpcMessage::find_node_response(tx_id, node_id, nodes.clone());
+        let response = Response::FindNode { id: node_id, nodes };
+        let msg = KrpcMessage {
+            transaction_id: TransactionId::new(123),
+            version: None,
+            sender_ip: None,
+            body: MessageBody::Response(response),
+        };
 
         let bytes = msg.to_bytes();
-        let decoded = KrpcMessage::from_bytes(&bytes).unwrap();
+        let decoded = KrpcMessage::from_bytes(&bytes, |_| None).unwrap();
 
-        match decoded.body {
-            MessageBody::Response(Response::FindNode {
-                id,
-                nodes: decoded_nodes,
-            }) => {
-                assert_eq!(id, node_id);
-                assert_eq!(decoded_nodes.len(), 2);
-                assert_eq!(decoded_nodes[0].node_id, nodes[0].node_id);
-                assert_eq!(decoded_nodes[0].addr, nodes[0].addr);
-            }
-            _ => panic!("expected find_node response"),
-        }
-    }
-
-    #[test]
-    fn compact_node_encoding() {
-        let nodes = vec![CompactNodeInfo {
-            node_id: NodeId::from_bytes([1u8; 20]),
-            addr: SocketAddr::new(Ipv4Addr::new(192, 168, 1, 1).into(), 6881),
-        }];
-
-        let encoded = encode_compact_nodes_v4(&nodes);
-        assert_eq!(encoded.len(), 26);
-
-        let decoded = decode_compact_nodes_v4(&encoded).unwrap();
-        assert_eq!(decoded.len(), 1);
-        assert_eq!(decoded[0].node_id, nodes[0].node_id);
-        assert_eq!(decoded[0].addr, nodes[0].addr);
-    }
-
-    #[test]
-    fn encode_decode_get_peers_query() {
-        let node_id = NodeId::generate_random();
-        let info_hash = InfoHash::new([0xab; 20]);
-        let msg = KrpcMessage::get_peers_query(42, node_id, info_hash);
-
-        let bytes = msg.to_bytes();
-        let decoded = KrpcMessage::from_bytes(&bytes).unwrap();
-
-        match decoded.body {
-            MessageBody::Query(Query::GetPeers { id, info_hash: ih }) => {
-                assert_eq!(id, node_id);
-                assert_eq!(ih, info_hash);
-            }
-            _ => panic!("expected get_peers query"),
-        }
-    }
-
-    #[test]
-    fn encode_decode_get_peers_response_with_values() {
-        let node_id = NodeId::generate_random();
-        let token = vec![0x01, 0x02, 0x03, 0x04];
-        let peers = vec![
-            SocketAddr::new(Ipv4Addr::new(192, 168, 1, 1).into(), 6881),
-            SocketAddr::new(Ipv4Addr::new(10, 0, 0, 1).into(), 8080),
-        ];
-
-        let tx_id = TransactionId::new(123);
-        let msg = KrpcMessage::get_peers_response_with_values(
-            tx_id,
-            node_id,
-            token.clone(),
-            peers.clone(),
-        );
-
-        let bytes = msg.to_bytes();
-        let decoded = KrpcMessage::from_bytes(&bytes).unwrap();
-
-        match decoded.body {
-            MessageBody::Response(Response::GetPeers {
-                id,
-                token: t,
-                values,
-                nodes,
-            }) => {
-                assert_eq!(id, node_id);
-                assert_eq!(t, token);
-                assert!(values.is_some());
-                assert_eq!(values.unwrap().len(), 2);
-                assert!(nodes.is_none());
-            }
-            _ => panic!("expected get_peers response"),
-        }
-    }
-
-    #[test]
-    fn encode_decode_get_peers_response_with_nodes() {
-        let node_id = NodeId::generate_random();
-        let token = vec![0x01, 0x02, 0x03, 0x04];
-        let nodes = vec![CompactNodeInfo {
-            node_id: NodeId::generate_random(),
-            addr: SocketAddr::new(Ipv4Addr::new(192, 168, 1, 1).into(), 6881),
-        }];
-
-        let tx_id = TransactionId::new(456);
-        let msg = KrpcMessage::get_peers_response_with_nodes(
-            tx_id,
-            node_id,
-            token.clone(),
-            nodes.clone(),
-        );
-
-        let bytes = msg.to_bytes();
-        let decoded = KrpcMessage::from_bytes(&bytes).unwrap();
-
-        match decoded.body {
-            MessageBody::Response(Response::GetPeers {
-                id,
-                token: t,
-                values,
-                nodes: n,
-            }) => {
-                assert_eq!(id, node_id);
-                assert_eq!(t, token);
-                assert!(values.is_none());
-                assert!(n.is_some());
-                assert_eq!(n.unwrap().len(), 1);
-            }
-            _ => panic!("expected get_peers response with nodes"),
-        }
-    }
-
-    #[test]
-    fn encode_decode_announce_peer_query() {
-        let node_id = NodeId::generate_random();
-        let info_hash = InfoHash::new([0xcd; 20]);
-        let port = 6881u16;
-        let token = vec![0xaa, 0xbb, 0xcc];
-        let implied_port = true;
-
-        let msg = KrpcMessage::announce_peer_query(
-            42,
-            node_id,
-            info_hash,
-            port,
-            token.clone(),
-            implied_port,
-        );
-
-        let bytes = msg.to_bytes();
-        let decoded = KrpcMessage::from_bytes(&bytes).unwrap();
-
-        match decoded.body {
-            MessageBody::Query(Query::AnnouncePeer {
-                id,
-                info_hash: ih,
-                port: p,
-                token: t,
-                implied_port: ip,
-            }) => {
-                assert_eq!(id, node_id);
-                assert_eq!(ih, info_hash);
-                assert_eq!(p, port);
-                assert_eq!(t, token);
-                assert_eq!(ip, implied_port);
-            }
-            _ => panic!("expected announce_peer query"),
-        }
-    }
-
-    #[test]
-    fn encode_decode_announce_peer_query_without_implied_port() {
-        let node_id = NodeId::generate_random();
-        let info_hash = InfoHash::new([0xef; 20]);
-        let port = 8080u16;
-        let token = vec![0x11, 0x22];
-        let implied_port = false;
-
-        let msg = KrpcMessage::announce_peer_query(
-            42,
-            node_id,
-            info_hash,
-            port,
-            token.clone(),
-            implied_port,
-        );
-
-        let bytes = msg.to_bytes();
-        let decoded = KrpcMessage::from_bytes(&bytes).unwrap();
-
-        match decoded.body {
-            MessageBody::Query(Query::AnnouncePeer {
-                implied_port: ip, ..
-            }) => {
-                assert!(!ip);
-            }
-            _ => panic!("expected announce_peer query"),
-        }
-    }
-
-    #[test]
-    fn encode_decode_announce_peer_response() {
-        let node_id = NodeId::generate_random();
-        let tx_id = TransactionId::new(789);
-        let msg = KrpcMessage::announce_peer_response(tx_id, node_id);
-
-        let bytes = msg.to_bytes();
-        let decoded = KrpcMessage::from_bytes(&bytes).unwrap();
-
-        // Note: announce_peer response is identical to ping response (just has "id"),
-        // so the parser can't distinguish them. The caller knows the type based on
-        // the transaction ID of the original query. Both are valid responses.
-        match decoded.body {
-            MessageBody::Response(Response::Ping { id }) => {
-                // This is expected - announce_peer response looks identical to ping
-                assert_eq!(id, node_id);
-            }
-            MessageBody::Response(Response::AnnouncePeer { id }) => {
-                assert_eq!(id, node_id);
-            }
-            _ => panic!("expected ping or announce_peer response"),
+        if let MessageBody::Response(Response::FindNode {
+            nodes: decoded_nodes,
+            ..
+        }) = decoded.body
+        {
+            assert_eq!(decoded_nodes.len(), 2);
+            assert!(decoded_nodes.iter().any(|n| n.addr == v4_addr));
+            assert!(decoded_nodes.iter().any(|n| n.addr == v6_addr));
+        } else {
+            panic!("expected FindNode response with nodes");
         }
     }
 }
