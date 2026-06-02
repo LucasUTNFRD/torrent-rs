@@ -25,4 +25,7 @@ pub enum DhtError {
 
     #[error("operation timed out")]
     Timeout,
+
+    #[error("KRPC error {code}: {message}")]
+    KrpcError { code: i64, message: String },
 }

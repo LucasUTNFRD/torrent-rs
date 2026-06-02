@@ -183,18 +183,7 @@ impl KrpcMessage {
                         if *is_bootstrap {
                             args.insert(b"bs".to_vec(), Bencode::Int(1));
                         }
-                        if let Some(want) = want {
-                            let mut want_list = Vec::new();
-                            if want.n4 {
-                                want_list.push(Bencode::Bytes(b"n4".to_vec()));
-                            }
-                            if want.n6 {
-                                want_list.push(Bencode::Bytes(b"n6".to_vec()));
-                            }
-                            if !want_list.is_empty() {
-                                args.insert(b"want".to_vec(), Bencode::List(want_list));
-                            }
-                        }
+                        encode_want(&mut args, want);
                         dict.insert(b"a".to_vec(), args.build());
                     }
                     Query::GetPeers {
@@ -210,18 +199,7 @@ impl KrpcMessage {
                         if *is_bootstrap {
                             args.insert(b"bs".to_vec(), Bencode::Int(1));
                         }
-                        if let Some(want) = want {
-                            let mut want_list = Vec::new();
-                            if want.n4 {
-                                want_list.push(Bencode::Bytes(b"n4".to_vec()));
-                            }
-                            if want.n6 {
-                                want_list.push(Bencode::Bytes(b"n6".to_vec()));
-                            }
-                            if !want_list.is_empty() {
-                                args.insert(b"want".to_vec(), Bencode::List(want_list));
-                            }
-                        }
+                        encode_want(&mut args, want);
                         dict.insert(b"a".to_vec(), args.build());
                     }
                     Query::AnnouncePeer {
@@ -253,17 +231,7 @@ impl KrpcMessage {
                     }
                     Response::FindNode { id, nodes } => {
                         r.put("id", &id.as_slice());
-                        let v4_nodes: Vec<_> =
-                            nodes.iter().filter(|n| n.addr.is_ipv4()).cloned().collect();
-                        let v6_nodes: Vec<_> =
-                            nodes.iter().filter(|n| n.addr.is_ipv6()).cloned().collect();
-
-                        if !v4_nodes.is_empty() {
-                            r.put("nodes", &encode_compact_nodes_v4(&v4_nodes).as_slice());
-                        }
-                        if !v6_nodes.is_empty() {
-                            r.put("nodes6", &encode_compact_nodes_v6(&v6_nodes).as_slice());
-                        }
+                        encode_nodes(&mut r, nodes);
                     }
                     Response::GetPeers {
                         id,
@@ -282,17 +250,7 @@ impl KrpcMessage {
                             r.insert(b"values".to_vec(), Bencode::List(values_list));
                         }
                         if let Some(nodes) = nodes {
-                            let v4_nodes: Vec<_> =
-                                nodes.iter().filter(|n| n.addr.is_ipv4()).cloned().collect();
-                            let v6_nodes: Vec<_> =
-                                nodes.iter().filter(|n| n.addr.is_ipv6()).cloned().collect();
-
-                            if !v4_nodes.is_empty() {
-                                r.put("nodes", &encode_compact_nodes_v4(&v4_nodes).as_slice());
-                            }
-                            if !v6_nodes.is_empty() {
-                                r.put("nodes6", &encode_compact_nodes_v6(&v6_nodes).as_slice());
-                            }
+                            encode_nodes(&mut r, nodes);
                         }
                     }
                     Response::AnnouncePeer { id } => {
@@ -315,7 +273,10 @@ impl KrpcMessage {
     }
 
     /// Decode a KRPC message from bencoded bytes.
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, DhtError> {
+    pub fn from_bytes(
+        bytes: &[u8],
+        get_query_type: impl FnOnce(u16) -> Option<&'static str>,
+    ) -> Result<Self, DhtError> {
         let bencode = Bencode::decode(bytes)?;
         let Bencode::Dict(dict) = bencode else {
             return Err(DhtError::Parse("expected dictionary".to_string()));
@@ -354,7 +315,7 @@ impl KrpcMessage {
 
         let body = match msg_type {
             "q" => parse_query(&dict)?,
-            "r" => parse_response(&dict)?,
+            "r" => parse_response(&dict, get_query_type(transaction_id.as_u16()))?,
             "e" => parse_error(&dict)?,
             _ => return Err(DhtError::Parse(format!("unknown message type: {msg_type}"))),
         };
@@ -559,17 +520,7 @@ fn parse_query(dict: &BTreeMap<Vec<u8>, Bencode>) -> Result<MessageBody, DhtErro
             }))
         }
         "get_peers" => {
-            let info_hash_bytes = args
-                .get_bytes(b"info_hash")
-                .ok_or_else(|| DhtError::Parse("missing info_hash".to_string()))?;
-            if info_hash_bytes.len() != 20 {
-                return Err(DhtError::Parse(format!(
-                    "invalid info_hash length: expected 20, got {}",
-                    info_hash_bytes.len()
-                )));
-            }
-            let info_hash = InfoHash::from_slice(info_hash_bytes)
-                .ok_or_else(|| DhtError::Parse("invalid info_hash".to_string()))?;
+            let info_hash = parse_info_hash(args, b"info_hash")?;
             let want = parse_want(args);
             Ok(MessageBody::Query(Query::GetPeers {
                 id,
@@ -579,17 +530,7 @@ fn parse_query(dict: &BTreeMap<Vec<u8>, Bencode>) -> Result<MessageBody, DhtErro
             }))
         }
         "announce_peer" => {
-            let info_hash_bytes = args
-                .get_bytes(b"info_hash")
-                .ok_or_else(|| DhtError::Parse("missing info_hash".to_string()))?;
-            if info_hash_bytes.len() != 20 {
-                return Err(DhtError::Parse(format!(
-                    "invalid info_hash length: expected 20, got {}",
-                    info_hash_bytes.len()
-                )));
-            }
-            let info_hash = InfoHash::from_slice(info_hash_bytes)
-                .ok_or_else(|| DhtError::Parse("invalid info_hash".to_string()))?;
+            let info_hash = parse_info_hash(args, b"info_hash")?;
 
             let port = args
                 .get_i64(b"port")
@@ -619,7 +560,10 @@ fn parse_query(dict: &BTreeMap<Vec<u8>, Bencode>) -> Result<MessageBody, DhtErro
     }
 }
 
-fn parse_response(dict: &BTreeMap<Vec<u8>, Bencode>) -> Result<MessageBody, DhtError> {
+fn parse_response(
+    dict: &BTreeMap<Vec<u8>, Bencode>,
+    expected: Option<&'static str>,
+) -> Result<MessageBody, DhtError> {
     let r = dict
         .get_dict(b"r")
         .ok_or_else(|| DhtError::Parse("missing response body".to_string()))?;
@@ -672,8 +616,17 @@ fn parse_response(dict: &BTreeMap<Vec<u8>, Bencode>) -> Result<MessageBody, DhtE
         return Ok(MessageBody::Response(Response::FindNode { id, nodes }));
     }
 
-    // Default: Ping response
-    Ok(MessageBody::Response(Response::Ping { id }))
+    // Disambiguate using the expected query type
+    let res = match expected {
+        Some("announce_peer") => Response::AnnouncePeer { id },
+        Some("ping") | None => Response::Ping { id },
+        Some(q) => {
+            tracing::debug!("Received response for {} without required fields, interpreting as Ping", q);
+            Response::Ping { id }
+        }
+    };
+
+    Ok(MessageBody::Response(res))
 }
 
 fn parse_error(dict: &BTreeMap<Vec<u8>, Bencode>) -> Result<MessageBody, DhtError> {
@@ -719,6 +672,48 @@ fn parse_node_id(dict: &BTreeMap<Vec<u8>, Bencode>, key: &[u8]) -> Result<NodeId
     let mut id = [0u8; 20];
     id.copy_from_slice(bytes);
     Ok(NodeId::from_bytes(id))
+}
+
+fn parse_info_hash(dict: &BTreeMap<Vec<u8>, Bencode>, key: &[u8]) -> Result<InfoHash, DhtError> {
+    let bytes = dict
+        .get_bytes(key)
+        .ok_or_else(|| DhtError::Parse(format!("missing key: {}", String::from_utf8_lossy(key))))?;
+
+    if bytes.len() != 20 {
+        return Err(DhtError::Parse(format!(
+            "invalid info hash length: expected 20, got {}",
+            bytes.len()
+        )));
+    }
+
+    InfoHash::from_slice(bytes).ok_or_else(|| DhtError::Parse("invalid info hash".to_string()))
+}
+
+fn encode_want(args: &mut BTreeMap<Vec<u8>, Bencode>, want: &Option<Want>) {
+    if let Some(want) = want {
+        let mut want_list = Vec::new();
+        if want.n4 {
+            want_list.push(Bencode::Bytes(b"n4".to_vec()));
+        }
+        if want.n6 {
+            want_list.push(Bencode::Bytes(b"n6".to_vec()));
+        }
+        if !want_list.is_empty() {
+            args.insert(b"want".to_vec(), Bencode::List(want_list));
+        }
+    }
+}
+
+fn encode_nodes(r: &mut BTreeMap<Vec<u8>, Bencode>, nodes: &[CompactNodeInfo]) {
+    let v4_nodes: Vec<_> = nodes.iter().filter(|n| n.addr.is_ipv4()).cloned().collect();
+    let v6_nodes: Vec<_> = nodes.iter().filter(|n| n.addr.is_ipv6()).cloned().collect();
+
+    if !v4_nodes.is_empty() {
+        r.put("nodes", &encode_compact_nodes_v4(&v4_nodes).as_slice());
+    }
+    if !v6_nodes.is_empty() {
+        r.put("nodes6", &encode_compact_nodes_v6(&v6_nodes).as_slice());
+    }
 }
 
 fn parse_want(args: &BTreeMap<Vec<u8>, Bencode>) -> Option<Want> {
@@ -890,7 +885,7 @@ mod tests {
         };
 
         let bytes = msg.to_bytes();
-        let decoded = KrpcMessage::from_bytes(&bytes).unwrap();
+        let decoded = KrpcMessage::from_bytes(&bytes, |_| None).unwrap();
 
         if let MessageBody::Query(Query::FindNode {
             want: Some(decoded_want),
@@ -930,7 +925,7 @@ mod tests {
         };
 
         let bytes = msg.to_bytes();
-        let decoded = KrpcMessage::from_bytes(&bytes).unwrap();
+        let decoded = KrpcMessage::from_bytes(&bytes, |_| None).unwrap();
 
         if let MessageBody::Response(Response::FindNode {
             nodes: decoded_nodes,

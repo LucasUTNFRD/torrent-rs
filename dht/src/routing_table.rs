@@ -75,8 +75,8 @@ impl NodeEntry {
     /// A node is considered "Good" if it has responded to a query or sent a query
     /// to us in the last 15 minutes.
     pub fn is_good(&self) -> bool {
-        self.last_seen.is_some_and(|seen| {
-            seen.elapsed() < Duration::from_secs(15 * 60) && self.fail_count() == 0
+        self.confirmed() && self.last_seen.is_some_and(|seen| {
+            seen.elapsed() < Duration::from_secs(15 * 60)
         })
     }
 
@@ -162,7 +162,7 @@ impl RoutingTable {
         self.local_id.distance_exp(id)
     }
 
-    pub fn add_node(&mut self, node_id: NodeId, addr: SocketAddr) -> AddNodeResult {
+    pub fn add_node(&mut self, node_id: NodeId, addr: SocketAddr, is_response: bool) -> AddNodeResult {
         let index = self.find_bucket_index(&node_id);
         if index == 0 {
             return AddNodeResult::Ignored;
@@ -173,39 +173,71 @@ impl RoutingTable {
         // 1. If node already exists, update address and reset fail count
         if let Some(entry) = bucket.nodes.iter_mut().find(|n| n.node_id == node_id) {
             entry.addr = addr;
-            entry.reset_fail_count();
-            entry.last_seen = Some(Instant::now());
+            if is_response {
+                entry.set_pinged();
+            } else {
+                entry.last_seen = Some(Instant::now());
+            }
             bucket.last_changed = Instant::now();
+
+            // If the bucket is full and we have pending candidates, see if there's another questionable node to ping
+            if bucket.nodes.len() == K && !bucket.replacement_candidates.is_empty() {
+                let oldest_questionable = bucket
+                    .nodes
+                    .iter()
+                    .filter(|n| n.is_questionable())
+                    .min_by_key(|n| n.last_seen.unwrap_or_else(Instant::now));
+
+                if let Some(questionable) = oldest_questionable {
+                    return AddNodeResult::PingQuestionable {
+                        questionable_node: questionable.clone(),
+                    };
+                }
+            }
+
             return AddNodeResult::Added;
         }
 
-        // 2. If bucket has room, insert node
+        let initial_status = if is_response {
+            ContactStatus::Confirmed { consecutive_failures: 0 }
+        } else {
+            ContactStatus::Fresh
+        };
+
         if bucket.nodes.len() < K {
             bucket.nodes.push(NodeEntry {
                 node_id,
                 addr,
-                status: ContactStatus::Confirmed {
-                    consecutive_failures: 0,
-                },
+                status: initial_status.clone(),
                 last_seen: Some(Instant::now()),
             });
             bucket.last_changed = Instant::now();
             return AddNodeResult::Added;
         }
 
-        // 3. Bucket is full. Check if any existing node is Bad
         if let Some(bad_pos) = bucket.nodes.iter().position(NodeEntry::is_bad) {
             bucket.nodes.remove(bad_pos);
             bucket.nodes.push(NodeEntry {
                 node_id,
                 addr,
-                status: ContactStatus::Confirmed {
-                    consecutive_failures: 0,
-                },
+                status: initial_status.clone(),
                 last_seen: Some(Instant::now()),
             });
             bucket.last_changed = Instant::now();
             return AddNodeResult::Added;
+        }
+
+        // 4. If all existing nodes are Good, add to replacement cache
+        if bucket.nodes.iter().all(NodeEntry::is_good) {
+            if !bucket.replacement_candidates.iter().any(|n| n.node_id == node_id) {
+                bucket.replacement_candidates.push(NodeEntry {
+                    node_id,
+                    addr,
+                    status: initial_status,
+                    last_seen: Some(Instant::now()),
+                });
+            }
+            return AddNodeResult::Cached;
         }
 
         // 4. Check if any existing node is Questionable. Find the oldest questionable node to ping.
@@ -301,7 +333,7 @@ impl RoutingTable {
         let mut all_nodes: Vec<NodeEntry> = self
             .buckets
             .iter()
-            .flat_map(|b| b.nodes.iter().cloned())
+            .flat_map(|b| b.nodes.iter().filter(|n| !n.is_bad()).cloned())
             .collect();
 
         all_nodes.sort_by(|a, b| {
@@ -381,7 +413,7 @@ mod tests {
         for _ in 0..K {
             let id = table.random_id_in_bucket(150);
             bucket_nodes.push(id);
-            let res = table.add_node(id, addr);
+            let res = table.add_node(id, addr, true);
             assert!(matches!(res, AddNodeResult::Added));
         }
 
@@ -390,7 +422,7 @@ mod tests {
 
         // 2. Add K+1-th node, which should be cached since all existing are good/confirmed
         let extra_id = table.random_id_in_bucket(150);
-        let res = table.add_node(extra_id, addr);
+        let res = table.add_node(extra_id, addr, true);
         assert!(matches!(res, AddNodeResult::Cached));
         assert_eq!(table.buckets[150].nodes.len(), K);
         assert_eq!(table.buckets[150].replacement_candidates.len(), 1);
@@ -443,7 +475,7 @@ mod tests {
         for _ in 0..K {
             let id = table.random_id_in_bucket(150);
             bucket_nodes.push(id);
-            table.add_node(id, addr);
+            table.add_node(id, addr, true);
         }
 
         // 2. Make one node Questionable by setting its last_seen to > 15 minutes ago
@@ -458,7 +490,7 @@ mod tests {
 
         // 3. Adding a new node should now trigger a PingQuestionable result for that node
         let new_id = table.random_id_in_bucket(150);
-        let res = table.add_node(new_id, addr);
+        let res = table.add_node(new_id, addr, true);
 
         if let AddNodeResult::PingQuestionable { questionable_node } = res {
             assert_eq!(questionable_node.node_id, questionable_id);

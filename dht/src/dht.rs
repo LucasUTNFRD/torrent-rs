@@ -31,7 +31,6 @@ use tokio::{
 const DEFAULT_PORT: u16 = 6881;
 const MAX_PAYLOAD: usize = 2048;
 
-const ALPHA: usize = 5;
 
 /// Well-known bootstrap nodes for the public BitTorrent DHT.
 /// Used as a last resort when no cached nodes are available.
@@ -353,9 +352,10 @@ const REFRESH_TABLE_INTERVAL: Duration = Duration::from_secs(15 * 60);
 const PING_TABLE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 struct PendingQuery {
-    reply: oneshot::Sender<Response>,
+    reply: oneshot::Sender<Result<Response, DhtError>>,
     node_id: Option<NodeId>,
     addr: SocketAddr,
+    query_type: &'static str,
 }
 
 struct DhtNode {
@@ -392,7 +392,7 @@ impl DhtNode {
             next_tid: 0,
             tx,
             peer_storage,
-            token_manager: TokenManager::new(Duration::from_secs(15 * 60)),
+            token_manager: TokenManager::new(Duration::from_secs(5 * 60)),
         }
     }
 
@@ -559,7 +559,7 @@ impl DhtNode {
     async fn handle_command(&mut self, cmd: DhtNodeCommand) {
         match cmd {
             DhtNodeCommand::AddNode { id, addr } => {
-                let result = self.routing_table.write().unwrap().add_node(id, addr);
+                let result = self.routing_table.write().unwrap().add_node(id, addr, true);
                 if let crate::routing_table::AddNodeResult::PingQuestionable { questionable_node } =
                     result
                 {
@@ -617,6 +617,13 @@ impl DhtNode {
 
                 tracing::debug!(family = ?self.family, ?addr, ?query, tid, "Sending query");
 
+                let query_type = match &query {
+                    Query::Ping { .. } => "ping",
+                    Query::FindNode { .. } => "find_node",
+                    Query::GetPeers { .. } => "get_peers",
+                    Query::AnnouncePeer { .. } => "announce_peer",
+                };
+
                 let msg = KrpcMessage {
                     transaction_id: TransactionId::new(tid),
                     version: None,
@@ -631,6 +638,7 @@ impl DhtNode {
                         reply: tx,
                         node_id,
                         addr,
+                        query_type,
                     },
                 );
 
@@ -645,8 +653,11 @@ impl DhtNode {
                     // Timeout for queries
                     let res = tokio::time::timeout(Duration::from_secs(5), rx).await;
                     match res {
-                        Ok(Ok(resp)) => {
+                        Ok(Ok(Ok(resp))) => {
                             let _ = reply.send(Ok(resp));
+                        }
+                        Ok(Ok(Err(e))) => {
+                            let _ = reply.send(Err(e));
                         }
                         Ok(Err(_)) => {
                             // Channel closed
@@ -677,23 +688,77 @@ impl DhtNode {
     }
 
     async fn handle_packet(&mut self, addr: SocketAddr, bytes: Vec<u8>) {
-        if let Ok(msg) = KrpcMessage::from_bytes(&bytes) {
-            let node_id = msg.get_node_id();
-            match msg.body {
-                MessageBody::Query(query) => {
-                    self.handle_query(addr, msg.transaction_id, query).await;
-                }
-                MessageBody::Response(response) => {
-                    let tid = msg.transaction_id.as_u16();
-                    if let Some(pending) = self.pending_queries.remove(&tid) {
-                        if let Some(id) = node_id {
-                            self.routing_table.write().unwrap().add_node(id, addr);
+        let get_query_type = |tid: u16| {
+            self.pending_queries.get(&tid).map(|p| p.query_type)
+        };
+
+        match KrpcMessage::from_bytes(&bytes, get_query_type) {
+            Ok(msg) => {
+                let node_id = msg.get_node_id();
+                match msg.body {
+                    MessageBody::Query(query) => {
+                        self.handle_query(addr, msg.transaction_id, query).await;
+                    }
+                    MessageBody::Response(response) => {
+                        let tid = msg.transaction_id.as_u16();
+                        if let Some(pending) = self.pending_queries.remove(&tid) {
+                            if let Some(id) = node_id {
+                                let result = self.routing_table.write().unwrap().add_node(id, addr, true);
+                                if let crate::routing_table::AddNodeResult::PingQuestionable { questionable_node } = result {
+                                    let tx = self.tx.clone();
+                                    let our_node_id = self.node_id;
+                                    tokio::spawn(async move {
+                                        let (reply_tx, _) = oneshot::channel();
+                                        let _ = tx.send(DhtNodeCommand::QueryNode {
+                                            addr: questionable_node.addr,
+                                            node_id: Some(questionable_node.node_id),
+                                            query: Query::Ping { id: our_node_id },
+                                            reply: reply_tx,
+                                        }).await;
+                                    });
+                                }
+                            }
+                            let _ = pending.reply.send(Ok(response));
                         }
-                        let _ = pending.reply.send(response);
+                    }
+                    MessageBody::Error { code, ref message } => {
+                        tracing::warn!(family = ?self.family, ?addr, code, message, "Received KRPC error");
+                        let tid = msg.transaction_id.as_u16();
+                        if let Some(pending) = self.pending_queries.remove(&tid) {
+                            let _ = pending.reply.send(Err(DhtError::KrpcError { code, message: message.clone() }));
+                        }
                     }
                 }
-                MessageBody::Error { code, ref message } => {
-                    tracing::warn!(family = ?self.family, ?addr, code, message, "Received KRPC error");
+            }
+            Err(e) => {
+                tracing::debug!(?addr, error = ?e, "Failed to parse KRPC packet");
+
+                // BEP 5: Respond with error code 204 (Method Unknown) or 203 (Protocol Error)
+                if let Ok(Bencode::Dict(dict)) = Bencode::decode(&bytes) {
+                    if let Some(t_bytes) = dict.get_bytes(b"t") {
+                        if t_bytes.len() == 2 {
+                            let mut tid = [0u8; 2];
+                            tid.copy_from_slice(t_bytes);
+                            let tid = TransactionId(tid);
+
+                            let mut code = 203;
+                            let mut msg = "Protocol Error".to_string();
+
+                            if let Some(y) = dict.get_str(b"y") {
+                                if y == "q" {
+                                    if let Some(q) = dict.get_str(b"q") {
+                                        if !["ping", "find_node", "get_peers", "announce_peer"].contains(&q) {
+                                            code = 204;
+                                            msg = "Method Unknown".to_string();
+                                        }
+                                    }
+                                }
+                            }
+
+                            let err_msg = KrpcMessage::error_response(tid, code, msg);
+                            let _ = self.socket.send_to(&err_msg.to_bytes(), addr).await;
+                        }
+                    }
                 }
             }
         }
@@ -708,7 +773,20 @@ impl DhtNode {
             | Query::AnnouncePeer { id, .. } => id,
         };
 
-        self.routing_table.write().unwrap().add_node(id, addr);
+        let result = self.routing_table.write().unwrap().add_node(id, addr, false);
+        if let crate::routing_table::AddNodeResult::PingQuestionable { questionable_node } = result {
+            let tx = self.tx.clone();
+            let our_node_id = self.node_id;
+            tokio::spawn(async move {
+                let (reply_tx, _) = oneshot::channel();
+                let _ = tx.send(DhtNodeCommand::QueryNode {
+                    addr: questionable_node.addr,
+                    node_id: Some(questionable_node.node_id),
+                    query: Query::Ping { id: our_node_id },
+                    reply: reply_tx,
+                }).await;
+            });
+        }
 
         match query {
             Query::Ping { id: _ } => {
@@ -731,6 +809,7 @@ impl DhtNode {
                 is_bootstrap: _,
                 want,
             } => {
+                self.token_manager.check_rotation();
                 let token = self
                     .token_manager
                     .generate_token(&addr.ip(), &info_hash)
@@ -748,10 +827,13 @@ impl DhtNode {
                     })
                     .filter(|p: &Vec<SocketAddr>| !p.is_empty());
 
-                let target = NodeId::from_slice(info_hash.as_bytes()).expect("invalid info_hash");
-                let nodes = self.get_nodes_for_target(&target, want);
-
-                let nodes_opt = if nodes.is_empty() { None } else { Some(nodes) };
+                let nodes_opt = if filtered_peers.is_some() {
+                    None
+                } else {
+                    let target = NodeId::from_slice(info_hash.as_bytes()).expect("invalid info_hash");
+                    let nodes = self.get_nodes_for_target(&target, want);
+                    if nodes.is_empty() { None } else { Some(nodes) }
+                };
 
                 let msg = KrpcMessage::get_peers_response(
                     tid,
@@ -1146,13 +1228,13 @@ fn load_and_populate_cached_nodes(
             if let Some(rt) = rt_v4 {
                 let mut table = rt.write().expect("rt_v4 lock poisoned");
                 for node in v4_nodes {
-                    table.add_node(node.node_id, node.addr);
+                    table.add_node(node.node_id, node.addr, true);
                 }
             }
             if let Some(rt) = rt_v6 {
                 let mut table = rt.write().expect("rt_v6 lock poisoned");
                 for node in v6_nodes {
-                    table.add_node(node.node_id, node.addr);
+                    table.add_node(node.node_id, node.addr, true);
                 }
             }
         })

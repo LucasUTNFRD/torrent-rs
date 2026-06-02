@@ -484,12 +484,7 @@ impl LookupBehavior for GetPeersBehavior {
         candidates: ClosestNodes,
         dht_tx: &mpsc::Sender<DhtNodeCommand>,
     ) -> Vec<SocketAddr> {
-        // If a port was provided and is non-zero, this search is intended
-        // to result in an `announce_peer`. Once the closest nodes are found
-        // via `get_peers`, we transition into an announce phase.
-        if let Some(port) = self.announce_port
-            && port != 0
-        {
+        if let Some(port) = self.announce_port {
             announce_to_closest(&candidates, dht_tx, self.our_node_id, self.target, port).await;
         }
 
@@ -516,7 +511,7 @@ async fn announce_to_closest(
             info_hash: InfoHash::from_slice(target.as_bytes()).expect("NodeId is always 20 bytes"),
             port,
             token,
-            implied_port: true,
+            implied_port: port == 0,
         };
 
         announce_futs.push(async move {
