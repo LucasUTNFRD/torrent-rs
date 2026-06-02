@@ -38,7 +38,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Persist the routing table for faster startup next time.
-    dht.shutdown().await.context("shutdown dht")?;
+    dht.shutdown().context("shutdown dht")?;
 
     Ok(())
 }

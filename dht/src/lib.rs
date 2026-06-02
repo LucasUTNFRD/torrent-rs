@@ -1,5 +1,6 @@
 pub mod dht;
 mod error;
+mod iterative_lookup;
 mod message;
 mod node_id;
 mod peer_store;
